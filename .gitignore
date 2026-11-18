@@ -6,7 +6,9 @@ dist/
 .vite/
 
 # Database files
-data/*.db*
+data/
+apps/server/data/
+*.db*
 
 # Local environment and secrets
 .env

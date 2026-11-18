@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
-import polka from 'polka';
+import { fileURLToPath } from 'node:url';
+import polka, { type Request, type Response, type NextHandler } from 'polka';
 import sirv from 'sirv';
 import type {
   CockpitState,
@@ -269,9 +270,34 @@ export async function bootstrapServer(): Promise<{
   });
 
   // 11. Static SPA Hosting via Sirv for apps/web/dist
-  const webDistPath = path.resolve(process.cwd(), 'apps/web/dist');
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const webDistCandidates = [
+    path.resolve(process.cwd(), 'apps/web/dist'),
+    path.resolve(process.cwd(), '../web/dist'),
+    path.resolve(__dirname, '../../web/dist'),
+    path.resolve(__dirname, '../../../apps/web/dist'),
+  ];
+  const webDistPath = webDistCandidates.find((c) => fs.existsSync(c)) || webDistCandidates[0];
+
   if (fs.existsSync(webDistPath)) {
-    app.use(sirv(webDistPath, { single: true, dev: false }));
+    const serveStatic = sirv(webDistPath, { dev: false });
+    app.use((req: Request, res: Response, next: NextHandler) => {
+      if (req.url && (req.url.startsWith('/api') || req.url.startsWith('/ws'))) {
+        return next();
+      }
+      serveStatic(req, res, () => {
+        if (req.method === 'GET' && !req.url?.startsWith('/api') && !req.url?.startsWith('/ws')) {
+          const indexPath = path.join(webDistPath, 'index.html');
+          if (fs.existsSync(indexPath)) {
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            fs.createReadStream(indexPath).pipe(res);
+            return;
+          }
+        }
+        next();
+      });
+    });
   }
 
   // 12. Bind Exclusively to 127.0.0.1:3400 (Localhost Security Bound)

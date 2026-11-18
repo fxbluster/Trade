@@ -65,14 +65,15 @@ export const validateOrigin: Middleware = (req: Request, res: Response, next: Ne
 
 /**
  * Enforces cryptographic Bearer session token authentication.
- * Exempts GET /api/health and GET /api/auth/session.
+ * Exempts non-API routes (static SPA assets), OPTIONS, GET /api/health, and GET /api/auth/session.
  */
 export const requireSessionToken: Middleware = (req: Request, res: Response, next: NextHandler) => {
   const pathname = req.url ? req.url.split('?')[0] : '';
 
-  // Public exemptions
+  // Public exemptions: static web assets, OPTIONS, and public API endpoints
   if (
     req.method === 'OPTIONS' ||
+    !pathname.startsWith('/api/') ||
     (req.method === 'GET' && (pathname === '/api/health' || pathname === '/api/auth/session'))
   ) {
     return next();

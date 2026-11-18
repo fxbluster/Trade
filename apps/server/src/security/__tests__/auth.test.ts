@@ -166,6 +166,16 @@ describe('Security & Auth Guard Middleware', () => {
         expect(res.statusCode).toBe(200);
       }
     });
+
+    it('exempts non-API static web asset routes from authentication', () => {
+      const staticUrls = ['/', '/index.html', '/assets/index.js', '/favicon.ico'];
+      for (const url of staticUrls) {
+        const { req, res, next } = createMockReqRes({ method: 'GET', url });
+        requireSessionToken(req, res, next);
+        expect(next).toHaveBeenCalled();
+        expect(res.statusCode).toBe(200);
+      }
+    });
   });
 
   describe('256KB Streaming JSON Body Parser', () => {

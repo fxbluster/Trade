@@ -1,6 +1,6 @@
-import { IncomingMessage, ServerResponse } from 'node:http';
-
 declare module 'polka' {
+  import type { IncomingMessage, ServerResponse } from 'node:http';
+
   export interface Request extends IncomingMessage {
     params: Record<string, string>;
     query: Record<string, string | string[]>;
@@ -8,26 +8,31 @@ declare module 'polka' {
     token?: string;
   }
 
-  export type Response = ServerResponse;
+  export type Response = ServerResponse & {
+    statusCode: number;
+  };
+
+  export type NextHandler = (err?: any) => void;
 
   export type Middleware = (
     req: Request,
     res: Response,
-    next: (err?: any) => void
-  ) => void;
+    next: NextHandler
+  ) => void | Promise<void>;
 
-  export interface IError extends Error {
-    status?: number;
-    code?: string;
-  }
+  export type RouteHandler = (
+    req: Request,
+    res: Response,
+    next?: NextHandler
+  ) => void | Promise<void>;
 
   export interface PolkaInstance {
-    use(...handlers: (Middleware | PolkaInstance)[]): this;
-    use(base: string, ...handlers: (Middleware | PolkaInstance)[]): this;
-    get(pattern: string, ...handlers: Middleware[]): this;
-    post(pattern: string, ...handlers: Middleware[]): this;
-    put(pattern: string, ...handlers: Middleware[]): this;
-    delete(pattern: string, ...handlers: Middleware[]): this;
+    use(...handlers: (Middleware | RouteHandler | PolkaInstance)[]): this;
+    use(base: string, ...handlers: (Middleware | RouteHandler | PolkaInstance)[]): this;
+    get(pattern: string, ...handlers: RouteHandler[]): this;
+    post(pattern: string, ...handlers: RouteHandler[]): this;
+    put(pattern: string, ...handlers: RouteHandler[]): this;
+    delete(pattern: string, ...handlers: RouteHandler[]): this;
     listen(port?: number, host?: string, cb?: () => void): this;
     listen(port?: number, cb?: () => void): this;
     server?: any;

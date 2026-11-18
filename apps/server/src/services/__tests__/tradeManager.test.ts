@@ -1,0 +1,454 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import type { DatabaseSync } from 'node:sqlite';
+import { initializeDatabase, TradesRepo, FillsRepo, RiskStateRepo } from '../../db/sqlite.js';
+import { TradeManager, TradeManagerError } from '../tradeManager.js';
+import type {
+  BrokerAdapter,
+  PositionInfo,
+  OrderExecutionResult,
+  AlgoOrderParams,
+  AlgoOrderResult,
+} from '../../exchange/broker.js';
+import type {
+  AccountInfo,
+  OpenOrderInfo,
+  BrokerMode,
+  WsServerMessage,
+  OpenOrderRequest,
+} from '@tradeos/shared';
+
+class MockBrokerAdapter implements BrokerAdapter {
+  readonly mode: BrokerMode = 'BINANCE_DEMO';
+  public account: AccountInfo = {
+    walletBalance: 1000,
+    equity: 1000,
+    availableBalance: 1000,
+    unrealizedPnl: 0,
+    currency: 'USDT',
+  };
+  public position: PositionInfo | null = null;
+  public openOrders: OpenOrderInfo[] = [];
+
+  public openOrderCalls: any[] = [];
+  public createAlgoOrderCalls: any[] = [];
+  public closePositionCalls: any[] = [];
+  public cancelOrderCalls: any[] = [];
+  public cancelAllOrdersCalls: any[] = [];
+
+  public failOpenOrder = false;
+  public failAlgoOrderFirst = false;
+  public failAlgoOrderAlways = false;
+  public failBreakevenAlways = false;
+  public failRestoreSlAlways = false;
+
+  public algoCallCount = 0;
+
+  reset() {
+    this.account = {
+      walletBalance: 1000,
+      equity: 1000,
+      availableBalance: 1000,
+      unrealizedPnl: 0,
+      currency: 'USDT',
+    };
+    this.position = null;
+    this.openOrders = [];
+    this.openOrderCalls = [];
+    this.createAlgoOrderCalls = [];
+    this.closePositionCalls = [];
+    this.cancelOrderCalls = [];
+    this.cancelAllOrdersCalls = [];
+    this.failOpenOrder = false;
+    this.failAlgoOrderFirst = false;
+    this.failAlgoOrderAlways = false;
+    this.failBreakevenAlways = false;
+    this.failRestoreSlAlways = false;
+    this.algoCallCount = 0;
+  }
+
+  async getAccount(): Promise<AccountInfo> {
+    return this.account;
+  }
+
+  async getPosition(symbol: string): Promise<PositionInfo | null> {
+    return this.position;
+  }
+
+  async openOrder(req: any): Promise<OrderExecutionResult> {
+    this.openOrderCalls.push(req);
+    if (this.failOpenOrder) {
+      throw new Error('Exchange entry order rejected');
+    }
+    const executedQty = req.quantity || (req.marginUsd * req.leverage) / 100;
+    const avgPrice = req.limitPrice || 100;
+    this.position = {
+      symbol: req.symbol,
+      positionAmt: req.side === 'BUY' ? executedQty : -executedQty,
+      entryPrice: avgPrice,
+      markPrice: avgPrice,
+      unRealizedProfit: 0,
+      liquidationPrice: 80,
+      leverage: req.leverage,
+    };
+    return {
+      orderId: 'ent_order_123',
+      clientOrderId: req.clientOrderId || 'tos_trade1_ent',
+      status: 'FILLED',
+      executedQty,
+      avgPrice,
+    };
+  }
+
+  async createAlgoOrder(params: AlgoOrderParams): Promise<AlgoOrderResult> {
+    this.createAlgoOrderCalls.push(params);
+    this.algoCallCount++;
+
+    if (this.failAlgoOrderAlways) {
+      throw new Error('Exchange algo order rejected permanently');
+    }
+    if (this.failAlgoOrderFirst && this.algoCallCount === 1) {
+      throw new Error('Exchange algo order rejected on first attempt');
+    }
+    if (this.failBreakevenAlways && params.type === 'STOP_MARKET') {
+      throw new Error('Exchange breakeven SL rejected');
+    }
+
+    return {
+      algoId: `algo_${this.algoCallCount}`,
+      clientAlgoId: params.clientAlgoId,
+      symbol: params.symbol,
+      status: 'NEW',
+    };
+  }
+
+  async closePosition(
+    symbol: string,
+    qty?: number
+  ): Promise<{ orderId: string; status: string; avgPrice?: number }> {
+    this.closePositionCalls.push({ symbol, qty });
+    this.position = null;
+    return {
+      orderId: 'close_order_999',
+      status: 'FILLED',
+      avgPrice: 100,
+    };
+  }
+
+  async cancelOrder(symbol: string, orderId: string, isAlgo?: boolean): Promise<boolean> {
+    this.cancelOrderCalls.push({ symbol, orderId, isAlgo });
+    return true;
+  }
+
+  async cancelAllOrders(symbol: string): Promise<boolean> {
+    this.cancelAllOrdersCalls.push(symbol);
+    return true;
+  }
+
+  async moveToBreakeven(
+    symbol: string,
+    bePrice: number,
+    currentSlId?: string
+  ): Promise<{ newSlId: string }> {
+    return { newSlId: 'new_be_sl_123' };
+  }
+
+  async getOpenOrders(symbol?: string): Promise<OpenOrderInfo[]> {
+    return this.openOrders;
+  }
+}
+
+describe('TradeManager — Atomic Orchestration & Fail-Closed Execution', () => {
+  let db: DatabaseSync;
+  let mockBroker: MockBrokerAdapter;
+  let tradeManager: TradeManager;
+  let broadcastedMessages: WsServerMessage[];
+  let markPriceMap: Map<string, number>;
+
+  beforeEach(() => {
+    db = initializeDatabase(':memory:');
+    mockBroker = new MockBrokerAdapter();
+    broadcastedMessages = [];
+    markPriceMap = new Map([['SOLUSDT', 100]]);
+
+    tradeManager = new TradeManager({
+      db,
+      broker: mockBroker,
+      brokerMode: 'BINANCE_DEMO',
+      getMarkPrice: (sym) => markPriceMap.get(sym) || 100,
+      broadcastWs: (msg) => broadcastedMessages.push(msg),
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 1: Bracket compensation unwind when SL fails after entry fill
+  // --------------------------------------------------------------------------
+  it('executes automated emergencyUnwindPosition (reduceOnly: true, MARKET) and returns 502 when SL placement fails after retry', async () => {
+    // Force SL algo placement to fail permanently (both 1st attempt and retry)
+    mockBroker.failAlgoOrderAlways = true;
+
+    const req: OpenOrderRequest = {
+      symbol: 'SOLUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 50,
+      leverage: 5,
+      stopLoss: 95,
+      tp1: 110,
+    };
+
+    let caughtError: TradeManagerError | null = null;
+    try {
+      await tradeManager.openPosition(req);
+    } catch (err: any) {
+      caughtError = err;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError?.statusCode).toBe(502);
+    expect(caughtError?.code).toBe('ERR_SL_PLACEMENT_FAIL_UNWIND');
+
+    // Verify automated emergency unwind was invoked
+    expect(mockBroker.closePositionCalls.length).toBeGreaterThanOrEqual(1);
+    expect(mockBroker.closePositionCalls[0].symbol).toBe('SOLUSDT');
+
+    // Verify pending orders/algos cancelled
+    expect(mockBroker.cancelAllOrdersCalls.length).toBeGreaterThanOrEqual(1);
+
+    // Verify SQLite recorded exit_reason = 'SL_PLACEMENT_FAIL_UNWIND'
+    const tradesRepo = new TradesRepo(db);
+    const activePosition = tradesRepo.getActivePosition('BINANCE_DEMO', 'SOLUSDT');
+    expect(activePosition).toBeNull(); // Position is not active
+
+    const closedTrades = tradesRepo.listClosed('BINANCE_DEMO', 10, 0, 'SOLUSDT');
+    expect(closedTrades.length).toBe(1);
+    expect(closedTrades[0].exit_reason).toBe('SL_PLACEMENT_FAIL_UNWIND');
+    expect(closedTrades[0].status).toBe('CLOSED');
+    expect(closedTrades[0].remaining_qty).toBe(0);
+
+    // Verify critical alert was broadcast
+    const alerts = broadcastedMessages.filter((m) => m.type === 'ALERT' && m.level === 'CRITICAL');
+    expect(alerts.length).toBeGreaterThan(0);
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 2: Fail-closed Breakeven unwind when both new SL and restoration fail
+  // --------------------------------------------------------------------------
+  it('executes automated market unwind and returns 502 when Breakeven SL placement and original restoration both fail', async () => {
+    // 1. Open a valid position first with SL at 95
+    const req: OpenOrderRequest = {
+      symbol: 'SOLUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 50,
+      leverage: 5,
+      stopLoss: 95,
+      tp1: 115,
+    };
+    const trade = await tradeManager.openPosition(req);
+    expect(trade.status).toBe('OPEN');
+    expect(trade.stop_loss).toBe(95);
+
+    // 2. Set markPrice safely above breakeven buffer (100 * 1.0015 = 100.15) -> markPrice = 105
+    markPriceMap.set('SOLUSDT', 105);
+
+    // 3. Make all subsequent algo orders fail (both new BE SL and restoration)
+    mockBroker.failAlgoOrderAlways = true;
+
+    let caughtError: TradeManagerError | null = null;
+    try {
+      await tradeManager.moveToBreakeven('SOLUSDT');
+    } catch (err: any) {
+      caughtError = err;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError?.statusCode).toBe(502);
+    expect(caughtError?.code).toBe('ERR_BREAKEVEN_FAIL_CLOSED_UNWIND');
+
+    // Verify market unwind was executed
+    expect(mockBroker.closePositionCalls.length).toBeGreaterThanOrEqual(1);
+
+    // Verify SQLite recorded exit_reason = 'BREAKEVEN_FAIL_CLOSED_UNWIND'
+    const tradesRepo = new TradesRepo(db);
+    const updated = tradesRepo.getById(trade.id);
+    expect(updated?.status).toBe('CLOSED');
+    expect(updated?.exit_reason).toBe('BREAKEVEN_FAIL_CLOSED_UNWIND');
+    expect(updated?.remaining_qty).toBe(0);
+
+    // Verify critical alert broadcast
+    const criticalAlerts = broadcastedMessages.filter(
+      (m) => m.type === 'ALERT' && m.level === 'CRITICAL' && m.message.includes('Breakeven')
+    );
+    expect(criticalAlerts.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 3: Deterministic clientOrderId extraction and fill recording
+  // --------------------------------------------------------------------------
+  it('extracts tradeId from deterministic tos_${tradeId}_* prefix, records fills without duplicates, and transitions to PARTIALLY_CLOSED', async () => {
+    const req: OpenOrderRequest = {
+      symbol: 'SOLUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 50,
+      leverage: 5,
+      stopLoss: 95,
+      tp1: 110,
+    };
+    const trade = await tradeManager.openPosition(req);
+    const initialQty = trade.quantity;
+
+    // Simulate TP1 fill arriving from WebSocket
+    const rawWsEvent = {
+      clientOrderId: `tos_${trade.id}_tp1`,
+      tradeId: 'binance_fill_1001',
+      orderId: 'tp1_order_555',
+      symbol: 'SOLUSDT',
+      side: 'SELL',
+      lastFilledPrice: 110,
+      lastFilledQty: Number((initialQty * 0.5).toFixed(4)),
+      commission: 0.05,
+      commissionAsset: 'USDT',
+      tradeTime: Date.now(),
+    };
+
+    await tradeManager.handleOrderTradeUpdate(rawWsEvent);
+
+    const fillsRepo = new FillsRepo(db);
+    const tradesRepo = new TradesRepo(db);
+
+    const fills = fillsRepo.getByTradeId(trade.id);
+    expect(fills.length).toBe(1);
+    expect(fills[0].binance_trade_id).toBe('binance_fill_1001');
+    expect(fills[0].price).toBe(110);
+    expect(fills[0].qty).toBe(Number((initialQty * 0.5).toFixed(4)));
+
+    // Verify trade status transitioned to PARTIALLY_CLOSED and remaining_qty updated
+    const updatedTrade = tradesRepo.getById(trade.id);
+    expect(updatedTrade?.status).toBe('PARTIALLY_CLOSED');
+    expect(updatedTrade?.remaining_qty).toBeCloseTo(initialQty * 0.5, 4);
+
+    // Verify duplicate fill is ignored without throwing or corrupting
+    await tradeManager.handleOrderTradeUpdate(rawWsEvent);
+    const duplicateCheckFills = fillsRepo.getByTradeId(trade.id);
+    expect(duplicateCheckFills.length).toBe(1); // Still exactly 1
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 4: Metadata preservation during sync
+  // --------------------------------------------------------------------------
+  it('reconciles with exchange while never wiping SQLite metadata (stop_loss, tp1, tp2, opened_at, entry_price)', async () => {
+    const req: OpenOrderRequest = {
+      symbol: 'SOLUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 50,
+      leverage: 5,
+      stopLoss: 95,
+      tp1: 110,
+      tp2: 120,
+    };
+    const originalTrade = await tradeManager.openPosition(req);
+    expect(originalTrade.stop_loss).toBe(95);
+    expect(originalTrade.tp1).toBe(110);
+    expect(originalTrade.tp2).toBe(120);
+    expect(originalTrade.opened_at).toBeGreaterThan(0);
+    expect(originalTrade.entry_price).toBe(100);
+
+    // Simulate exchange reporting position closed
+    mockBroker.position = null;
+
+    // Trigger reconciliation
+    await tradeManager.reconcileWithExchange();
+
+    const tradesRepo = new TradesRepo(db);
+    const syncedTrade = tradesRepo.getById(originalTrade.id);
+
+    expect(syncedTrade?.status).toBe('CLOSED');
+    expect(syncedTrade?.remaining_qty).toBe(0);
+    // Crucial: Historical metadata must NEVER be wiped or set to null
+    expect(syncedTrade?.stop_loss).toBe(95);
+    expect(syncedTrade?.tp1).toBe(110);
+    expect(syncedTrade?.tp2).toBe(120);
+    expect(syncedTrade?.opened_at).toBe(originalTrade.opened_at);
+    expect(syncedTrade?.entry_price).toBe(100);
+    expect(syncedTrade?.exit_reason).toBe('EXCHANGE_SYNC_CLOSED');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 5: Cooldown 423 block after 2 consecutive losses
+  // --------------------------------------------------------------------------
+  it('blocks openPosition with HTTP 423 Locked when risk_state has an active cooldown after 2 consecutive losses', async () => {
+    const riskStateRepo = new RiskStateRepo(db);
+    const now = Date.now();
+
+    // Seed risk_state with 2 consecutive losses and 15m active cooldown
+    riskStateRepo.update({
+      broker_mode: 'BINANCE_DEMO',
+      consecutive_losses: 2,
+      cooldown_until: now + 15 * 60 * 1000,
+      cooldown_reason: '2_CONSECUTIVE_LOSSES',
+      session_net_pnl: -12.5,
+      session_started_at: now - 3600 * 1000,
+      updated_at: now,
+    });
+
+    const req: OpenOrderRequest = {
+      symbol: 'SOLUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 50,
+      leverage: 5,
+      stopLoss: 95,
+    };
+
+    let caughtError: TradeManagerError | null = null;
+    try {
+      await tradeManager.openPosition(req);
+    } catch (err: any) {
+      caughtError = err;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError?.statusCode).toBe(423);
+    expect(caughtError?.code).toBe('ERR_COOLDOWN_ACTIVE');
+    expect(caughtError?.message).toContain('Anti-qumar');
+
+    // Verify zero orders reached the broker
+    expect(mockBroker.openOrderCalls.length).toBe(0);
+    expect(mockBroker.createAlgoOrderCalls.length).toBe(0);
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 6: Pre-flight buffer check in moveToBreakeven
+  // --------------------------------------------------------------------------
+  it('rejects moveToBreakeven with 400 when markPrice is not safe distance from breakeven buffer', async () => {
+    const req: OpenOrderRequest = {
+      symbol: 'SOLUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 50,
+      leverage: 5,
+      stopLoss: 95,
+    };
+    await tradeManager.openPosition(req);
+
+    // For BUY at 100, Breakeven with 0.15% buffer is 100.15.
+    // If markPrice is 100.05 (below BE buffer) or 99 (in loss), pre-flight must reject.
+    markPriceMap.set('SOLUSDT', 100.05);
+
+    let caughtError: TradeManagerError | null = null;
+    try {
+      await tradeManager.moveToBreakeven('SOLUSDT');
+    } catch (err: any) {
+      caughtError = err;
+    }
+
+    expect(caughtError).not.toBeNull();
+    expect(caughtError?.statusCode).toBe(400);
+    expect(caughtError?.code).toBe('ERR_BREAKEVEN_BUFFER_VIOLATION');
+
+    // Original SL was never cancelled or touched
+    expect(mockBroker.cancelOrderCalls.length).toBe(0);
+  });
+});

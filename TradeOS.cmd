@@ -62,7 +62,7 @@ start "TradeOS v2 Backend" /min cmd /c "npm start > server.log 2>&1"
 echo [INFO] Waiting for 127.0.0.1:3400/api/health to become ready...
 set "SERVER_READY=0"
 for /l %%i in (1,1,10) do (
-    timeout /t 1 /nobreak >nul
+    ping -n 2 127.0.0.1 >nul
     curl -s http://127.0.0.1:3400/api/health | findstr /i "ok" >nul 2>&1
     if !errorlevel! equ 0 (
         set "SERVER_READY=1"

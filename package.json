@@ -1,0 +1,22 @@
+{
+  "name": "tradeos-v2",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm --workspace=apps/server run dev",
+    "build": "npm run build --workspaces",
+    "start": "npm --workspace=apps/server run start",
+    "test": "vitest run",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "devDependencies": {
+    "eslint": "^9.15.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.5"
+  }
+}

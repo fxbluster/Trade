@@ -1,0 +1,11 @@
+export default [
+  {
+    ignores: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/data/**",
+      "**/.vite/**",
+      "**/.git/**"
+    ]
+  }
+];

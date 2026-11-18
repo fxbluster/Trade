@@ -156,7 +156,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       }
 
       // Update latest candle in klines if exists
-      let updatedKlines = state.klines;
+      let updatedKlines = Array.isArray(state.klines) ? state.klines : [];
       if (updatedKlines.length > 0 && tick.candle) {
         const last = updatedKlines[updatedKlines.length - 1];
         if (last && last.time === tick.candle.time) {

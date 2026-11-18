@@ -93,9 +93,12 @@ export const apiClient = {
     interval: '1m' | '5m' | '15m' | '1h' = '5m',
     limit: number = 400
   ): Promise<KlineCandle[]> {
-    return request<KlineCandle[]>(
+    const data = await request<any>(
       `/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`
     );
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.klines)) return data.klines;
+    return [];
   },
 
   async getScanner(): Promise<ScannerItem[]> {

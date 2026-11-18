@@ -159,9 +159,20 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
   // Update candles when klines store updates
   useEffect(() => {
-    if (!candleSeriesRef.current || !volumeSeriesRef.current || klines.length === 0) return;
+    if (!candleSeriesRef.current || !volumeSeriesRef.current || !Array.isArray(klines) || klines.length === 0) return;
 
-    const candleData: CandlestickData[] = klines.map((k) => ({
+    const validKlines = klines
+      .filter((k) => k && typeof k.time === 'number' && !isNaN(k.time))
+      .sort((a, b) => a.time - b.time);
+
+    const uniqueMap = new Map<number, (typeof validKlines)[0]>();
+    for (const k of validKlines) {
+      uniqueMap.set(k.time, k);
+    }
+    const sortedKlines = Array.from(uniqueMap.values()).sort((a, b) => a.time - b.time);
+    if (sortedKlines.length === 0) return;
+
+    const candleData: CandlestickData[] = sortedKlines.map((k) => ({
       time: k.time as UTCTimestamp,
       open: k.open,
       high: k.high,
@@ -169,15 +180,19 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       close: k.close,
     }));
 
-    const volumeData: HistogramData[] = klines.map((k) => ({
+    const volumeData: HistogramData[] = sortedKlines.map((k) => ({
       time: k.time as UTCTimestamp,
       value: k.volume,
       color: k.close >= k.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
     }));
 
-    candleSeriesRef.current.setData(candleData);
-    volumeSeriesRef.current.setData(volumeData);
-    chartRef.current?.timeScale().fitContent();
+    try {
+      candleSeriesRef.current.setData(candleData);
+      volumeSeriesRef.current.setData(volumeData);
+      chartRef.current?.timeScale().fitContent();
+    } catch (err) {
+      console.warn('Lightweight charts setData suppressed error:', err);
+    }
   }, [klines]);
 
   // Update active position and preview price lines

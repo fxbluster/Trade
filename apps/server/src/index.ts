@@ -281,7 +281,16 @@ export async function bootstrapServer(): Promise<{
   const webDistPath = webDistCandidates.find((c) => fs.existsSync(c)) || webDistCandidates[0];
 
   if (fs.existsSync(webDistPath)) {
-    const serveStatic = sirv(webDistPath, { dev: false });
+    const serveStatic = sirv(webDistPath, {
+      dev: false,
+      setHeaders(res, pathname) {
+        if (pathname === '/' || pathname.endsWith('.html')) {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.setHeader('Pragma', 'no-cache');
+          res.setHeader('Expires', '0');
+        }
+      },
+    });
     app.use((req: Request, res: Response, next: NextHandler) => {
       if (req.url && (req.url.startsWith('/api') || req.url.startsWith('/ws'))) {
         return next();
@@ -291,6 +300,9 @@ export async function bootstrapServer(): Promise<{
           const indexPath = path.join(webDistPath, 'index.html');
           if (fs.existsSync(indexPath)) {
             res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Pragma', 'no-cache');
+            res.setHeader('Expires', '0');
             fs.createReadStream(indexPath).pipe(res);
             return;
           }

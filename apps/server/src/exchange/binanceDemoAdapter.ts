@@ -121,6 +121,50 @@ export class BinanceDemoAdapter implements BrokerAdapter {
   }
 
   /**
+   * Retrieves lot size rules and precision for a symbol.
+   */
+  async getLotSizeRule(symbol: string): Promise<{ precision: number; stepSize: number; minQty: number }> {
+    try {
+      const info = await this.client.getExchangeInfo(symbol);
+      const sym = info?.symbols?.[0];
+      if (sym) {
+        const lotFilter = sym.filters?.find((f: any) => f.filterType === 'LOT_SIZE');
+        const stepSize = lotFilter ? parseFloat(lotFilter.stepSize) : 0.001;
+        const minQty = lotFilter ? parseFloat(lotFilter.minQty) : 0.001;
+        const precision = typeof sym.quantityPrecision === 'number' ? sym.quantityPrecision : 3;
+        return { precision, stepSize, minQty };
+      }
+    } catch {
+      // fallback
+    }
+    const defaultPrecisions: Record<string, number> = {
+      BTCUSDT: 4,
+      ETHUSDT: 3,
+      SOLUSDT: 2,
+      BNBUSDT: 2,
+      XRPUSDT: 1,
+      DOGEUSDT: 0,
+      ADAUSDT: 0,
+    };
+    const precision = defaultPrecisions[symbol.toUpperCase()] ?? 2;
+    const stepSize = precision === 0 ? 1 : Math.pow(10, -precision);
+    return { precision, stepSize, minQty: stepSize };
+  }
+
+  /**
+   * Quantizes quantity to match Binance LOT_SIZE stepSize and precision limits.
+   */
+  async roundQuantity(symbol: string, rawQty: number): Promise<number> {
+    const { precision, stepSize, minQty } = await this.getLotSizeRule(symbol);
+    if (stepSize > 0) {
+      const steps = Math.floor(rawQty / stepSize);
+      const quantized = Number((steps * stepSize).toFixed(precision));
+      return Math.max(minQty, quantized);
+    }
+    return Math.max(minQty, Number(rawQty.toFixed(precision)));
+  }
+
+  /**
    * Executes entry order on Binance Testnet.
    */
   async openOrder(
@@ -133,7 +177,17 @@ export class BinanceDemoAdapter implements BrokerAdapter {
         await this.client.setLeverage(symUpper, req.leverage).catch(() => {});
       }
 
-      const qty = req.quantity ?? (req.marginUsd && req.leverage ? (req.marginUsd * req.leverage) / (req.limitPrice || 1) : 0);
+      let rawQty = req.quantity;
+      if (!rawQty || rawQty <= 0) {
+        let price = req.orderType === 'LIMIT' && req.limitPrice ? req.limitPrice : 0;
+        if (!price || price <= 0) {
+          const mp = await this.client.getMarkPrice(symUpper).catch(() => null);
+          price = parseFloat(mp?.markPrice ?? '0') || 1;
+        }
+        rawQty = (req.marginUsd && req.leverage) ? (req.marginUsd * req.leverage) / price : 0.001;
+      }
+
+      const qty = await this.roundQuantity(symUpper, rawQty);
 
       const res = await this.client.createOrder({
         symbol: symUpper,
@@ -147,8 +201,8 @@ export class BinanceDemoAdapter implements BrokerAdapter {
 
       const orderId = String(res.orderId ?? '');
       const clientOrderId = String(res.clientOrderId ?? req.clientOrderId ?? '');
-      const status = String(res.status ?? 'NEW');
-      const executedQty = parseFloat(res.executedQty ?? '0');
+      let status = String(res.status ?? 'NEW');
+      let executedQty = parseFloat(res.executedQty ?? '0');
       let avgPrice = parseFloat(res.avgPrice ?? '0');
       if (avgPrice === 0 && executedQty > 0 && res.cumQuote) {
         avgPrice = parseFloat(res.cumQuote) / executedQty;
@@ -157,11 +211,38 @@ export class BinanceDemoAdapter implements BrokerAdapter {
         avgPrice = parseFloat(res.price);
       }
 
+      // If it's a MARKET order, Binance returns status NEW with executedQty 0.00 initially.
+      // Poll briefly (120ms) to retrieve actual filled quantity and price from Binance.
+      if (req.orderType === 'MARKET' && (executedQty === 0 || avgPrice === 0) && orderId) {
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          const checked = await this.client.request<any>('/fapi/v1/order', {
+            method: 'GET',
+            signed: true,
+            priority: 'P1',
+            params: { symbol: symUpper, orderId },
+          });
+          if (checked) {
+            status = String(checked.status ?? status);
+            const checkExecQty = parseFloat(checked.executedQty ?? '0');
+            if (checkExecQty > 0) executedQty = checkExecQty;
+            const checkAvgPrice = parseFloat(checked.avgPrice ?? '0');
+            if (checkAvgPrice > 0) {
+              avgPrice = checkAvgPrice;
+            } else if (checked.cumQuote && checkExecQty > 0) {
+              avgPrice = parseFloat(checked.cumQuote) / checkExecQty;
+            }
+          }
+        } catch {
+          // ignore error and proceed
+        }
+      }
+
       return {
         orderId,
         clientOrderId,
         status,
-        executedQty,
+        executedQty: executedQty > 0 ? executedQty : qty,
         avgPrice,
       };
     } catch (err: any) {
@@ -178,12 +259,13 @@ export class BinanceDemoAdapter implements BrokerAdapter {
   async createAlgoOrder(params: AlgoOrderParams): Promise<AlgoOrderResult> {
     const symUpper = params.symbol.toUpperCase();
     try {
+      const algoQty = params.quantity ? await this.roundQuantity(symUpper, params.quantity) : undefined;
       const res = await this.client.createAlgoOrder({
         symbol: symUpper,
         side: params.side,
         type: params.type,
         triggerPrice: params.triggerPrice,
-        quantity: params.quantity,
+        quantity: algoQty,
         reduceOnly: params.reduceOnly ?? true, // Strict reduceOnly enforcement
         clientAlgoId: params.clientAlgoId,
       });
@@ -220,7 +302,10 @@ export class BinanceDemoAdapter implements BrokerAdapter {
         return { orderId: '', status: 'ALREADY_CLOSED' };
       }
 
-      const closeQty = qty ?? Math.abs(pos.positionAmt);
+      const absPos = Math.abs(pos.positionAmt);
+      const rawCloseQty = qty !== undefined && qty < absPos - 1e-5 ? qty : absPos;
+      const closeQty = await this.roundQuantity(symUpper, rawCloseQty);
+
       // Close side must be opposite to current position
       const closeSide = pos.positionAmt > 0 ? 'SELL' : 'BUY';
 

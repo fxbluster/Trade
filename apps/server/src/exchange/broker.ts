@@ -56,7 +56,7 @@ export interface BrokerAdapter {
 
   getAccount(): Promise<AccountInfo>;
   getPosition(symbol: string): Promise<PositionInfo | null>;
-  openOrder(req: OpenOrderRequest & { clientOrderId?: string }): Promise<OrderExecutionResult>;
+  openOrder(req: OpenOrderRequest & { clientOrderId?: string; quantity?: number }): Promise<OrderExecutionResult>;
   createAlgoOrder(params: AlgoOrderParams): Promise<AlgoOrderResult>;
   placeAlgoOrder?(params: AlgoOrderParams): Promise<AlgoOrderResult>;
   closePosition(symbol: string, qty?: number): Promise<{ orderId: string; status: string }>;

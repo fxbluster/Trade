@@ -374,6 +374,7 @@ export class TradeManager {
       try {
         entryResult = await this.broker.openOrder({
           ...req,
+          quantity: targetQty,
           clientOrderId: clientEntId,
         });
       } catch (orderErr: any) {

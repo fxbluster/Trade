@@ -72,8 +72,14 @@ export class BinanceStreamsManager {
 
   constructor(options: BinanceStreamsOptions) {
     this.client = options.client;
-    this.publicWsBaseUrl = options.publicWsBaseUrl || 'wss://fstream.binance.com/ws';
-    this.userDataWsBaseUrl = options.userDataWsBaseUrl || 'wss://stream.binancefuture.com/ws';
+    this.publicWsBaseUrl =
+      options.publicWsBaseUrl ||
+      process.env.BINANCE_PUBLIC_WS_URL ||
+      'wss://stream.binancefuture.com/ws';
+    this.userDataWsBaseUrl =
+      options.userDataWsBaseUrl ||
+      process.env.BINANCE_USER_DATA_WS_URL ||
+      'wss://stream.binancefuture.com/ws';
     this.keepAliveIntervalMs = options.keepAliveIntervalMs || 20 * 60 * 1000; // 20 minutes
     this.safetySyncIntervalMs = options.safetySyncIntervalMs || 45 * 1000; // 45 seconds
   }

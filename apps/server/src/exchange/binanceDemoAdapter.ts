@@ -149,7 +149,13 @@ export class BinanceDemoAdapter implements BrokerAdapter {
       const clientOrderId = String(res.clientOrderId ?? req.clientOrderId ?? '');
       const status = String(res.status ?? 'NEW');
       const executedQty = parseFloat(res.executedQty ?? '0');
-      const avgPrice = parseFloat(res.avgPrice ?? res.price ?? '0');
+      let avgPrice = parseFloat(res.avgPrice ?? '0');
+      if (avgPrice === 0 && executedQty > 0 && res.cumQuote) {
+        avgPrice = parseFloat(res.cumQuote) / executedQty;
+      }
+      if (avgPrice === 0 && parseFloat(res.price ?? '0') > 0) {
+        avgPrice = parseFloat(res.price);
+      }
 
       return {
         orderId,

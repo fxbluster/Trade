@@ -89,7 +89,16 @@ export async function bootstrapServer(): Promise<{
   // 6. Build Cockpit State Snapshot
   const buildCockpitState = async (symbol: string = activeSymbol): Promise<CockpitState> => {
     const sym = symbol.toUpperCase();
-    const markPrice = markPriceMap.get(sym) || 0;
+    let markPrice = markPriceMap.get(sym) || 0;
+    if (markPrice === 0) {
+      try {
+        const mpData = await client.getMarkPrice(sym);
+        markPrice = parseFloat(mpData?.markPrice || '0');
+        if (markPrice > 0) {
+          markPriceMap.set(sym, markPrice);
+        }
+      } catch {}
+    }
     const funding = fundingRateMap.get(sym) || { rate: null, nextTime: null };
 
     const account = await activeBroker.getAccount().catch(() => ({
@@ -373,6 +382,13 @@ export async function bootstrapServer(): Promise<{
 
   // Start Binance WebSocket streams for active symbol
   await streamsManager.start([activeSymbol]);
+
+  // Pre-fetch initial mark price and candle history
+  try {
+    const mpData = await client.getMarkPrice(activeSymbol);
+    const p = parseFloat(mpData?.markPrice || '0');
+    if (p > 0) markPriceMap.set(activeSymbol, p);
+  } catch {}
 
   // Graceful shutdown helper
   const close = async () => {

@@ -355,7 +355,15 @@ export class TradeManager {
           ? req.limitPrice
           : markPrice > 0
           ? markPrice
-          : 1.0;
+          : 0;
+
+      if (!effectiveEntryPrice || effectiveEntryPrice <= 0) {
+        throw new TradeManagerError(
+          'Bazar qiyməti (Mark Price) hələ əldə edilməyib. Zəhmət olmasa bir neçə saniyə gözləyin.',
+          400,
+          'ERR_MARK_PRICE_UNAVAILABLE'
+        );
+      }
 
       const notionalUsd = req.marginUsd * req.leverage;
       const calculatedQty = Number((notionalUsd / effectiveEntryPrice).toFixed(4));

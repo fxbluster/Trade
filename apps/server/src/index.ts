@@ -159,6 +159,20 @@ export async function bootstrapServer(): Promise<{
       activeSymbol = sym.toUpperCase();
       cvdEngine.reset(activeSymbol);
       streamsManager.subscribeSymbol(activeSymbol);
+      // Pre-warm candle history for smooth tick updates
+      client.getKlines(activeSymbol, '1m', 100).then((raw) => {
+        if (Array.isArray(raw)) {
+          const klines = raw.map((k: any) => ({
+            time: Math.floor(Number(k[0]) / 1000),
+            open: Number(k[1]),
+            high: Number(k[2]),
+            low: Number(k[3]),
+            close: Number(k[4]),
+            volume: Number(k[5]),
+          }));
+          candleHistoryMap.set(activeSymbol, klines);
+        }
+      }).catch(() => {});
     },
   });
 
@@ -185,14 +199,27 @@ export async function bootstrapServer(): Promise<{
 
     // Throttled tick broadcast (<= 4Hz)
     const candles = candleHistoryMap.get(event.symbol) || [];
-    const latestCandle = candles[candles.length - 1] || {
-      time: Math.floor(event.time / 1000),
-      open: event.markPrice,
-      high: event.markPrice,
-      low: event.markPrice,
-      close: event.markPrice,
-      volume: 0,
-    };
+    let latestCandle = candles[candles.length - 1];
+    if (latestCandle) {
+      const p = event.markPrice;
+      latestCandle = {
+        ...latestCandle,
+        high: Math.max(latestCandle.high, p),
+        low: Math.min(latestCandle.low, p),
+        close: p,
+      };
+      candles[candles.length - 1] = latestCandle;
+    } else {
+      latestCandle = {
+        time: Math.floor(event.time / 1000),
+        open: event.markPrice,
+        high: event.markPrice,
+        low: event.markPrice,
+        close: event.markPrice,
+        volume: 0,
+      };
+      candleHistoryMap.set(event.symbol, [latestCandle]);
+    }
 
     const activePos = tradesRepo.getActivePosition(activeBroker.mode, event.symbol);
     let uPnl = 0;

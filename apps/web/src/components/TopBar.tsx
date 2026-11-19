@@ -116,13 +116,15 @@ export const TopBar: React.FC = () => {
         <div>
           <span className="text-[10px] text-[#7d8590] uppercase block">Equity</span>
           <span className="font-semibold text-[#e6edf3]">
-            ${account.equity > 0 ? account.equity.toFixed(2) : account.walletBalance.toFixed(2)}
+            ${(account.equity || account.walletBalance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </span>
         </div>
 
         <div>
-          <span className="text-[10px] text-[#7d8590] uppercase block">Available</span>
-          <span className="font-semibold text-[#e6edf3]">${account.availableBalance.toFixed(2)}</span>
+          <span className="text-[10px] text-[#7d8590] uppercase block">Available (USDT)</span>
+          <span className="font-semibold text-[#0ecb81]">
+            ${(account.availableBalance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+          </span>
         </div>
 
         <div>
@@ -173,18 +175,19 @@ export const TopBar: React.FC = () => {
           <span>{isCooldownActive ? 'Cooldown Active' : 'Cooldown'}</span>
         </button>
 
-        {/* Broker Mode Switch */}
+        {/* Broker Mode Switch & Testnet Badge */}
         <button
           onClick={handleBrokerToggle}
           disabled={isSwitchingBroker}
-          className={`px-2.5 py-1 rounded font-bold transition-colors ${
+          className={`px-2.5 py-1 rounded font-bold transition-colors flex items-center space-x-1.5 ${
             brokerMode === 'BINANCE_DEMO'
-              ? 'bg-[#f0b90b]/15 text-[#f0b90b] border border-[#f0b90b]/40 hover:bg-[#f0b90b]/25'
+              ? 'bg-[#f0b90b]/15 text-[#f0b90b] border border-[#f0b90b]/40 hover:bg-[#f0b90b]/25 shadow-sm'
               : 'bg-[#2962ff]/15 text-[#2962ff] border border-[#2962ff]/40 hover:bg-[#2962ff]/25'
           }`}
-          title="Switch Broker Mode"
+          title="Binance Futures Developer Testnet (testnet.binancefuture.com) — Təcrid olunmuş demo mühitdir, telefondakı real hesaba təsir etmir."
         >
-          {isSwitchingBroker ? 'Switching...' : brokerMode === 'BINANCE_DEMO' ? 'BINANCE DEMO' : 'LOCAL PAPER'}
+          <span className={`w-2 h-2 rounded-full ${brokerMode === 'BINANCE_DEMO' ? 'bg-[#f0b90b] animate-pulse' : 'bg-[#2962ff]'}`} />
+          <span>{isSwitchingBroker ? 'Switching...' : brokerMode === 'BINANCE_DEMO' ? 'BINANCE DEMO (TESTNET)' : 'LOCAL PAPER'}</span>
         </button>
 
         {/* WebSocket Connection Badge */}

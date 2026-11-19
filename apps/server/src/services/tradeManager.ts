@@ -342,8 +342,8 @@ export class TradeManager {
         );
       }
 
-      // Gate 4: Generate Deterministic Client Order IDs
-      const tradeId = crypto.randomUUID();
+      // Gate 4: Generate Deterministic Client Order IDs (max 36 chars for Binance limits)
+      const tradeId = crypto.randomBytes(8).toString('hex');
       const clientEntId = `tos_${tradeId}_ent`;
       const clientSlId = `tos_${tradeId}_sl`;
       const clientTp1Id = req.tp1 ? `tos_${tradeId}_tp1` : null;

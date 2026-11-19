@@ -22,8 +22,14 @@ export const validateHost: Middleware = (req: Request, res: Response, next: Next
   }
 
   // Normalize host (strip trailing dot if present)
-  const host = rawHost.replace(/\.$/, '');
-  if (!ALLOWED_HOSTS.has(host)) {
+  const host = rawHost.replace(/\.$/, '').toLowerCase();
+  const isTunnel =
+    host.endsWith('.trycloudflare.com') ||
+    host.endsWith('.trycloudflare.com:443') ||
+    ALLOWED_HOSTS.has(host) ||
+    (Boolean(process.env.PUBLIC_DOMAIN) && host.startsWith(process.env.PUBLIC_DOMAIN!.toLowerCase()));
+
+  if (!isTunnel) {
     res.statusCode = 403;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ error: `Forbidden: Host '${host}' rejected by DNS rebinding guard` }));
@@ -35,13 +41,27 @@ export const validateHost: Middleware = (req: Request, res: Response, next: Next
 
 /**
  * Validates Origin header against strict allowlist.
- * Allows requests with no Origin (direct server-side / same-origin without header).
+ * Allows requests with no Origin (direct server-side / same-origin without header)
+ * and verified Cloudflare Tunnel hostnames.
  */
 export const validateOrigin: Middleware = (req: Request, res: Response, next: NextHandler) => {
   const origin = req.headers['origin'];
 
   if (origin) {
-    if (!ALLOWED_ORIGINS.has(origin)) {
+    let isAllowed = ALLOWED_ORIGINS.has(origin);
+    if (!isAllowed) {
+      try {
+        const u = new URL(origin);
+        if (
+          u.hostname.endsWith('.trycloudflare.com') ||
+          (Boolean(process.env.PUBLIC_DOMAIN) && u.hostname === process.env.PUBLIC_DOMAIN!.toLowerCase())
+        ) {
+          isAllowed = true;
+        }
+      } catch {}
+    }
+
+    if (!isAllowed) {
       res.statusCode = 403;
       res.setHeader('Content-Type', 'application/json');
       res.end(JSON.stringify({ error: `Forbidden: Origin '${origin}' is not allowed` }));

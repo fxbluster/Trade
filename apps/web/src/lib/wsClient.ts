@@ -54,6 +54,7 @@ class WsClient {
   private ws: WebSocket | null = null;
   private status: WsStatus = 'DISCONNECTED';
   private handlers: MessageHandlers = {};
+  private tickListeners: Set<(tick: TickData) => void> = new Set();
   private pingInterval: any = null;
   private reconnectTimeout: any = null;
   private isExplicitlyClosed = false;
@@ -63,6 +64,13 @@ class WsClient {
 
   public setHandlers(handlers: MessageHandlers) {
     this.handlers = { ...this.handlers, ...handlers };
+  }
+
+  public subscribeTick(listener: (tick: TickData) => void): () => void {
+    this.tickListeners.add(listener);
+    return () => {
+      this.tickListeners.delete(listener);
+    };
   }
 
   public getStatus(): WsStatus {
@@ -111,6 +119,13 @@ class WsClient {
               break;
             case 'TICK':
               this.handlers.onTick?.(msg.data);
+              this.tickListeners.forEach((listener) => {
+                try {
+                  listener(msg.data);
+                } catch (err) {
+                  console.error('[WS] Tick listener error:', err);
+                }
+              });
               break;
             case 'ANALYSIS':
               this.handlers.onAnalysis?.(msg.data);

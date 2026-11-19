@@ -12,7 +12,7 @@ import type {
   BrokerMode,
   ExchangeHealth,
 } from '@tradeos/shared';
-import type { WsStatus, TickData, AnalysisData, PositionEventData } from '../lib/wsClient';
+import { wsClient, type WsStatus, type TickData, type AnalysisData, type PositionEventData } from '../lib/wsClient';
 import { apiClient } from '../lib/apiClient';
 
 export interface MarketStoreState {
@@ -69,7 +69,7 @@ const defaultRisk: RiskStateRecord = {
 };
 
 export const useMarketStore = create<MarketStoreState>((set, get) => ({
-  symbol: 'BTCUSDT',
+  symbol: 'SOLUSDT',
   markPrice: 0,
   prevMarkPrice: 0,
   priceChangePercent24h: 0,
@@ -93,6 +93,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     const sym = symbol.toUpperCase();
     if (get().symbol === sym) return;
     set({ symbol: sym, klines: [], isLoadingKlines: true });
+    wsClient.subscribeSymbol(sym);
     try {
       await apiClient.setSymbol(sym);
       await get().refreshKlines();
@@ -155,22 +156,10 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
         };
       }
 
-      // Update latest candle in klines if exists
-      let updatedKlines = Array.isArray(state.klines) ? state.klines : [];
-      if (updatedKlines.length > 0 && tick.candle) {
-        const last = updatedKlines[updatedKlines.length - 1];
-        if (last && last.time === tick.candle.time) {
-          updatedKlines = [...updatedKlines.slice(0, -1), tick.candle];
-        } else if (last && tick.candle.time > last.time) {
-          updatedKlines = [...updatedKlines, tick.candle];
-        }
-      }
-
       return {
         markPrice: tick.markPrice,
         prevMarkPrice: state.markPrice,
         activePosition: updatedPosition,
-        klines: updatedKlines,
         account: {
           ...state.account,
           unrealizedPnl: tick.unrealizedPnl,

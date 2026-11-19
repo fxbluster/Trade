@@ -30,6 +30,14 @@ import { TradeManager } from './services/tradeManager.js';
 import { WsHub } from './api/wsHub.js';
 import { registerRoutes } from './api/routes.js';
 
+// Global crash prevention for unhandled async rejections and exceptions
+process.on('unhandledRejection', (reason) => {
+  console.error('[TradeOS v2] Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', (error) => {
+  console.error('[TradeOS v2] Uncaught Exception:', error);
+});
+
 // Safe environment loading
 try {
   if (fs.existsSync('.env')) {
@@ -61,6 +69,7 @@ export async function bootstrapServer(): Promise<{
   });
 
   const broker = BrokerFactory.getAdapter('BINANCE_DEMO', { client, db });
+  let activeBroker = broker;
 
   // 3. State and Cache Management
   let activeSymbol = 'SOLUSDT';
@@ -83,7 +92,7 @@ export async function bootstrapServer(): Promise<{
     const markPrice = markPriceMap.get(sym) || 0;
     const funding = fundingRateMap.get(sym) || { rate: null, nextTime: null };
 
-    const account = await broker.getAccount().catch(() => ({
+    const account = await activeBroker.getAccount().catch(() => ({
       walletBalance: 0,
       equity: 0,
       availableBalance: 0,
@@ -91,15 +100,15 @@ export async function bootstrapServer(): Promise<{
       currency: 'USDT',
     }));
 
-    const activePosition = tradesRepo.getActivePosition(broker.mode, sym);
-    const openOrders = await broker.getOpenOrders(sym).catch(() => []);
+    const activePosition = tradesRepo.getActivePosition(activeBroker.mode, sym);
+    const openOrders = await activeBroker.getOpenOrders(sym).catch(() => []);
 
     const candles = candleHistoryMap.get(sym) || [];
     const indicators = calculateIndicators(candles, 0.01);
     const cvdSnapshot = cvdEngine.getSnapshot();
 
-    const currentRisk = riskRepo.get(broker.mode) || {
-      broker_mode: broker.mode,
+    const currentRisk = riskRepo.get(activeBroker.mode) || {
+      broker_mode: activeBroker.mode,
       consecutive_losses: 0,
       cooldown_until: 0,
       cooldown_reason: null,
@@ -136,7 +145,7 @@ export async function bootstrapServer(): Promise<{
       risk: currentRisk,
       sokrat,
       exchangeHealth,
-      brokerMode: broker.mode,
+      brokerMode: activeBroker.mode,
     };
   };
 
@@ -156,8 +165,8 @@ export async function bootstrapServer(): Promise<{
   // 8. Initialize TradeManager Atomic Orchestrator
   const tradeManager = new TradeManager({
     db,
-    broker,
-    brokerMode: broker.mode,
+    broker: activeBroker,
+    brokerMode: activeBroker.mode,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
     broadcastWs: (msg) => wsHub.broadcast(msg),
   });
@@ -170,6 +179,10 @@ export async function bootstrapServer(): Promise<{
       nextTime: event.nextFundingTime,
     });
 
+    if (activeBroker.mode === 'LOCAL_PAPER' && 'onMarkPriceTick' in activeBroker) {
+      (activeBroker as any).onMarkPriceTick(event.symbol, event.markPrice);
+    }
+
     // Throttled tick broadcast (<= 4Hz)
     const candles = candleHistoryMap.get(event.symbol) || [];
     const latestCandle = candles[candles.length - 1] || {
@@ -181,7 +194,7 @@ export async function bootstrapServer(): Promise<{
       volume: 0,
     };
 
-    const activePos = tradesRepo.getActivePosition(broker.mode, event.symbol);
+    const activePos = tradesRepo.getActivePosition(activeBroker.mode, event.symbol);
     let uPnl = 0;
     if (activePos && activePos.remaining_qty > 0) {
       uPnl =
@@ -217,6 +230,7 @@ export async function bootstrapServer(): Promise<{
   });
 
   streamsManager.onAggTrade((event) => {
+    if (event.symbol !== activeSymbol) return;
     cvdEngine.processTrade({
       p: event.price,
       q: event.qty,
@@ -237,12 +251,21 @@ export async function bootstrapServer(): Promise<{
   // 10. Register 16 REST API Endpoints
   registerRoutes(app, {
     tradeManager,
-    broker,
+    get broker() {
+      return activeBroker;
+    },
+    set broker(b) {
+      activeBroker = b;
+    },
+    onBrokerModeChange: (newAdapter) => {
+      activeBroker = newAdapter;
+    },
     db,
     streamsManager,
     cvdEngine,
     activeSymbol,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
+    getFunding: (sym) => fundingRateMap.get(sym) || { rate: null, nextTime: null },
     setActiveSymbol: (sym) => {
       activeSymbol = sym.toUpperCase();
       cvdEngine.reset(activeSymbol);
@@ -320,6 +343,9 @@ export async function bootstrapServer(): Promise<{
       resolve();
     });
   });
+
+  // Start Binance WebSocket streams for active symbol
+  await streamsManager.start([activeSymbol]);
 
   // Graceful shutdown helper
   const close = async () => {

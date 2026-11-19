@@ -20,7 +20,6 @@ export const App: React.FC = () => {
   const openOrders = useMarketStore((s) => s.openOrders);
   const activeBottomTab = useUiStore((s) => s.activeBottomTab);
   const setActiveBottomTab = useUiStore((s) => s.setActiveBottomTab);
-  const isAudioMuted = useUiStore((s) => s.isAudioMuted);
 
   // Initialize REST and WebSocket Connections
   useEffect(() => {
@@ -43,17 +42,18 @@ export const App: React.FC = () => {
       },
       onPositionEvent: (event) => {
         useMarketStore.getState().applyPositionEvent(event);
+        const muted = useUiStore.getState().isAudioMuted;
         if (event.event === 'OPENED') {
-          soundEffects.playBuy(isAudioMuted);
+          soundEffects.playBuy(muted);
         } else if (event.event === 'CLOSED') {
-          soundEffects.playAlert(isAudioMuted);
+          soundEffects.playAlert(muted);
         } else if (event.event === 'BREAKEVEN') {
-          soundEffects.playBreakeven(isAudioMuted);
+          soundEffects.playBreakeven(muted);
         }
       },
       onAlert: (alert) => {
         if (alert.level === 'CRITICAL') {
-          soundEffects.playAlert(isAudioMuted);
+          soundEffects.playAlert(useUiStore.getState().isAudioMuted);
         }
       },
       onStatusChange: (status) => {
@@ -67,7 +67,7 @@ export const App: React.FC = () => {
     return () => {
       wsClient.disconnect();
     };
-  }, [isAudioMuted]);
+  }, []);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-[#020305] text-[#e6edf3] font-sans overflow-hidden select-none">

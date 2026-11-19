@@ -59,7 +59,7 @@ export const TradeJournalPanel: React.FC = () => {
             <Award className="w-3 h-3 text-[#f0b90b]" />
           </div>
           <div className="text-base font-bold text-[#e6edf3] mt-0.5">
-            {journal ? `${(journal.winRate * 100).toFixed(1)}%` : '--'}
+            {journal ? `${journal.winRate.toFixed(1)}%` : '--'}
           </div>
         </div>
 

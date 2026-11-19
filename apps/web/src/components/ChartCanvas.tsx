@@ -26,6 +26,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
+  const lastFitSymbolRef = useRef<string | null>(null);
 
   const symbol = useMarketStore((s) => s.symbol);
   const klines = useMarketStore((s) => s.klines);
@@ -135,7 +136,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     };
 
     // Attach tick listener to wsClient
-    wsClient.setHandlers({ onTick: handleTick });
+    const unsubscribeTick = wsClient.subscribeTick(handleTick);
 
     // Handle container resize
     const resizeObserver = new ResizeObserver((entries) => {
@@ -149,6 +150,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     resizeObserver.observe(containerRef.current);
 
     return () => {
+      unsubscribeTick();
       resizeObserver.disconnect();
       chart.remove();
       chartRef.current = null;
@@ -189,11 +191,14 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     try {
       candleSeriesRef.current.setData(candleData);
       volumeSeriesRef.current.setData(volumeData);
-      chartRef.current?.timeScale().fitContent();
+      if (lastFitSymbolRef.current !== symbol) {
+        chartRef.current?.timeScale().fitContent();
+        lastFitSymbolRef.current = symbol;
+      }
     } catch (err) {
       console.warn('Lightweight charts setData suppressed error:', err);
     }
-  }, [klines]);
+  }, [klines, symbol]);
 
   // Update active position and preview price lines
   useEffect(() => {

@@ -113,7 +113,7 @@ export const OpenOrdersPanel: React.FC = () => {
                         {order.side}
                       </span>
                     </td>
-                    <td className="py-2 px-2 font-semibold text-[#e6edf3]">{order.price.toFixed(2)}</td>
+                    <td className="py-2 px-2 font-semibold text-[#e6edf3]">{(order.price ?? 0).toFixed(2)}</td>
                     <td className="py-2 px-2 text-[#7d8590]">
                       {order.executedQty} / {order.origQty}
                     </td>

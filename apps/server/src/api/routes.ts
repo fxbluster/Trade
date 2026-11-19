@@ -56,6 +56,8 @@ export interface AppContext {
   setActiveSymbol?: (symbol: string) => void;
   getIndicators?: (symbol: string) => TechnicalSummary | null;
   getKlines?: (symbol: string, interval: string, limit: number) => Promise<KlineCandle[]>;
+  getFunding?: (symbol: string) => { rate: number | null; nextTime: number | null };
+  onBrokerModeChange?: (adapter: BrokerAdapter) => void;
 }
 
 function sendJson(res: Response, statusCode: number, data: unknown): void {
@@ -107,9 +109,16 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     try {
       const sym = activeSymbol;
       const markPrice = ctx.tradeManager.getMarkPrice(sym);
-      const account = await ctx.broker.getAccount();
+      const funding = ctx.getFunding ? ctx.getFunding(sym) : { rate: null, nextTime: null };
+      const account = await ctx.broker.getAccount().catch(() => ({
+        walletBalance: 0,
+        equity: 0,
+        availableBalance: 0,
+        unrealizedPnl: 0,
+        currency: 'USDT',
+      }));
       const activePosition = tradesRepo.getActivePosition(ctx.broker.mode, sym);
-      const openOrders = await ctx.broker.getOpenOrders(sym);
+      const openOrders = await ctx.broker.getOpenOrders(sym).catch(() => []);
       const indicators = ctx.getIndicators ? ctx.getIndicators(sym) : null;
       const cvd = ctx.cvdEngine ? ctx.cvdEngine.getSnapshot() : null;
       const risk = riskRepo.get(ctx.broker.mode) || {
@@ -127,8 +136,8 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       const state: CockpitState = {
         symbol: sym,
         markPrice,
-        fundingRate: null,
-        nextFundingTime: null,
+        fundingRate: funding.rate,
+        nextFundingTime: funding.nextTime,
         account,
         activePosition,
         openOrders,
@@ -236,6 +245,9 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       ctx.broker = newAdapter;
       ctx.tradeManager.setBroker(newAdapter);
       ctx.tradeManager.setBrokerMode(mode);
+      if (ctx.onBrokerModeChange) {
+        ctx.onBrokerModeChange(newAdapter);
+      }
 
       sendJson(res, 200, { success: true, mode });
     } catch (err: unknown) {

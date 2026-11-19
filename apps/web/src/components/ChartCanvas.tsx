@@ -15,6 +15,7 @@ import { useMarketStore } from '../store/useMarketStore';
 import { useUiStore } from '../store/useUiStore';
 import { wsClient, type TickData } from '../lib/wsClient';
 import { calculateLiquidationPrice } from '@tradeos/shared';
+import { Eye, EyeOff } from 'lucide-react';
 
 export interface ChartCanvasProps {
   className?: string;
@@ -64,6 +65,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const activePosition = useMarketStore((s) => s.activePosition);
   const orderDraft = useUiStore((s) => s.orderDraft);
   const markPrice = useMarketStore((s) => s.markPrice);
+  const hidePineOverlay = useMarketStore((s) => s.hidePineOverlay);
+  const toggleHidePineOverlay = useMarketStore((s) => s.toggleHidePineOverlay);
+  const pineSignals = useMarketStore((s) => s.pineSignals);
 
   // Initialize Lightweight Charts instance
   useEffect(() => {
@@ -409,7 +413,23 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         priceLinesRef.current.push(prevLiqLine);
       }
     }
-  }, [activePosition, orderDraft, markPrice]);
+
+    // 3. Draw PineScript SMC Alert Line if not hidden and active
+    if (!hidePineOverlay && pineSignals.length > 0) {
+      const latestPine = pineSignals[0];
+      if (latestPine && Date.now() - latestPine.time < 15 * 60 * 1000) {
+        const pineLine = candleSeries.createPriceLine({
+          price: latestPine.entryPrice,
+          color: latestPine.side === 'BUY' ? '#0ecb81' : '#f6465d',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: `PINE SMC [${latestPine.side}]`,
+        });
+        priceLinesRef.current.push(pineLine);
+      }
+    }
+  }, [activePosition, orderDraft, markPrice, hidePineOverlay, pineSignals]);
 
   return (
     <div className={`relative flex flex-col w-full h-full bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden ${className}`}>
@@ -420,21 +440,40 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           <span className="text-xs text-[#7d8590] uppercase font-mono">Perpetual Futures</span>
         </div>
 
-        {/* Interval Selector */}
-        <div className="flex items-center space-x-1 bg-[#020305] p-0.5 rounded border border-[#151d2c]">
-          {(['1m', '5m', '15m', '1h'] as const).map((int) => (
-            <button
-              key={int}
-              onClick={() => setCandleInterval(int)}
-              className={`px-2.5 py-1 text-xs font-mono rounded transition-colors ${
-                candleInterval === int
-                  ? 'bg-[#151d2c] text-[#0ecb81] font-bold shadow-sm'
-                  : 'text-[#7d8590] hover:text-[#e6edf3]'
-              }`}
-            >
-              {int}
-            </button>
-          ))}
+        {/* Right Toolbar: Pine Overlay Toggle & Interval Selector */}
+        <div className="flex items-center space-x-2">
+          {/* Pine Overlay Toggle */}
+          <button
+            onClick={toggleHidePineOverlay}
+            className={`flex items-center space-x-1 px-2.5 py-1 text-xs font-mono rounded border transition-colors ${
+              hidePineOverlay
+                ? 'bg-[#151d2c] text-[#7d8590] border-[#151d2c] hover:text-[#e6edf3]'
+                : 'bg-[#2962ff]/15 text-[#2962ff] border-[#2962ff]/40 font-bold'
+            }`}
+            title="Toggle TradingView PineScript SMC overlay markers"
+          >
+            {hidePineOverlay ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">
+              {hidePineOverlay ? 'Pine Overlay Off' : 'Pine Overlay On'}
+            </span>
+          </button>
+
+          {/* Interval Selector */}
+          <div className="flex items-center space-x-1 bg-[#020305] p-0.5 rounded border border-[#151d2c]">
+            {(['1m', '5m', '15m', '1h'] as const).map((int) => (
+              <button
+                key={int}
+                onClick={() => setCandleInterval(int)}
+                className={`px-2.5 py-1 text-xs font-mono rounded transition-colors ${
+                  candleInterval === int
+                    ? 'bg-[#151d2c] text-[#0ecb81] font-bold shadow-sm'
+                    : 'text-[#7d8590] hover:text-[#e6edf3]'
+                }`}
+              >
+                {int}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

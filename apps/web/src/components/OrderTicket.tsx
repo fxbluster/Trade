@@ -25,9 +25,9 @@ export const OrderTicket: React.FC = () => {
   const holdTimerRef = useRef<any>(null);
   const holdIntervalRef = useRef<any>(null);
 
-  // LiquidationGuard allows maximum 10% of account equity per trade
+  // Discretionary manual trading permits presets up to 50.0% of account equity
   const equity = account.equity > 0 ? account.equity : account.walletBalance;
-  const maxMarginCap = Math.max(5, Number((equity * 0.10).toFixed(2)));
+  const maxMarginCap = Math.max(5, Number((equity * 0.50).toFixed(2)));
 
   // Calculate ATR if available
   const atr = indicators?.atr14 ?? 0;
@@ -131,12 +131,17 @@ export const OrderTicket: React.FC = () => {
     setErrorMessage(null);
 
     try {
+      const marginAllocationPct = equity > 0
+        ? Number(((orderDraft.marginUsd / equity) * 100).toFixed(1))
+        : undefined;
+
       const res = await apiClient.openOrder({
         symbol,
         side: orderDraft.side,
         orderType: orderDraft.orderType,
         marginUsd: orderDraft.marginUsd,
         leverage: orderDraft.leverage,
+        marginAllocationPct,
         limitPrice: orderDraft.orderType === 'LIMIT' ? orderDraft.limitPrice : undefined,
         stopLoss: orderDraft.stopLoss,
         tp1: orderDraft.tp1,
@@ -174,7 +179,7 @@ export const OrderTicket: React.FC = () => {
             Order Execution
           </span>
           <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#151d2c] text-[#7d8590]">
-            10% Cap: ${maxMarginCap.toFixed(0)}
+            50% Cap: ${maxMarginCap.toFixed(0)}
           </span>
         </div>
         <span className="font-mono text-xs text-[#7d8590]">
@@ -269,22 +274,25 @@ export const OrderTicket: React.FC = () => {
           />
         </div>
 
-        {/* 25%, 50%, 75%, 100% of 10% Cap Chips */}
-        <div className="grid grid-cols-4 gap-1 pt-1">
-          {[0.25, 0.5, 0.75, 1.0].map((frac) => {
-            const amount = Number((maxMarginCap * frac).toFixed(2));
+        {/* Expanded 2.5%, 5.0%, 10.0%, 25.0%, 50.0% Margin Quick-Select Chips */}
+        <div className="grid grid-cols-5 gap-1 pt-1">
+          {[2.5, 5.0, 10.0, 25.0, 50.0].map((pct) => {
+            const amount = Number((equity * (pct / 100)).toFixed(2));
             const isSelected = Math.abs(orderDraft.marginUsd - amount) < 0.1;
             return (
               <button
-                key={frac}
+                key={pct}
                 onClick={() => setOrderDraft({ marginUsd: amount })}
                 className={`py-1 text-[10px] font-mono rounded border transition-colors ${
                   isSelected
-                    ? 'border-[#2962ff] bg-[#2962ff]/20 text-[#e6edf3] font-bold'
+                    ? pct >= 25
+                      ? 'border-[#f6465d] bg-[#f6465d]/20 text-[#f6465d] font-bold'
+                      : 'border-[#2962ff] bg-[#2962ff]/20 text-[#e6edf3] font-bold'
                     : 'border-[#151d2c] bg-[#020305] text-[#7d8590] hover:border-[#7d8590]'
                 }`}
+                title={`Allocate ${pct}% ($${amount.toFixed(0)}) of equity`}
               >
-                {(frac * 10).toFixed(1)}% ({amount.toFixed(0)}$)
+                {pct.toFixed(pct < 10 ? 1 : 0)}%
               </button>
             );
           })}

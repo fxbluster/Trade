@@ -9,6 +9,8 @@ import type {
   PositionEventType,
   AlertLevel,
   TradeRecord,
+  ConfluenceSnapshot,
+  AutoPilotConfig,
 } from '@tradeos/shared';
 import { SESSION_TOKEN } from '../config.js';
 
@@ -51,6 +53,11 @@ export class WsHub {
     unrealizedPnl: number;
   } | null = null;
   private tickThrottleTimer: NodeJS.Timeout | null = null;
+
+  // 2Hz (500ms) rate throttling for CONFLUENCE_UPDATE broadcasts
+  private lastConfluenceBroadcastTime = 0;
+  private pendingConfluence: ConfluenceSnapshot | null = null;
+  private confluenceThrottleTimer: NodeJS.Timeout | null = null;
 
   constructor(options: WsHubOptions = {}) {
     this.sessionToken = options.sessionToken || SESSION_TOKEN;
@@ -271,6 +278,51 @@ export class WsHub {
   }
 
   /**
+   * Broadcasts 6+1 Confluence snapshot at a throttled rate of <= 2Hz (min 500ms interval).
+   */
+  public broadcastConfluence(snapshot: ConfluenceSnapshot): void {
+    const now = Date.now();
+    this.pendingConfluence = snapshot;
+
+    if (now - this.lastConfluenceBroadcastTime >= 500) {
+      this.flushConfluence();
+    } else if (!this.confluenceThrottleTimer) {
+      const delay = Math.max(10, 500 - (now - this.lastConfluenceBroadcastTime));
+      this.confluenceThrottleTimer = setTimeout(() => {
+        this.confluenceThrottleTimer = null;
+        this.flushConfluence();
+      }, delay);
+    }
+  }
+
+  private flushConfluence(): void {
+    if (!this.pendingConfluence) return;
+    this.lastConfluenceBroadcastTime = Date.now();
+    const msg: any = {
+      type: 'CONFLUENCE_UPDATE',
+      data: this.pendingConfluence,
+    };
+    this.pendingConfluence = null;
+    this.broadcast(msg);
+  }
+
+  /**
+   * Broadcasts Auto-Pilot state machine status.
+   */
+  public broadcastAutoPilotStatus(data: {
+    state: string;
+    config: AutoPilotConfig;
+    openTradeId: string | null;
+    cooldownRemainingSec?: number;
+  }): void {
+    const msg: any = {
+      type: 'AUTOPILOT_STATUS',
+      data,
+    };
+    this.broadcast(msg);
+  }
+
+  /**
    * Broadcasts a full CockpitState snapshot.
    */
   public broadcastSnapshot(snapshot: CockpitState, targetWs?: WebSocket): void {
@@ -340,6 +392,10 @@ export class WsHub {
     if (this.tickThrottleTimer) {
       clearTimeout(this.tickThrottleTimer);
       this.tickThrottleTimer = null;
+    }
+    if (this.confluenceThrottleTimer) {
+      clearTimeout(this.confluenceThrottleTimer);
+      this.confluenceThrottleTimer = null;
     }
     for (const client of this.clients) {
       if (client.authTimer) {

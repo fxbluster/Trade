@@ -51,13 +51,25 @@ export function validateOrderRisk(
     };
   }
 
-  // Gate 3: 10% Hard Margin Cap of Wallet Balance
-  const maxMarginAllowed = Number((account.walletBalance * 0.10).toFixed(2));
+  // Gate 3: Mode-Aware Margin Cap
+  // Auto-Pilot mode is strictly clamped to max 10.0% margin allocation
+  // Discretionary Manual mode permits presets up to 50.0% of wallet balance
+  const isAutoPilot = (req as any).isAutoPilot === true;
+  const isExplicitManualExpanded =
+    !isAutoPilot &&
+    ((req.marginAllocationPct !== undefined && req.marginAllocationPct > 10) ||
+      (req as any).isManual === true ||
+      (req as any).executionMode === 'MANUAL');
+
+  const maxMarginPct = isAutoPilot ? 0.10 : isExplicitManualExpanded ? 0.50 : 0.10;
+  const maxMarginAllowed = Number((account.walletBalance * maxMarginPct).toFixed(2));
   if (req.marginUsd > maxMarginAllowed + 0.01) {
     return {
       allowed: false,
       code: 'ERR_MARGIN_CAP_EXCEEDED',
-      reason: `Tələb olunan marja ($${req.marginUsd.toFixed(2)}) icazə verilən 10% limitindən ($${maxMarginAllowed.toFixed(2)}) çoxdur`,
+      reason: `Tələb olunan marja ($${req.marginUsd.toFixed(2)}) icazə verilən ${
+        Math.round(maxMarginPct * 100)
+      }% limitindən ($${maxMarginAllowed.toFixed(2)}) çoxdur`,
     };
   }
 

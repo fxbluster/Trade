@@ -9,6 +9,8 @@ import type {
   PositionEventType,
   TradeRecord,
   AlertLevel,
+  ConfluenceSnapshot,
+  AutoPilotConfig,
 } from '@tradeos/shared';
 import { getSessionToken } from './apiClient';
 
@@ -41,12 +43,20 @@ export type AlertData = {
   message: string;
 };
 
+export type AutoPilotStatusData = {
+  state: string;
+  config: AutoPilotConfig;
+  openTradeId: string | null;
+};
+
 type MessageHandlers = {
   onSnapshot?: (data: CockpitState) => void;
   onTick?: (data: TickData) => void;
   onAnalysis?: (data: AnalysisData) => void;
   onPositionEvent?: (data: PositionEventData) => void;
   onAlert?: (data: AlertData) => void;
+  onConfluence?: (data: ConfluenceSnapshot) => void;
+  onAutoPilotStatus?: (data: AutoPilotStatusData) => void;
   onStatusChange?: (status: WsStatus) => void;
 };
 
@@ -135,6 +145,12 @@ class WsClient {
               break;
             case 'ALERT':
               this.handlers.onAlert?.({ level: msg.level, message: msg.message });
+              break;
+            case 'CONFLUENCE_UPDATE':
+              this.handlers.onConfluence?.(msg.data);
+              break;
+            case 'AUTOPILOT_STATUS':
+              this.handlers.onAutoPilotStatus?.(msg.data);
               break;
           }
         } catch (err) {

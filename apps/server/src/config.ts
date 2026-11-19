@@ -19,6 +19,8 @@ export const HOST: string = '127.0.0.1';
 export const BINANCE_DEMO_API_KEY: string = process.env.BINANCE_DEMO_API_KEY || '';
 export const BINANCE_DEMO_API_SECRET: string = process.env.BINANCE_DEMO_API_SECRET || '';
 export const GEMINI_API_KEY: string = process.env.GEMINI_API_KEY || '';
+export const WEBHOOK_SECRET: string = process.env.WEBHOOK_SECRET || 'tradeos-webhook-secret-passphrase';
+export const CRYPTOPANIC_API_KEY: string = process.env.CRYPTOPANIC_API_KEY || '';
 
 // 256-bit cryptographic session token generated on server startup
 export const SESSION_TOKEN: string = process.env.TEST_SESSION_TOKEN || crypto.randomBytes(32).toString('hex');

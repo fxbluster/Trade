@@ -4,7 +4,13 @@
  * Breakeven calculation, and pre-trade order previews.
  */
 
-import type { OpenOrderRequest, OrderPreviewResponse, TradeSide } from './contracts.js';
+import type {
+  ConfluencePillarId,
+  OpenOrderRequest,
+  OrderPreviewResponse,
+  PillarEvaluation,
+  TradeSide,
+} from './contracts.js';
 
 /**
  * Returns the decimal precision (number of decimal places) for a given step/tick size.
@@ -198,5 +204,107 @@ export function computeOrderPreview(
     rrRatio,
     maxLossUsd,
     breakevenPrice,
+  };
+}
+
+/**
+ * Exact institutional weighting table for the 7 confluence pillars:
+ * - MTF_TREND: 20%
+ * - MOMENTUM: 15%
+ * - ORDER_FLOW: 20%
+ * - CVD: 15%
+ * - LIQ_MAGNET: 10%
+ * - NLP_NEWS: 10%
+ * - PINE_SMC: 10%
+ */
+export const CONFLUENCE_WEIGHTS: Record<ConfluencePillarId, number> = {
+  MTF_TREND: 0.20,
+  MOMENTUM: 0.15,
+  ORDER_FLOW: 0.20,
+  CVD: 0.15,
+  LIQ_MAGNET: 0.10,
+  NLP_NEWS: 0.10,
+  PINE_SMC: 0.10,
+};
+
+/**
+ * Calculates 7-pillar composite confluence score, directional consensus bias,
+ * and actionable recommendation according to the institutional weighting matrix.
+ *
+ * Threshold matrix:
+ * - compositeScore >= 85: STRONG_BUY / STRONG_SELL
+ * - compositeScore >= 65: BUY / SELL
+ * - compositeScore < 65: GÖZLƏ
+ */
+export function calculateCompositeConfluenceScore(pillars: PillarEvaluation[]): {
+  compositeScore: number;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  recommendedAction: 'STRONG_BUY' | 'BUY' | 'GÖZLƏ' | 'SELL' | 'STRONG_SELL';
+} {
+  if (!pillars || pillars.length === 0) {
+    return {
+      compositeScore: 0,
+      bias: 'NEUTRAL',
+      recommendedAction: 'GÖZLƏ',
+    };
+  }
+
+  let bullishWeighted = 0;
+  let bearishWeighted = 0;
+
+  for (const pillar of pillars) {
+    const weight = CONFLUENCE_WEIGHTS[pillar.id] ?? 0;
+    const score = Number.isFinite(pillar.score) ? Math.max(0, Math.min(100, pillar.score)) : 0;
+
+    if (pillar.bias === 'BULLISH') {
+      bullishWeighted += weight * score;
+    } else if (pillar.bias === 'BEARISH') {
+      bearishWeighted += weight * score;
+    }
+  }
+
+  const roundedBullish = Number(bullishWeighted.toFixed(2));
+  const roundedBearish = Number(bearishWeighted.toFixed(2));
+
+  let bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = 'NEUTRAL';
+  let compositeScore = 0;
+
+  if (roundedBullish > roundedBearish) {
+    bias = 'BULLISH';
+    compositeScore = Math.round(roundedBullish);
+  } else if (roundedBearish > roundedBullish) {
+    bias = 'BEARISH';
+    compositeScore = Math.round(roundedBearish);
+  } else {
+    bias = 'NEUTRAL';
+    compositeScore = Math.round(roundedBullish);
+  }
+
+  let recommendedAction: 'STRONG_BUY' | 'BUY' | 'GÖZLƏ' | 'SELL' | 'STRONG_SELL' = 'GÖZLƏ';
+
+  if (bias === 'BULLISH') {
+    if (compositeScore >= 85) {
+      recommendedAction = 'STRONG_BUY';
+    } else if (compositeScore >= 65) {
+      recommendedAction = 'BUY';
+    } else {
+      recommendedAction = 'GÖZLƏ';
+    }
+  } else if (bias === 'BEARISH') {
+    if (compositeScore >= 85) {
+      recommendedAction = 'STRONG_SELL';
+    } else if (compositeScore >= 65) {
+      recommendedAction = 'SELL';
+    } else {
+      recommendedAction = 'GÖZLƏ';
+    }
+  } else {
+    recommendedAction = 'GÖZLƏ';
+  }
+
+  return {
+    compositeScore,
+    bias,
+    recommendedAction,
   };
 }

@@ -10,6 +10,8 @@ import type {
   HealthResponse,
   MentorChatResponse,
   RiskStateRecord,
+  ConfluenceSnapshot,
+  AutoPilotConfig,
 } from '@tradeos/shared';
 
 let sessionToken: string | null = null;
@@ -183,6 +185,25 @@ export const apiClient = {
     return request<MentorChatResponse>('/api/mentor/chat', {
       method: 'POST',
       body: JSON.stringify({ message }),
+    });
+  },
+
+  async getConfluence(symbol?: string): Promise<ConfluenceSnapshot> {
+    const url = symbol ? `/api/confluence?symbol=${encodeURIComponent(symbol)}` : '/api/confluence';
+    return request<ConfluenceSnapshot>(url);
+  },
+
+  async updateAutoPilotConfig(config: Partial<AutoPilotConfig>): Promise<{ ok: boolean; config: AutoPilotConfig }> {
+    return request<{ ok: boolean; config: AutoPilotConfig }>('/api/autopilot/config', {
+      method: 'POST',
+      body: JSON.stringify({ config }),
+    });
+  },
+
+  async toggleAutoPilot(enabled?: boolean): Promise<{ ok: boolean; enabled: boolean; state: string }> {
+    return request<{ ok: boolean; enabled: boolean; state: string }>('/api/autopilot/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
     });
   },
 };

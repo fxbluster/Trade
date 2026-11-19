@@ -1,0 +1,206 @@
+import React, { useState } from 'react';
+import { useMarketStore } from '../store/useMarketStore';
+import { useUiStore } from '../store/useUiStore';
+import { apiClient } from '../lib/apiClient';
+import { soundEffects } from '../lib/audio';
+import {
+  Bot,
+  Power,
+  ShieldCheck,
+  ShieldAlert,
+  Sliders,
+  RefreshCw,
+  AlertOctagon,
+  ArrowRightLeft,
+  Lock,
+} from 'lucide-react';
+
+export const AutoPilotControls: React.FC = () => {
+  const autoPilot = useMarketStore((s) => s.autoPilot);
+  const setAutoPilotStatus = useMarketStore((s) => s.setAutoPilotStatus);
+  const isAudioMuted = useUiStore((s) => s.isAudioMuted);
+
+  const [isToggling, setIsToggling] = useState(false);
+  const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const { state: apState, config } = autoPilot;
+  const isEnabled = config.enabled;
+
+  const handleToggle = async () => {
+    setIsToggling(true);
+    setErrorMsg(null);
+    try {
+      const res = await apiClient.toggleAutoPilot(!isEnabled);
+      setAutoPilotStatus({
+        ...autoPilot,
+        state: res.state,
+        config: { ...config, enabled: res.enabled },
+      });
+      if (res.enabled) {
+        soundEffects.playBuy(isAudioMuted);
+      } else {
+        soundEffects.playAlert(isAudioMuted);
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to toggle Auto-Pilot');
+    } finally {
+      setIsToggling(false);
+    }
+  };
+
+  const handleUpdateConfig = async (partial: Partial<typeof config>) => {
+    setIsSavingConfig(true);
+    setErrorMsg(null);
+    try {
+      const updated = { ...config, ...partial };
+      const res = await apiClient.updateAutoPilotConfig(updated);
+      setAutoPilotStatus({
+        ...autoPilot,
+        config: res.config,
+      });
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to update Auto-Pilot configuration');
+    } finally {
+      setIsSavingConfig(false);
+    }
+  };
+
+  const stateBadgeColor = () => {
+    switch (apState) {
+      case 'POSITION_OPEN':
+        return 'bg-[#0ecb81]/20 text-[#0ecb81] border-[#0ecb81]/50 animate-pulse';
+      case 'PLACING_ORDER':
+      case 'CLOSING':
+        return 'bg-[#2962ff]/20 text-[#2962ff] border-[#2962ff]/50 animate-pulse';
+      case 'COOLDOWN_ACTIVE':
+        return 'bg-[#f6465d]/20 text-[#f6465d] border-[#f6465d]/50 animate-pulse font-bold';
+      case 'EVALUATING':
+        return 'bg-[#f0b90b]/20 text-[#f0b90b] border-[#f0b90b]/40';
+      case 'IDLE':
+      default:
+        return isEnabled
+          ? 'bg-[#0ecb81]/15 text-[#0ecb81] border-[#0ecb81]/30'
+          : 'bg-[#151d2c] text-[#7d8590] border-[#151d2c]';
+    }
+  };
+
+  return (
+    <div className="flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg p-3 space-y-3 font-mono text-xs select-none">
+      {/* 1. Header: Master Arming Toggle & Active State Badge */}
+      <div className="flex items-center justify-between pb-2 border-b border-[#151d2c]">
+        <div className="flex items-center space-x-2">
+          <Bot className="w-4 h-4 text-[#0ecb81]" />
+          <span className="font-bold text-[#e6edf3] uppercase tracking-wide">
+            Autonomous Auto-Pilot
+          </span>
+        </div>
+
+        {/* State Badge */}
+        <span className={`px-2 py-0.5 rounded text-[10px] font-bold border uppercase ${stateBadgeColor()}`}>
+          {isEnabled ? apState : 'STANDBY (MANUAL)'}
+        </span>
+      </div>
+
+      {errorMsg && (
+        <div className="p-1.5 rounded bg-[#f6465d]/10 border border-[#f6465d]/30 text-[#f6465d] text-[11px]">
+          {errorMsg}
+        </div>
+      )}
+
+      {/* 2. Master Toggle Switch Button */}
+      <button
+        onClick={handleToggle}
+        disabled={isToggling}
+        className={`w-full flex items-center justify-center space-x-2 py-2.5 rounded font-bold uppercase transition-all shadow-md ${
+          isEnabled
+            ? 'bg-[#0ecb81] text-[#020305] hover:bg-[#0bb573] shadow-[#0ecb81]/20'
+            : 'bg-[#151d2c] text-[#7d8590] hover:text-[#e6edf3] hover:bg-[#1a2436]'
+        }`}
+      >
+        <Power className={`w-4 h-4 ${isToggling ? 'animate-spin' : ''}`} />
+        <span>{isEnabled ? 'AUTO-PILOT ARMED & ENGAGED' : 'ENGAGE AUTONOMOUS AUTO-PILOT'}</span>
+      </button>
+
+      {/* 3. Safety Guardrails & Rules Card */}
+      <div className="bg-[#020305] p-2.5 rounded border border-[#151d2c] space-y-2">
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-[#7d8590] flex items-center space-x-1">
+            <Sliders className="w-3 h-3 text-[#2962ff]" />
+            <span>Consensus Threshold:</span>
+          </span>
+          <div className="flex items-center space-x-1">
+            {[4, 5, 6].map((th) => (
+              <button
+                key={th}
+                onClick={() => handleUpdateConfig({ consensusThreshold: th })}
+                disabled={isSavingConfig}
+                className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                  config.consensusThreshold === th
+                    ? 'bg-[#2962ff]/20 text-[#2962ff] border-[#2962ff] font-bold'
+                    : 'bg-[#080c14] text-[#7d8590] border-[#151d2c] hover:text-[#e6edf3]'
+                }`}
+              >
+                {th}/7
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* AutoPilot Margin Allocation (strictly capped at 10% in auto-pilot) */}
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-[#7d8590] flex items-center space-x-1">
+            <Lock className="w-3 h-3 text-[#f0b90b]" />
+            <span>Margin Cap (Auto-Pilot):</span>
+          </span>
+          <div className="flex items-center space-x-1">
+            {[2.5, 5.0, 10.0].map((pct) => (
+              <button
+                key={pct}
+                onClick={() => handleUpdateConfig({ marginAllocationPct: pct })}
+                disabled={isSavingConfig}
+                className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                  config.marginAllocationPct === pct
+                    ? 'bg-[#0ecb81]/20 text-[#0ecb81] border-[#0ecb81] font-bold'
+                    : 'bg-[#080c14] text-[#7d8590] border-[#151d2c] hover:text-[#e6edf3]'
+                }`}
+              >
+                {pct.toFixed(1)}%
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Opposite-Confluence Reversal Exit Toggle */}
+        <div className="flex items-center justify-between pt-1 border-t border-[#151d2c]/60 text-[11px]">
+          <span className="text-[#7d8590] flex items-center space-x-1">
+            <ArrowRightLeft className="w-3 h-3 text-[#f6465d]" />
+            <span>2-Tick Opposite Exit:</span>
+          </span>
+          <button
+            onClick={() => handleUpdateConfig({ oppositeExitEnabled: !config.oppositeExitEnabled })}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold border transition-colors ${
+              config.oppositeExitEnabled
+                ? 'bg-[#0ecb81]/20 text-[#0ecb81] border-[#0ecb81]/40'
+                : 'bg-[#151d2c] text-[#7d8590] border-[#151d2c]'
+            }`}
+          >
+            {config.oppositeExitEnabled ? 'ENABLED' : 'DISABLED'}
+          </button>
+        </div>
+
+        {/* Rules Footer Badges */}
+        <div className="grid grid-cols-2 gap-1 pt-1 text-[9px] text-[#7d8590]">
+          <div className="bg-[#080c14] p-1 rounded border border-[#151d2c]">
+            <span className="block text-[#e6edf3]">Breakeven Rule:</span>
+            <span>max(1.5x ATR, 0.25%)</span>
+          </div>
+          <div className="bg-[#080c14] p-1 rounded border border-[#151d2c]">
+            <span className="block text-[#e6edf3]">Circuit Breaker:</span>
+            <span>2 Losses → 60m Lock</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};

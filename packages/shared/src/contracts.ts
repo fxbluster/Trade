@@ -19,6 +19,61 @@ export type AlertLevel = 'INFO' | 'WARN' | 'CRITICAL';
 
 export type MentorMode = 'DISCIPLINE' | 'CAUTION' | 'AGGRESSIVE' | 'LOCKOUT';
 
+export type ConfluencePillarId =
+  | 'MTF_TREND'
+  | 'MOMENTUM'
+  | 'ORDER_FLOW'
+  | 'CVD'
+  | 'LIQ_MAGNET'
+  | 'NLP_NEWS'
+  | 'PINE_SMC';
+
+export interface PillarEvaluation {
+  id: ConfluencePillarId;
+  title: string;
+  score: number; // 0 to 100
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  valueText: string;
+  subText: string;
+  confirmed: boolean; // meets pillar threshold
+  updatedAt: number;
+}
+
+export interface ConfluenceSnapshot {
+  symbol: string;
+  pillars: PillarEvaluation[];
+  bullishCount: number;
+  bearishCount: number;
+  neutralCount: number;
+  consensusBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  consensusMet: boolean; // confirmingCount >= threshold (default 4)
+  threshold: number; // default 4
+  compositeScore: number; // 0 - 100
+  recommendedAction: 'STRONG_BUY' | 'BUY' | 'GÖZLƏ' | 'SELL' | 'STRONG_SELL';
+}
+
+export interface AutoPilotConfig {
+  enabled: boolean;
+  consensusThreshold: number; // default 4
+  marginAllocationPct: number; // 2.5, 5, 10 (strictly capped at 10% in auto-pilot)
+  leverage: number; // strict 10
+  oppositeExitEnabled: boolean; // true
+  circuitBreakerConsecutiveLosses: number; // 2
+  circuitBreakerCooldownMs: number; // 3,600,000 (1 hour)
+}
+
+export interface WebhookAlertPayload {
+  secret: string;
+  alert_id?: string;
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  entryPrice: number;
+  stopLoss: number;
+  tp1: number;
+  tp2: number;
+  time: number;
+}
+
 // ----------------------------------------------------------------------------
 // REST API Request / Response DTOs
 // ----------------------------------------------------------------------------
@@ -29,6 +84,7 @@ export interface OpenOrderRequest {
   orderType: OrderType;
   marginUsd: number;
   leverage: number;
+  marginAllocationPct?: number; // e.g. 2.5, 5, 10, 25, 50
   limitPrice?: number;
   stopLoss?: number;
   tp1?: number;
@@ -314,4 +370,16 @@ export type WsServerMessage =
       type: 'ALERT';
       level: AlertLevel;
       message: string;
+    }
+  | {
+      type: 'CONFLUENCE_UPDATE';
+      data: ConfluenceSnapshot;
+    }
+  | {
+      type: 'AUTOPILOT_STATUS';
+      data: {
+        state: string;
+        config: AutoPilotConfig;
+        openTradeId: string | null;
+      };
     };

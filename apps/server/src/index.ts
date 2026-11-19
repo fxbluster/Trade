@@ -18,6 +18,7 @@ import {
   SESSION_TOKEN,
   BINANCE_DEMO_API_KEY,
   BINANCE_DEMO_API_SECRET,
+  CRYPTOPANIC_API_KEY,
 } from './config.js';
 import { initializeDatabase, TradesRepo, RiskStateRepo } from './db/sqlite.js';
 import { BinanceClient } from './exchange/binanceClient.js';
@@ -26,7 +27,10 @@ import { BrokerFactory } from './exchange/broker.js';
 import { CvdEngine } from './quant/cvd.js';
 import { calculateIndicators } from './quant/indicators.js';
 import { generateMentorBrief } from './quant/sokratMentor.js';
+import { SentimentHarvester } from './quant/sentimentHarvester.js';
+import { ConfluenceEngine } from './quant/confluenceEngine.js';
 import { TradeManager } from './services/tradeManager.js';
+import { AutoPilotManager } from './services/autoPilotManager.js';
 import { WsHub } from './api/wsHub.js';
 import { registerRoutes } from './api/routes.js';
 
@@ -55,6 +59,9 @@ export async function bootstrapServer(): Promise<{
   tradeManager: TradeManager;
   db: ReturnType<typeof initializeDatabase>;
   streamsManager: BinanceStreamsManager;
+  confluenceEngine: ConfluenceEngine;
+  autoPilotManager: AutoPilotManager;
+  sentimentHarvester: SentimentHarvester;
   close: () => Promise<void>;
 }> {
   // 1. Initialize SQLite WAL Database Engine
@@ -194,6 +201,26 @@ export async function bootstrapServer(): Promise<{
     broadcastWs: (msg) => wsHub.broadcast(msg),
   });
 
+  // 8b. Initialize 6+1 Confluence Decision Engine & Autonomous Auto-Pilot Manager
+  const sentimentHarvester = new SentimentHarvester(CRYPTOPANIC_API_KEY);
+  sentimentHarvester.start();
+
+  const confluenceEngine = new ConfluenceEngine(sentimentHarvester);
+
+  const autoPilotManager = new AutoPilotManager({
+    db,
+    tradeManager,
+    broker: activeBroker,
+    confluenceEngine,
+    getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
+    getAtr: (sym) => {
+      const candles = candleHistoryMap.get(sym) || [];
+      const ind = calculateIndicators(candles, 0.01);
+      return ind?.atr14 || (markPriceMap.get(sym) || 100) * 0.005;
+    },
+    broadcastWs: (msg) => wsHub.broadcast(msg),
+  });
+
   // 9. Wire Stream Events to TradeManager, CvdEngine, and WsHub
   streamsManager.onMarkPrice((event) => {
     markPriceMap.set(event.symbol, event.markPrice);
@@ -246,6 +273,20 @@ export async function bootstrapServer(): Promise<{
       cvd: cvdEngine.getSnapshot().cvd,
       unrealizedPnl: Number(uPnl.toFixed(4)),
     });
+
+    // 6+1 Confluence Matrix Evaluation & Throttled 2Hz Broadcast
+    const ind = calculateIndicators(candles, 0.01);
+    const cvdSnap = cvdEngine.getSnapshot();
+    const confluenceSnapshot = confluenceEngine.evaluate({
+      symbol: event.symbol,
+      currentPrice: event.markPrice,
+      indicators: ind,
+      cvd: cvdSnap,
+    });
+    wsHub.broadcastConfluence(confluenceSnapshot);
+
+    // Autonomous Auto-Pilot Tick Evaluation
+    autoPilotManager.onTick(event.symbol, event.markPrice).catch(() => {});
   });
 
   streamsManager.onKline((event) => {
@@ -299,6 +340,8 @@ export async function bootstrapServer(): Promise<{
     db,
     streamsManager,
     cvdEngine,
+    confluenceEngine,
+    autoPilotManager,
     activeSymbol,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
     getFunding: (sym) => fundingRateMap.get(sym) || { rate: null, nextTime: null },
@@ -393,6 +436,9 @@ export async function bootstrapServer(): Promise<{
   // Graceful shutdown helper
   const close = async () => {
     try {
+      sentimentHarvester.stop();
+    } catch {}
+    try {
       await streamsManager.stop();
     } catch {}
     try {
@@ -412,6 +458,9 @@ export async function bootstrapServer(): Promise<{
     tradeManager,
     db,
     streamsManager,
+    confluenceEngine,
+    autoPilotManager,
+    sentimentHarvester,
     close,
   };
 }

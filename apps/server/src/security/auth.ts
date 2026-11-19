@@ -94,7 +94,8 @@ export const requireSessionToken: Middleware = (req: Request, res: Response, nex
   if (
     req.method === 'OPTIONS' ||
     !pathname.startsWith('/api/') ||
-    (req.method === 'GET' && (pathname === '/api/health' || pathname === '/api/auth/session'))
+    (req.method === 'GET' && (pathname === '/api/health' || pathname === '/api/auth/session')) ||
+    (req.method === 'POST' && pathname === '/api/webhook')
   ) {
     return next();
   }

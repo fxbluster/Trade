@@ -43,7 +43,9 @@ import {
   requireSessionToken,
   jsonBodyParser
 } from '../security/auth.js';
-import { SESSION_TOKEN } from '../config.js';
+import { SESSION_TOKEN, WEBHOOK_SECRET } from '../config.js';
+import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
+import type { AutoPilotManager } from '../services/autoPilotManager.js';
 
 export interface AppContext {
   tradeManager: TradeManager;
@@ -51,6 +53,8 @@ export interface AppContext {
   db: DatabaseSync;
   streamsManager?: BinanceStreamsManager;
   cvdEngine?: CvdEngine;
+  confluenceEngine?: ConfluenceEngine;
+  autoPilotManager?: AutoPilotManager;
   activeSymbol?: string;
   getMarkPrice?: (symbol: string) => number;
   setActiveSymbol?: (symbol: string) => void;
@@ -467,6 +471,89 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       mode: brief.mode,
       timestamp: Date.now()
     });
+  });
+
+  // 17. POST /api/webhook — TradingView PineScript v6 webhook alert ingestion
+  app.post('/api/webhook', (req: Request, res: Response) => {
+    const payload = (req.body || {}) as any;
+
+    // Constant-time passphrase comparison against WEBHOOK_SECRET
+    const secret = payload.secret;
+    if (!secret || typeof secret !== 'string') {
+      return sendJson(res, 401, { error: 'Unauthorized: Missing webhook secret passphrase' });
+    }
+    const a = Buffer.from(secret);
+    const b = Buffer.from(WEBHOOK_SECRET);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return sendJson(res, 401, { error: 'Unauthorized: Invalid webhook secret passphrase' });
+    }
+
+    // 30-second timestamp drift ceiling
+    if (payload.time && Math.abs(Date.now() - Number(payload.time)) > 30_000) {
+      return sendJson(res, 400, { error: 'Bad Request: Webhook timestamp drift exceeds 30 seconds' });
+    }
+
+    if (!payload.symbol || !payload.side) {
+      return sendJson(res, 400, { error: 'Bad Request: Missing symbol or side in webhook payload' });
+    }
+
+    if (ctx.confluenceEngine) {
+      const result = ctx.confluenceEngine.ingestWebhookAlert(payload);
+      if (!result.accepted) {
+        return sendJson(res, 400, { error: result.reason || 'Webhook rejected' });
+      }
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      status: 'INGESTED',
+      symbol: payload.symbol,
+      side: payload.side,
+      ingestedAt: Date.now(),
+    });
+  });
+
+  // 18. GET /api/confluence — Live 6+1 Confluence snapshot
+  app.get('/api/confluence', (req: Request, res: Response) => {
+    const symbol = ((req.query?.symbol as string) || activeSymbol).toUpperCase();
+    if (ctx.confluenceEngine) {
+      const snapshot = ctx.confluenceEngine.getSnapshot(symbol);
+      return sendJson(res, 200, snapshot);
+    }
+    sendJson(res, 404, { error: 'ConfluenceEngine not initialized' });
+  });
+
+  // 19. POST /api/autopilot/config — Update Auto-Pilot configuration
+  app.post('/api/autopilot/config', (req: Request, res: Response) => {
+    const body = (req.body || {}) as any;
+    if (body.marginAllocationPct !== undefined && body.marginAllocationPct > 10.0) {
+      return sendJson(res, 400, { error: 'Bad Request: Auto-Pilot margin allocation cannot exceed 10.0%' });
+    }
+
+    if (ctx.autoPilotManager) {
+      ctx.autoPilotManager.updateConfig(body);
+      return sendJson(res, 200, {
+        ok: true,
+        config: ctx.autoPilotManager.getConfig(),
+      });
+    }
+    sendJson(res, 404, { error: 'AutoPilotManager not initialized' });
+  });
+
+  // 20. POST /api/autopilot/toggle — Enable/Disable Auto-Pilot state machine
+  app.post('/api/autopilot/toggle', (req: Request, res: Response) => {
+    const body = (req.body || {}) as any;
+    if (ctx.autoPilotManager) {
+      const current = ctx.autoPilotManager.getConfig().enabled;
+      const target = body.enabled !== undefined ? Boolean(body.enabled) : !current;
+      ctx.autoPilotManager.setEnabled(target);
+      return sendJson(res, 200, {
+        ok: true,
+        enabled: target,
+        state: ctx.autoPilotManager.getState(),
+      });
+    }
+    sendJson(res, 404, { error: 'AutoPilotManager not initialized' });
   });
 
   return app;

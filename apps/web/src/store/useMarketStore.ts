@@ -11,8 +11,11 @@ import type {
   AccountInfo,
   BrokerMode,
   ExchangeHealth,
+  ConfluenceSnapshot,
+  AutoPilotConfig,
+  WebhookAlertPayload,
 } from '@tradeos/shared';
-import { wsClient, type WsStatus, type TickData, type AnalysisData, type PositionEventData } from '../lib/wsClient';
+import type { WsStatus, TickData, AnalysisData, PositionEventData, AutoPilotStatusData } from '../lib/wsClient';
 import { apiClient } from '../lib/apiClient';
 
 export interface MarketStoreState {
@@ -36,6 +39,12 @@ export interface MarketStoreState {
   candleInterval: '1m' | '5m' | '15m' | '1h';
   isLoadingKlines: boolean;
 
+  // Confluence & Auto-Pilot & Pine Overlay Slices
+  confluence: ConfluenceSnapshot | null;
+  autoPilot: AutoPilotStatusData;
+  hidePineOverlay: boolean;
+  pineSignals: WebhookAlertPayload[];
+
   // Actions
   setSymbol: (symbol: string) => Promise<void>;
   setCandleInterval: (interval: '1m' | '5m' | '15m' | '1h') => Promise<void>;
@@ -48,6 +57,14 @@ export interface MarketStoreState {
   setBrokerMode: (mode: BrokerMode) => Promise<void>;
   refreshKlines: () => Promise<void>;
   refreshState: () => Promise<void>;
+
+  // Confluence & AutoPilot actions
+  setConfluence: (confluence: ConfluenceSnapshot) => void;
+  setAutoPilotStatus: (data: AutoPilotStatusData) => void;
+  setHidePineOverlay: (hide: boolean) => void;
+  toggleHidePineOverlay: () => void;
+  addPineSignal: (signal: WebhookAlertPayload) => void;
+  refreshConfluence: () => Promise<void>;
 }
 
 const defaultAccount: AccountInfo = {
@@ -68,8 +85,18 @@ const defaultRisk: RiskStateRecord = {
   updated_at: Date.now(),
 };
 
+const defaultAutoPilotConfig: AutoPilotConfig = {
+  enabled: false,
+  consensusThreshold: 4,
+  marginAllocationPct: 10,
+  leverage: 10,
+  oppositeExitEnabled: true,
+  circuitBreakerConsecutiveLosses: 2,
+  circuitBreakerCooldownMs: 3600000,
+};
+
 export const useMarketStore = create<MarketStoreState>((set, get) => ({
-  symbol: 'SOLUSDT',
+  symbol: 'BTCUSDT',
   markPrice: 0,
   prevMarkPrice: 0,
   priceChangePercent24h: 0,
@@ -89,15 +116,25 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   candleInterval: '5m',
   isLoadingKlines: false,
 
+  // New Confluence & Auto-Pilot state
+  confluence: null,
+  autoPilot: {
+    state: 'IDLE',
+    config: defaultAutoPilotConfig,
+    openTradeId: null,
+  },
+  hidePineOverlay: false,
+  pineSignals: [],
+
   setSymbol: async (symbol: string) => {
     const sym = symbol.toUpperCase();
     if (get().symbol === sym) return;
     set({ symbol: sym, klines: [], isLoadingKlines: true });
-    wsClient.subscribeSymbol(sym);
     try {
       await apiClient.setSymbol(sym);
       await get().refreshKlines();
       await get().refreshState();
+      await get().refreshConfluence();
     } catch (err) {
       console.error('Failed to change symbol:', err);
     } finally {
@@ -144,22 +181,32 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       // Update active position's unrealized PnL if open
       let updatedPosition = state.activePosition;
       if (updatedPosition) {
-        // Position unrealized PnL estimation
         const isLong = updatedPosition.side === 'BUY';
         const diff = isLong
           ? tick.markPrice - updatedPosition.entry_price
           : updatedPosition.entry_price - tick.markPrice;
-        const uPnl = Number((diff * updatedPosition.remaining_qty).toFixed(2));
         updatedPosition = {
           ...updatedPosition,
-          realized_pnl: updatedPosition.realized_pnl, // preserves realized
+          realized_pnl: updatedPosition.realized_pnl,
         };
+      }
+
+      // Update latest candle in klines if exists
+      let updatedKlines = state.klines;
+      if (updatedKlines.length > 0 && tick.candle) {
+        const last = updatedKlines[updatedKlines.length - 1];
+        if (last && last.time === tick.candle.time) {
+          updatedKlines = [...updatedKlines.slice(0, -1), tick.candle];
+        } else if (last && tick.candle.time > last.time) {
+          updatedKlines = [...updatedKlines, tick.candle];
+        }
       }
 
       return {
         markPrice: tick.markPrice,
         prevMarkPrice: state.markPrice,
         activePosition: updatedPosition,
+        klines: updatedKlines,
         account: {
           ...state.account,
           unrealizedPnl: tick.unrealizedPnl,
@@ -216,6 +263,38 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       get().applySnapshot(state);
     } catch (err) {
       console.error('Failed to refresh state:', err);
+    }
+  },
+
+  // Confluence & AutoPilot actions
+  setConfluence: (confluence: ConfluenceSnapshot) => {
+    set({ confluence });
+  },
+
+  setAutoPilotStatus: (data: AutoPilotStatusData) => {
+    set({ autoPilot: data });
+  },
+
+  setHidePineOverlay: (hide: boolean) => {
+    set({ hidePineOverlay: hide });
+  },
+
+  toggleHidePineOverlay: () => {
+    set((state) => ({ hidePineOverlay: !state.hidePineOverlay }));
+  },
+
+  addPineSignal: (signal: WebhookAlertPayload) => {
+    set((state) => ({
+      pineSignals: [signal, ...state.pineSignals.slice(0, 19)],
+    }));
+  },
+
+  refreshConfluence: async () => {
+    try {
+      const data = await apiClient.getConfluence(get().symbol);
+      set({ confluence: data });
+    } catch {
+      // Confluence engine may not be online yet in test/dev
     }
   },
 }));

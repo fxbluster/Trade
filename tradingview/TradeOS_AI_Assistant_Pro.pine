@@ -1,0 +1,759 @@
+//@version=6
+indicator("TradeOS AI Assistant Pro [6+1 Confluence & Auto-Pilot]", overlay=true, precision=2, max_boxes_count=100, max_lines_count=100, max_labels_count=50)
+
+// ==========================================
+// 1. INPUT SETTINGS (İnstitusional Parametrlər)
+// ==========================================
+grp_acc = "Hesab və Risk İdarəetməsi (Dinamik Balans & Leverage)"
+sym_mode = input.string("Avtomatik (Cari Qrafik)", "Ticker Rejimi", options=["Avtomatik (Cari Qrafik)", "SOLUSD", "SOLUSDT"], group=grp_acc, display=display.none)
+active_sym = sym_mode == "Avtomatik (Cari Qrafik)" ? syminfo.ticker : sym_mode
+account_bal  = input.float(48.24, "Hesab Balansı ($)", minval=5.0, group=grp_acc, display=display.none)
+target_lev   = input.int(10, "Leverage (x)", minval=1, maxval=50, group=grp_acc, display=display.none)
+margin_pct   = input.float(10.0, "Marja Faizi (%)", minval=1.0, maxval=100.0, group=grp_acc, display=display.none)
+be_fee_buff  = input.float(0.15, "Breakeven Komissiya Buferi (%)", minval=0.0, maxval=1.0, step=0.01, group=grp_acc, display=display.none) / 100.0
+
+grp_mtf      = "Multi-Timeframe (MTF) Trend Confluence"
+enable_mtf   = input.bool(true, "MTF Trend Confluence Aktivləşdir", group=grp_mtf, display=display.none)
+mtf_res      = input.timeframe("60", "MTF Zaman Kəsiyi (15m / 60m)", group=grp_mtf, display=display.none)
+grp_htf_ms   = "Multi-Timeframe Market Structure (15m / 60m BOS & CHoCH)"
+enable_htf_ms = input.bool(true, "15m / 60m Bazar Strukturunu Aktivləşdir", group=grp_htf_ms, display=display.none)
+htf_ms_res   = input.timeframe("15", "Struktur Zaman Kəsiyi (15m və ya 60m)", group=grp_htf_ms, display=display.none)
+htf_swing_len = input.int(5, "HTF Swing Pivot Bar Sayı", minval=2, maxval=20, group=grp_htf_ms, display=display.none)
+
+grp_smc      = "Smart Money Concepts (SMC) & Dinamik Qrafik Elementləri"
+enable_smc   = input.bool(true, "Order Blocks (OB), Breaker & BOS Aktivləşdir", group=grp_smc, display=display.none)
+enable_traj  = input.bool(true, "Dinamik Hədəf Trayektoriyası Aktivləşdir (Entry->TP1->TP2)", group=grp_smc, display=display.none)
+max_ob_count = input.int(8, "Maksimum Aktiv OB Sayı", minval=2, maxval=20, group=grp_smc, display=display.none)
+
+grp_fvg      = "Fair Value Gaps (FVG) & Likvidlik Analizi"
+enable_fvg   = input.bool(true, "FVG Zonalarını Aktivləşdir", group=grp_fvg, display=display.none)
+max_fvg_boxes = input.int(6, "Maksimum FVG Qutu Sayı", minval=2, maxval=20, group=grp_fvg, display=display.none)
+
+grp_st = "Texniki İndikator Parametrləri"
+ema_fast_len = input.int(9, "EMA 9 (Qısa)", group=grp_st, display=display.none)
+ema_mid_len  = input.int(21, "EMA 21 (Orta)", group=grp_st, display=display.none)
+ema_slow_len = input.int(50, "EMA 50 (Trend)", group=grp_st, display=display.none)
+ema_base_len = input.int(200, "EMA 200 (Baza)", group=grp_st, display=display.none)
+rsi_len      = input.int(14, "RSI Periodu", group=grp_st, display=display.none)
+atr_len      = input.int(14, "ATR Periodu", group=grp_st, display=display.none)
+atr_mult_sl  = input.float(1.5, "Stop-Loss ATR Vurucusu", group=grp_st, display=display.none)
+atr_mult_tp1 = input.float(1.5, "TP1 ATR Vurucusu", group=grp_st, display=display.none)
+atr_mult_tp2 = input.float(2.5, "TP2 ATR Vurucusu", group=grp_st, display=display.none)
+
+grp_quant = "Quant Filtrləri (ADX & Volume)"
+adx_len      = input.int(14, "ADX Periodu", minval=1, group=grp_quant, display=display.none)
+adx_thresh   = input.float(20.0, "ADX Minimal Trend Həddi (Flet Blokeri)", minval=5.0, maxval=50.0, group=grp_quant, display=display.none)
+vol_len      = input.int(20, "Volume SMA Periodu", minval=1, group=grp_quant, display=display.none)
+vol_thresh   = input.float(1.0, "Volume Həcm Həddi Vurucusu", minval=0.5, step=0.1, group=grp_quant, display=display.none)
+
+grp_auth = "TradeOS v2 Vebxuk Təhlükəsizlik Zirehi (Shared Passphrase)"
+webhook_secret_key = input.string("tradeos_default_secret_2026", "TradeOS Webhook Secret (Passphrase)", group=grp_auth, display=display.none)
+
+// ==========================================
+// 2. CALCULATIONS & QUANT FILTERS
+// ==========================================
+ema9   = ta.ema(close, ema_fast_len)
+ema21  = ta.ema(close, ema_mid_len)
+ema50  = ta.ema(close, ema_slow_len)
+ema200 = ta.ema(close, ema_base_len)
+rsi14  = ta.rsi(close, rsi_len)
+atr14  = ta.atr(atr_len)
+
+// ==========================================
+// 2.1. SPARKLINE & DYNAMIC GAUGE FUNCTIONS
+// ==========================================
+f_spark_char(float val, float min_v, float max_v) =>
+    range_v = max_v - min_v
+    ratio = range_v > 0 ? (val - min_v) / range_v : 0.5
+    idx = math.floor(math.min(7.0, math.max(0.0, ratio * 8.0)))
+    idx == 0 ? " " : idx == 1 ? "▂" : idx == 2 ? "▃" : idx == 3 ? "▄" : idx == 4 ? "▅" : idx == 5 ? "▆" : idx == 6 ? "▇" : "█"
+
+f_sparkline(series float s, int len = 10) =>
+    float m_min = s
+    float m_max = s
+    for i = 0 to len - 1
+        val = s[i]
+        if not na(val)
+            m_min := math.min(m_min, val)
+            m_max := math.max(m_max, val)
+    string out = ""
+    for i = len - 1 to 0
+        out := out + f_spark_char(s[i], m_min, m_max)
+    out
+
+f_gauge_bar(float val, float min_v = 0.0, float max_v = 100.0, int total_bars = 10) =>
+    range_v = max_v - min_v
+    ratio = range_v > 0 ? math.min(1.0, math.max(0.0, (val - min_v) / range_v)) : 0.5
+    filled_count = math.round(ratio * total_bars)
+    string bar_str = "["
+    for i = 1 to total_bars
+        bar_str := bar_str + (i <= filled_count ? "█" : "░")
+    bar_str + "]"
+
+// Multi-Timeframe (MTF) Trend Confluence (100% Repainting-siz: [1] offset və barmerge.lookahead_off)
+mtf_ema       = request.security(syminfo.tickerid, mtf_res, ta.ema(close, 21)[1], barmerge.gaps_off, barmerge.lookahead_off)
+mtf_ema50     = request.security(syminfo.tickerid, mtf_res, ta.ema(close, 50)[1], barmerge.gaps_off, barmerge.lookahead_off)
+mtf_uptrend   = close > mtf_ema and close > mtf_ema50
+mtf_downtrend = close < mtf_ema or close < mtf_ema50
+mtf_bullish   = not enable_mtf or mtf_uptrend
+mtf_bearish   = not enable_mtf or mtf_downtrend
+
+// Multi-Timeframe Market Structure (15m / 60m BOS & CHoCH / Swing High & Low - 100% Repainting-siz)
+[raw_htf_ph, raw_htf_pl] = request.security(syminfo.tickerid, htf_ms_res, [ta.pivothigh(high, htf_swing_len, htf_swing_len)[1], ta.pivotlow(low, htf_swing_len, htf_swing_len)[1]], barmerge.gaps_off, barmerge.lookahead_off)
+[raw_htf60_ph, raw_htf60_pl] = request.security(syminfo.tickerid, "60", [ta.pivothigh(high, htf_swing_len, htf_swing_len)[1], ta.pivotlow(low, htf_swing_len, htf_swing_len)[1]], barmerge.gaps_off, barmerge.lookahead_off)
+var float htf_last_high = na
+var float htf_last_low  = na
+var int   htf_structure = 0
+var string htf_last_event = "Gözlənilir"
+
+if not na(raw_htf_ph)
+    htf_last_high := raw_htf_ph
+else if not na(raw_htf60_ph) and na(htf_last_high)
+    htf_last_high := raw_htf60_ph
+
+if not na(raw_htf_pl)
+    htf_last_low := raw_htf_pl
+else if not na(raw_htf60_pl) and na(htf_last_low)
+    htf_last_low := raw_htf60_pl
+
+htf_cross_high = not na(htf_last_high) and ta.crossover(close, htf_last_high)
+htf_cross_low  = not na(htf_last_low) and ta.crossunder(close, htf_last_low)
+
+htf_bull_choch = htf_cross_high and (htf_structure == -1)
+htf_bull_bos   = htf_cross_high and (htf_structure != -1)
+htf_bear_choch = htf_cross_low and (htf_structure == 1)
+htf_bear_bos   = htf_cross_low and (htf_structure != 1)
+
+if htf_bull_choch or htf_bull_bos
+    htf_structure := 1
+    htf_last_event := htf_bull_choch ? "CHoCH ⮝" : "BOS ⮝"
+
+if htf_bear_choch or htf_bear_bos
+    htf_structure := -1
+    htf_last_event := htf_bear_choch ? "CHoCH ⮟" : "BOS ⮟"
+
+htf_struct_bullish = not enable_htf_ms or (htf_structure == 1 or close > htf_last_high or htf_bull_bos or htf_bull_choch)
+htf_struct_bearish = not enable_htf_ms or (htf_structure == -1 or close < htf_last_low or htf_bear_bos or htf_bear_choch)
+
+// ADX & Directional Movement (Wilder's DMI)
+[plus_di, minus_di, adx_val] = ta.dmi(adx_len, adx_len)
+is_adx_trending = adx_val >= adx_thresh
+is_adx_strong   = adx_val >= 25.0
+
+// Dead-Cat Bounce (Ölü Pişik Sıçrayışı) və Kəskin Çöküş Filtrasiyası
+crash_drop_10    = (ta.highest(high, 10) - close) > (3.5 * atr14) or ((close[10] - close) > (3.5 * atr14))
+is_dead_cat_zone = (crash_drop_10 or mtf_downtrend) and (minus_di > plus_di)
+
+// Volume SMA Filtri
+vol_sma = ta.sma(volume, vol_len)
+vol_ok  = volume >= (vol_sma * vol_thresh)
+
+// Support & Resistance Pivot Səviyyələri
+pivot_h = ta.pivothigh(high, 10, 10)
+pivot_l = ta.pivotlow(low, 10, 10)
+var float res_level = na
+var float sup_level = na
+var float last_ph   = na
+var int   last_ph_bar = na
+var float last_pl   = na
+var int   last_pl_bar = na
+
+if not na(pivot_h)
+    res_level := pivot_h
+    last_ph   := pivot_h
+    last_ph_bar := bar_index - 10
+
+if not na(pivot_l)
+    sup_level := pivot_l
+    last_pl   := pivot_l
+    last_pl_bar := bar_index - 10
+
+// Smart Money Concepts (SMC): Order Blocks & Breaker Boxes
+var box[] bull_ob_boxes = array.new_box()
+var box[] bear_ob_boxes = array.new_box()
+var line[] smc_lines = array.new_line()
+var label[] smc_labels = array.new_label()
+
+// Fair Value Gaps (FVG) Qutuları
+var box[] bull_fvg_boxes = array.new_box()
+var box[] bear_fvg_boxes = array.new_box()
+var string fvg_status = "Balanslaşdırılıb ⚖"
+var color fvg_color = color.gray
+
+// Dinamik Hədəf Trayektoriyası Xətləri (Entry -> TP1 -> TP2 və SL)
+var line traj_entry_tp1 = na
+var line traj_tp1_tp2   = na
+var line traj_sl        = na
+
+// Trend Vəziyyəti
+is_uptrend   = (ema9 > ema21) and (ema21 > ema50) and (close > ema200)
+is_downtrend = (ema9 < ema21) and (ema21 < ema50) and (close < ema200)
+
+// Bazar Rejimi (Hedge Fund Rejim Təyini: Trend Yüksəliş / Trend Eniş / Konsolidasiya)
+market_regime = is_dead_cat_zone ? "Dead-Cat Sıçrayışı (Tələ 🪤)" : (not is_adx_trending ? "Konsolidasiya" : (close > ema50 and ema9 > ema21 ? "Trend Yüksəliş" : (close < ema50 and ema9 < ema21 ? "Trend Eniş" : "Konsolidasiya")))
+
+// ==========================================
+// 3. ZERO-REPAINT SIGNAL & DYNAMIC POSITION ENGINE
+// ==========================================
+confirmed = barstate.isconfirmed
+
+// Günlük Səviyyələr (PDH / PDL / PDC)
+var float pdh_level = na
+var float pdl_level = na
+var float pdc_level = na
+
+is_new_day = not na(ta.change(time("D"))) and (ta.change(time("D")) != 0)
+
+[dHigh, dLow, dClose] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead=barmerge.lookahead_off)
+if barstate.isconfirmed or is_new_day
+    pdh_level := dHigh
+    pdl_level := dLow
+    pdc_level := dClose
+
+is_pdl_sweep = not na(pdl_level) and (low < pdl_level) and (close > pdl_level)
+is_pdh_sweep = not na(pdh_level) and (high > pdh_level) and (close < pdh_level)
+
+// Giriş Tətikləyiciləri
+is_trend_buy  = ta.crossover(ema9, ema21) and (close > ema50) and (rsi14 > 45) and (rsi14 < 72) and is_adx_trending and (plus_di > minus_di) and mtf_bullish and not is_dead_cat_zone and htf_struct_bullish
+is_trend_sell = ta.crossunder(ema9, ema21) and (close < ema50) and (rsi14 < 55) and (rsi14 > 28) and is_adx_trending and (minus_di > plus_di) and mtf_bearish and htf_struct_bearish
+
+is_sweep_buy  = is_pdl_sweep and (close > open) and (rsi14 < 40) and not is_dead_cat_zone
+is_sweep_sell = is_pdh_sweep and (close < open) and (rsi14 > 60)
+
+buy_trig  = is_trend_buy or is_sweep_buy
+sell_trig = is_trend_sell or is_sweep_sell
+
+// Vəziyyət İdarəetmə Dəyişənləri
+var int active_dir       = 0
+var int entry_bar        = 0
+var float entry_p        = na
+var float sl_p           = na
+var float tp1_p          = na
+var float tp2_p          = na
+var float be_trigger     = na
+var bool is_be_active    = false
+var string exit_msg      = ""
+
+// Backtest Statistikası Dəyişənləri
+var int total_trades     = 0
+var int win_trades       = 0
+var int loss_trades      = 0
+var int be_trades        = 0
+var float cum_pnl        = 0.0
+
+buy_sig  = buy_trig and (active_dir != 1) and confirmed and not is_dead_cat_zone
+sell_sig = sell_trig and (active_dir != -1) and confirmed
+
+if buy_sig
+    active_dir    := 1
+    entry_bar     := bar_index
+    entry_p       := close
+    sl_p          := close - (atr14 * atr_mult_sl)
+    liq_p_long    = entry_p * (1.0 - (1.0 / target_lev))
+    sl_min_safe   = liq_p_long + (0.30 * (entry_p - liq_p_long))
+    if sl_p < sl_min_safe
+        sl_p      := sl_min_safe
+    tp1_p         := close + (atr14 * atr_mult_tp1)
+    tp2_p         := close + (atr14 * atr_mult_tp2)
+    tp_min_gap    = math.max(atr14 * 0.5, syminfo.mintick * 10)
+    if tp2_p <= tp1_p + tp_min_gap
+        tp2_p := tp1_p + tp_min_gap
+    be_trigger    := close + ((tp1_p - close) * 0.5)
+    is_be_active  := false
+    exit_msg      := ""
+
+    if enable_traj
+        if not na(traj_entry_tp1)
+            line.delete(traj_entry_tp1)
+        if not na(traj_tp1_tp2)
+            line.delete(traj_tp1_tp2)
+        if not na(traj_sl)
+            line.delete(traj_sl)
+        traj_entry_tp1 := line.new(x1=entry_bar, y1=entry_p, x2=entry_bar + 5, y2=tp1_p, color=color.new(#00e676, 10), width=2, style=line.style_arrow_right)
+        traj_tp1_tp2 := line.new(x1=entry_bar + 5, y1=tp1_p, x2=entry_bar + 10, y2=tp2_p, color=color.new(#00b0ff, 10), width=2, style=line.style_arrow_right)
+        traj_sl := line.new(x1=entry_bar, y1=entry_p, x2=entry_bar + 5, y2=sl_p, color=color.new(#ff5252, 10), width=2, style=line.style_dashed)
+
+if sell_sig
+    active_dir    := -1
+    entry_bar     := bar_index
+    entry_p       := close
+    sl_p          := close + (atr14 * atr_mult_sl)
+    liq_p_short   = entry_p * (1.0 + (1.0 / target_lev))
+    sl_max_safe   = liq_p_short - (0.30 * (liq_p_short - entry_p))
+    if sl_p > sl_max_safe
+        sl_p      := sl_max_safe
+    tp1_p         := close - (atr14 * atr_mult_tp1)
+    tp2_p         := close - (atr14 * atr_mult_tp2)
+    tp_min_gap    = math.max(atr14 * 0.5, syminfo.mintick * 10)
+    if tp2_p >= tp1_p - tp_min_gap
+        tp2_p := tp1_p - tp_min_gap
+    be_trigger    := close - ((close - tp1_p) * 0.5)
+    is_be_active  := false
+    exit_msg      := ""
+
+    if enable_traj
+        if not na(traj_entry_tp1)
+            line.delete(traj_entry_tp1)
+        if not na(traj_tp1_tp2)
+            line.delete(traj_tp1_tp2)
+        if not na(traj_sl)
+            line.delete(traj_sl)
+        traj_entry_tp1 := line.new(x1=entry_bar, y1=entry_p, x2=entry_bar + 5, y2=tp1_p, color=color.new(#ff5252, 10), width=2, style=line.style_arrow_right)
+        traj_tp1_tp2 := line.new(x1=entry_bar + 5, y1=tp1_p, x2=entry_bar + 10, y2=tp2_p, color=color.new(#ff9100, 10), width=2, style=line.style_arrow_right)
+        traj_sl := line.new(x1=entry_bar, y1=entry_p, x2=entry_bar + 5, y2=sl_p, color=color.new(#00e676, 10), width=2, style=line.style_dashed)
+
+// ==========================================
+// 4. DINAMIK BREAKEVEN & TRAILING STOP LOGIC
+// ==========================================
+is_in_trade = (active_dir != 0) and (bar_index > entry_bar)
+var bool alert_be_trigger = false
+alert_be_trigger := false
+
+if active_dir == 1 and not is_be_active and is_in_trade
+    if high >= be_trigger
+        is_be_active := true
+        be_price      = entry_p * (1.0 + be_fee_buff)
+        sl_p         := math.max(sl_p, be_price)
+        alert_be_trigger := true
+        if enable_traj and not na(traj_sl)
+            line.set_color(traj_sl, color.new(#ffd600, 0))
+            line.set_y2(traj_sl, sl_p)
+
+if active_dir == -1 and not is_be_active and is_in_trade
+    if low <= be_trigger
+        is_be_active := true
+        be_price      = entry_p * (1.0 - be_fee_buff)
+        sl_p         := math.min(sl_p, be_price)
+        alert_be_trigger := true
+        if enable_traj and not na(traj_sl)
+            line.set_color(traj_sl, color.new(#ffd600, 0))
+            line.set_y2(traj_sl, sl_p)
+
+// ==========================================
+// 4.1. SMART MONEY CONCEPTS (ORDER BLOCKS, BREAKERS & BOS)
+// ==========================================
+if enable_smc and confirmed
+    is_bull_ob = (close > open) and ((close - open) >= (atr14 * 0.75)) and (close[1] < open[1])
+    if is_bull_ob
+        ob_top = math.max(open[1], close[1])
+        ob_bot = low[1]
+        b_box = box.new(left=bar_index - 1, top=ob_top, right=bar_index + 1, bottom=ob_bot, border_color=color.new(#00e676, 75), border_style=line.style_dashed, border_width=1, bgcolor=color.new(#00e676, 94), extend=extend.none, text="BULL OB", text_color=color.new(#00e676, 40), text_size=size.tiny)
+        array.push(bull_ob_boxes, b_box)
+        if array.size(bull_ob_boxes) > max_ob_count
+            old_b = array.shift(bull_ob_boxes)
+            box.delete(old_b)
+
+    is_bear_ob = (close < open) and ((open - close) >= (atr14 * 0.75)) and (close[1] > open[1])
+    if is_bear_ob
+        ob_top = high[1]
+        ob_bot = math.min(open[1], close[1])
+        b_box = box.new(left=bar_index - 1, top=ob_top, right=bar_index + 1, bottom=ob_bot, border_color=color.new(#ff5252, 75), border_style=line.style_dashed, border_width=1, bgcolor=color.new(#ff5252, 94), extend=extend.none, text="BEAR OB", text_color=color.new(#ff5252, 40), text_size=size.tiny)
+        array.push(bear_ob_boxes, b_box)
+        if array.size(bear_ob_boxes) > max_ob_count
+            old_b = array.shift(bear_ob_boxes)
+            box.delete(old_b)
+
+    if array.size(bull_ob_boxes) > 0
+        for i = array.size(bull_ob_boxes) - 1 to 0
+            b = array.get(bull_ob_boxes, i)
+            if not na(b)
+                if close < box.get_bottom(b)
+                    box.set_extend(b, extend.none)
+                    box.set_right(b, bar_index)
+                    box.set_bgcolor(b, color.new(#b71c1c, 94))
+                    box.set_border_color(b, color.new(#b71c1c, 70))
+                    box.set_text(b, "BREAKER ⮟")
+                    box.set_text_color(b, color.new(#ff8a80, 20))
+                else
+                    box.set_right(b, bar_index + 1)
+
+    if array.size(bear_ob_boxes) > 0
+        for i = array.size(bear_ob_boxes) - 1 to 0
+            b = array.get(bear_ob_boxes, i)
+            if not na(b)
+                if close > box.get_top(b)
+                    box.set_extend(b, extend.none)
+                    box.set_right(b, bar_index)
+                    box.set_bgcolor(b, color.new(#00838f, 94))
+                    box.set_border_color(b, color.new(#00838f, 70))
+                    box.set_text(b, "BREAKER ⮝")
+                    box.set_text_color(b, color.new(#80d8ff, 20))
+                else
+                    box.set_right(b, bar_index + 1)
+
+    if not na(last_ph) and (close > last_ph) and (close[1] <= last_ph)
+        bos_l = line.new(x1=last_ph_bar, y1=last_ph, x2=bar_index, y2=last_ph, color=color.new(#00e676, 20), width=1, style=line.style_dashed)
+        bos_lbl = label.new(x=bar_index, y=last_ph, text="BOS ⮝", color=color.new(color.black, 100), textcolor=color.new(#00e676, 20), size=size.tiny, style=label.style_none)
+        array.push(smc_lines, bos_l)
+        array.push(smc_labels, bos_lbl)
+        if array.size(smc_lines) > 20
+            line.delete(array.shift(smc_lines))
+        if array.size(smc_labels) > 20
+            label.delete(array.shift(smc_labels))
+
+    if not na(last_pl) and (close < last_pl) and (close[1] >= last_pl)
+        bos_l = line.new(x1=last_pl_bar, y1=last_pl, x2=bar_index, y2=last_pl, color=color.new(#ff5252, 20), width=1, style=line.style_dashed)
+        bos_lbl = label.new(x=bar_index, y=last_pl, text="BOS ⮟", color=color.new(color.black, 100), textcolor=color.new(#ff5252, 20), size=size.tiny, style=label.style_none)
+        array.push(smc_lines, bos_l)
+        array.push(smc_labels, bos_lbl)
+        if array.size(smc_lines) > 20
+            line.delete(array.shift(smc_lines))
+        if array.size(smc_labels) > 20
+            label.delete(array.shift(smc_labels))
+
+    if not na(last_ph) and (high > last_ph) and (close < last_ph) and (high[1] <= last_ph)
+        sw_l = line.new(x1=bar_index - 1, y1=high, x2=bar_index, y2=high, color=color.new(#ffd600, 20), width=1, style=line.style_dotted)
+        sw_lbl = label.new(x=bar_index, y=high, text="LIQ SWEEP", color=color.new(color.black, 100), textcolor=color.new(#ffd600, 20), size=size.tiny, style=label.style_none)
+        array.push(smc_lines, sw_l)
+        array.push(smc_labels, sw_lbl)
+        if array.size(smc_lines) > 20
+            line.delete(array.shift(smc_lines))
+        if array.size(smc_labels) > 20
+            label.delete(array.shift(smc_labels))
+
+    if not na(last_pl) and (low < last_pl) and (close > last_pl) and (low[1] >= last_pl)
+        sw_l = line.new(x1=bar_index - 1, y1=low, x2=bar_index, y2=low, color=color.new(#ffd600, 20), width=1, style=line.style_dotted)
+        sw_lbl = label.new(x=bar_index, y=low, text="LIQ SWEEP", color=color.new(color.black, 100), textcolor=color.new(#ffd600, 20), size=size.tiny, style=label.style_none)
+        array.push(smc_lines, sw_l)
+        array.push(smc_labels, sw_lbl)
+        if array.size(smc_lines) > 20
+            line.delete(array.shift(smc_lines))
+        if array.size(smc_labels) > 20
+            label.delete(array.shift(smc_labels))
+
+// ==========================================
+// 4.3. INSTITUTIONAL LIQUIDITY LEVELS (PDH / PDL / PDC)
+// ==========================================
+plot_pdh = is_new_day ? na : pdh_level
+plot_pdl = is_new_day ? na : pdl_level
+plot_pdc = is_new_day ? na : pdc_level
+
+plot(plot_pdh, title="PDH (Ötən Günün Zirvəsi)", color=color.new(#ff1744, 20), linewidth=2, style=plot.style_linebr, display=display.all - display.price_scale - display.status_line)
+plot(plot_pdl, title="PDL (Ötən Günün Dibi)", color=color.new(#00e676, 20), linewidth=2, style=plot.style_linebr, display=display.all - display.price_scale - display.status_line)
+plot(plot_pdc, title="PDC (Ötən Günün Bağlanışı)", color=color.new(#787b86, 50), linewidth=1, style=plot.style_linebr, display=display.all - display.price_scale - display.status_line)
+plot(enable_htf_ms ? htf_last_high : na, title="HTF Swing High (15m/60m Structure)", color=color.new(#00e676, 40), linewidth=1, style=plot.style_stepline, display=display.all - display.price_scale)
+plot(enable_htf_ms ? htf_last_low : na, title="HTF Swing Low (15m/60m Structure)", color=color.new(#ff5252, 40), linewidth=1, style=plot.style_stepline, display=display.all - display.price_scale)
+
+plotshape(enable_htf_ms and htf_bull_choch, title="HTF Bullish CHoCH", style=shape.labelup, location=location.belowbar, color=color.new(#00e676, 10), text="HTF CHoCH ⮝", textcolor=color.black, size=size.tiny)
+plotshape(enable_htf_ms and htf_bull_bos, title="HTF Bullish BOS", style=shape.triangleup, location=location.belowbar, color=color.new(#00e676, 20), size=size.tiny)
+plotshape(enable_htf_ms and htf_bear_choch, title="HTF Bearish CHoCH", style=shape.labeldown, location=location.abovebar, color=color.new(#ff5252, 10), text="HTF CHoCH ⮟", textcolor=color.white, size=size.tiny)
+plotshape(enable_htf_ms and htf_bear_bos, title="HTF Bearish BOS", style=shape.triangledown, location=location.abovebar, color=color.new(#ff5252, 20), size=size.tiny)
+
+// ==========================================
+// 4.4. MULTI-SESSION VWAP (LONDON & NEW YORK)
+// ==========================================
+f_calc_vwap(sess) =>
+    t = time(timeframe.period, sess, "UTC")
+    is_new = not na(t) and na(t[1])
+    in_s = not na(t)
+    var float s_pv = 0.0
+    var float s_vol = 0.0
+    var float last_v = na
+    if is_new_day
+        last_v := na
+    if is_new
+        s_pv := 0.0
+        s_vol := 0.0
+    if in_s
+        s_pv += hlc3 * volume
+        s_vol += volume
+        last_v := s_vol > 0 ? s_pv / s_vol : last_v
+    last_v
+
+ny_vwap = f_calc_vwap("1330-2000:1234567")
+ldn_vwap = f_calc_vwap("0800-1630:1234567")
+
+plot_ny_vwap = is_new_day ? na : ny_vwap
+plot_ldn_vwap = is_new_day ? na : ldn_vwap
+
+plot(plot_ny_vwap, title="NY Session VWAP", color=color.new(#ff9100, 20), linewidth=2, style=plot.style_linebr, display=display.all - display.price_scale - display.status_line)
+plot(plot_ldn_vwap, title="London Session VWAP", color=color.new(#00b0ff, 20), linewidth=2, style=plot.style_linebr, display=display.all - display.price_scale - display.status_line)
+
+// ==========================================
+// 4.2. FAIR VALUE GAPS (FVG) & LIKVIDLIK DİVARLARI ANALİZİ
+// ==========================================
+is_bull_fvg = enable_fvg and (low > high[2]) and (close[1] > open[1])
+is_bear_fvg = enable_fvg and (high < low[2]) and (close[1] < open[1])
+
+if is_bull_fvg and confirmed
+    fvg_top = low
+    fvg_bot = high[2]
+    fvg_box = box.new(left=bar_index - 2, top=fvg_top, right=bar_index + 1, bottom=fvg_bot, border_color=color.new(#00e676, 80), border_style=line.style_dotted, border_width=1, bgcolor=color.new(#00e676, 95), extend=extend.none, text="FVG ⮝", text_color=color.new(#00e676, 40), text_size=size.tiny)
+    array.push(bull_fvg_boxes, fvg_box)
+    if array.size(bull_fvg_boxes) > max_fvg_boxes
+        old_b = array.shift(bull_fvg_boxes)
+        box.delete(old_b)
+    fvg_status := "Bull FVG ⮝ ($ " + str.tostring(fvg_bot, "#0.00") + "-" + str.tostring(fvg_top, "#0.00") + ")"
+    fvg_color  := color.green
+
+if is_bear_fvg and confirmed
+    fvg_top = low[2]
+    fvg_bot = high
+    fvg_box = box.new(left=bar_index - 2, top=fvg_top, right=bar_index + 1, bottom=fvg_bot, border_color=color.new(#ff5252, 80), border_style=line.style_dotted, border_width=1, bgcolor=color.new(#ff5252, 95), extend=extend.none, text="FVG ⮟", text_color=color.new(#ff5252, 40), text_size=size.tiny)
+    array.push(bear_fvg_boxes, fvg_box)
+    if array.size(bear_fvg_boxes) > max_fvg_boxes
+        old_b = array.shift(bear_fvg_boxes)
+        box.delete(old_b)
+    fvg_status := "Bear FVG ⮟ ($ " + str.tostring(fvg_bot, "#0.00") + "-" + str.tostring(fvg_top, "#0.00") + ")"
+    fvg_color  := color.red
+
+if array.size(bull_fvg_boxes) > 0
+    for i = array.size(bull_fvg_boxes) - 1 to 0
+        b = array.get(bull_fvg_boxes, i)
+        if not na(b)
+            if low <= box.get_bottom(b)
+                box.set_extend(b, extend.none)
+                box.set_right(b, bar_index)
+                box.set_bgcolor(b, color.new(color.gray, 95))
+                box.set_border_color(b, color.new(color.gray, 75))
+                box.set_text(b, "FVG DOLDU ✔")
+                fvg_status := "Bull FVG Dolduruldu"
+                fvg_color  := color.yellow
+            else
+                box.set_right(b, bar_index + 1)
+
+if array.size(bear_fvg_boxes) > 0
+    for i = array.size(bear_fvg_boxes) - 1 to 0
+        b = array.get(bear_fvg_boxes, i)
+        if not na(b)
+            if high >= box.get_top(b)
+                box.set_extend(b, extend.none)
+                box.set_right(b, bar_index)
+                box.set_bgcolor(b, color.new(color.gray, 95))
+                box.set_border_color(b, color.new(color.gray, 75))
+                box.set_text(b, "FVG DOLDU ✔")
+                fvg_status := "Bear FVG Dolduruldu"
+                fvg_color  := color.yellow
+            else
+                box.set_right(b, bar_index + 1)
+
+highest_high_20 = ta.highest(high, 20)
+lowest_low_20   = ta.lowest(low, 20)
+vol_wall_strength = volume > (vol_sma * 1.5) ? "GÜCLÜ DİVAR" : "NORMAL"
+
+sl_hit  = is_in_trade and ((active_dir == 1 and low <= sl_p) or (active_dir == -1 and high >= sl_p))
+tp1_hit = is_in_trade and ((active_dir == 1 and high >= tp1_p) or (active_dir == -1 and low <= tp1_p))
+tp2_hit = is_in_trade and ((active_dir == 1 and high >= tp2_p) or (active_dir == -1 and low <= tp2_p))
+
+rec_margin = account_bal * (margin_pct / 100.0)
+pos_val    = rec_margin * target_lev
+
+var bool alert_exit_tp = false
+var bool alert_exit_sl = false
+var bool alert_exit_be = false
+alert_exit_tp := false
+alert_exit_sl := false
+alert_exit_be := false
+
+if is_in_trade and confirmed
+    if tp2_hit or tp1_hit
+        exit_p    = tp2_hit ? tp2_p : tp1_p
+        trade_pnl = ((active_dir == 1 ? (exit_p - entry_p) : (entry_p - exit_p)) / entry_p * pos_val) - (pos_val * 0.0010)
+        cum_pnl      += trade_pnl
+        total_trades += 1
+        win_trades   += 1
+        exit_msg     := tp2_hit ? "TP2 VURULDU ✔✔" : "TP1 VURULDU ✔"
+        alert_exit_tp := true
+        active_dir   := 0
+        is_be_active := false
+    else if sl_hit
+        trade_pnl = ((active_dir == 1 ? (sl_p - entry_p) : (entry_p - sl_p)) / entry_p * pos_val) - (pos_val * 0.0010)
+        cum_pnl      += trade_pnl
+        total_trades += 1
+        if is_be_active
+            be_trades += 1
+            exit_msg := "BE ÇIXIŞ (QORUNDU) 🛡"
+            alert_exit_be := true
+        else
+            loss_trades += 1
+            exit_msg := "SL ÇIXIŞ ✖"
+            alert_exit_sl := true
+        active_dir   := 0
+        is_be_active := false
+
+total_trades := win_trades + loss_trades + be_trades
+win_rate = total_trades > 0 ? (win_trades * 100.0 / total_trades) : 0.0
+
+b_ratio = atr_mult_tp1 / atr_mult_sl
+p_win   = total_trades >= 3 ? (win_trades * 1.0 / total_trades) : 0.55
+q_loss  = 1.0 - p_win
+kelly_pct = b_ratio > 0 ? math.max(0.0, ((p_win * b_ratio - q_loss) / b_ratio) * 100.0) : 0.0
+half_kelly_pct = kelly_pct / 2.0
+
+// ==========================================
+// 5. PLOTS & VISUALIZATION
+// ==========================================
+plot(ema9, title="EMA 9", color=color.new(#00e676, 15), linewidth=1, display=display.all - display.status_line)
+plot(ema21, title="EMA 21", color=color.new(#ff9100, 15), linewidth=2, display=display.all - display.status_line)
+plot(ema50, title="EMA 50", color=color.new(#2979ff, 25), linewidth=2, display=display.all - display.status_line)
+plot(ema200, title="EMA 200", color=color.new(#9e9e9e, 40), linewidth=2, display=display.all - display.status_line)
+
+plot(enable_mtf ? mtf_ema : na, title="MTF EMA 21 (HTF)", color=color.new(#e040fb, 20), linewidth=2, style=plot.style_stepline, display=display.all - display.status_line)
+plot(enable_mtf ? mtf_ema50 : na, title="MTF EMA 50 (HTF)", color=color.new(#7c4dff, 30), linewidth=2, style=plot.style_stepline, display=display.all - display.status_line)
+
+plot(res_level, title="Müqavimət (Pivot H)", color=color.new(#ff5252, 40), style=plot.style_circles, display=display.all - display.status_line)
+plot(sup_level, title="Dəstək (Pivot L)", color=color.new(#00e676, 40), style=plot.style_circles, display=display.all - display.status_line)
+
+plot(active_dir != 0 ? sl_p : na, title="Dinamik SL / Breakeven",
+     color=is_be_active ? color.new(#ffd600, 0) : color.new(#ff5252, 10),
+     linewidth=2, style=plot.style_linebr, display=display.all - display.status_line)
+
+plot(active_dir != 0 ? tp1_p : na, title="Hədəf TP1",
+     color=color.new(#00e676, 20), linewidth=1, style=plot.style_linebr, display=display.all - display.status_line)
+
+plot(active_dir != 0 ? tp2_p : na, title="Hədəf TP2",
+     color=color.new(#00b0ff, 20), linewidth=1, style=plot.style_linebr, display=display.all - display.status_line)
+
+plot(active_dir != 0 and not is_be_active ? be_trigger : na, title="50% TP1 Breakeven Tətik Xətti",
+     color=color.new(#ffab00, 30), linewidth=1, style=plot.style_circles, display=display.all - display.status_line)
+
+bar_col = not is_adx_trending ? color.new(#787b86, 20) : (close > ema50 and ema9 > ema21 ? color.new(#00e676, 20) : (close < ema50 and ema9 < ema21 ? color.new(#ff5252, 20) : color.new(#9e9e9e, 30)))
+barcolor(bar_col, title="Dinamik Şam Rənglənməsi")
+
+plotshape(buy_sig, title="AL", style=shape.labelup, location=location.belowbar,
+          color=color.green, text="AL 10x\nBUY", textcolor=color.black, size=size.normal)
+plotshape(sell_sig, title="SAT", style=shape.labeldown, location=location.abovebar,
+          color=color.red, text="SAT 10x\nSELL", textcolor=color.white, size=size.normal)
+
+plotshape(sl_hit and confirmed and active_dir[1] != 0, title="SL Çıxış", style=shape.xcross, location=location.abovebar,
+          color=color.red, text="SL ÇIXIŞ", textcolor=color.white, size=size.tiny)
+plotshape(tp1_hit and confirmed and active_dir[1] != 0, title="TP Çıxış", style=shape.circle, location=location.belowbar,
+          color=color.green, text="TP ÇIXIŞ", textcolor=color.black, size=size.tiny)
+
+// ==========================================
+// 6. ON-CHART HUD DASHBOARD
+// ==========================================
+var table hud = table.new(position.top_right, 2, 20, bgcolor=color.new(#131722, 10), border_color=color.new(#2a2e39, 0), border_width=1)
+
+rsi_spark_series = f_sparkline(rsi14, 10)
+
+if barstate.islast
+    cur_sig = active_dir == 1 ? "AL (LONG)" : active_dir == -1 ? "SAT (SHORT)" : (exit_msg != "" ? exit_msg : "GÖZLƏ (FLET)")
+    sig_col = active_dir == 1 ? color.green : active_dir == -1 ? color.red : (is_adx_trending ? color.yellow : color.gray)
+    
+    regime_display = is_dead_cat_zone ? "Dead-Cat (Tələ 🪤)" : (market_regime == "Trend Yüksəliş" ? "Trend Yüksəliş ⮝" : (market_regime == "Trend Eniş" ? "Trend Eniş ⮟" : "Konsolidasiya (Flet ⏸)"))
+    regime_col     = is_dead_cat_zone ? color.red : (market_regime == "Trend Yüksəliş" ? color.green : (market_regime == "Trend Eniş" ? color.red : color.yellow))
+    
+    mtf_txt = not enable_mtf ? "DEAKTİV" : (close > mtf_ema and close > mtf_ema50 ? "YÜKSƏLİŞ ⮝" : "ENİŞ ⮟")
+    mtf_col = not enable_mtf ? color.gray : (close > mtf_ema and close > mtf_ema50 ? color.green : color.red)
+    
+    adx_txt = is_adx_strong ? "GÜCLÜ (" + str.tostring(math.round(adx_val, 1)) + ")" : (is_adx_trending ? "ORTA (" + str.tostring(math.round(adx_val, 1)) + ")" : "ZƏİF / BLOK (" + str.tostring(math.round(adx_val, 1)) + ")")
+    adx_col = is_adx_strong ? color.green : (is_adx_trending ? color.yellow : color.red)
+    be_status_txt = is_be_active ? "AKTİV (SIĞORTALANDI 🛡)" : (active_dir != 0 ? "$ " + str.tostring(be_trigger, "#0.00") : "--")
+
+    chg_val = close - close[1]
+    chg_pct = close[1] != 0 ? (chg_val / close[1]) * 100.0 : 0.0
+
+    rsi_spark = rsi_spark_series
+    rsi_spark_col = rsi14 >= 70 ? color.red : (rsi14 <= 30 ? color.green : color.aqua)
+    gauge_str = f_gauge_bar(rsi14, 0.0, 100.0, 10) + " " + str.tostring(math.round(rsi14, 0)) + "%"
+    gauge_col = rsi14 >= 60 ? color.green : (rsi14 <= 40 ? color.red : color.yellow)
+
+    table.cell(hud, 0, 0, "TradeOS AI HUD", bgcolor=color.new(#1e222d, 0), text_color=color.white, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 0, active_sym + " " + str.tostring(target_lev) + "x LEV", bgcolor=color.new(#1e222d, 0), text_color=color.aqua, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 1, "Qrafik Qiyməti (TV):", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    chg_abs = math.abs(chg_pct)
+    chg_fmt = (chg_abs < 1.0 ? "0" : "") + str.tostring(chg_abs, "#0.00")
+    table.cell(hud, 1, 1, "$ " + str.tostring(close, "#0.00") + " (" + (chg_pct >= 0 ? "+" : "-") + chg_fmt + "%)", text_color=color.white, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 2, "Bazar Rejimi:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 2, regime_display, text_color=regime_col, text_size=size.small, text_font_family=font.family_monospace)
+
+    htf_tag = enable_htf_ms ? (" [" + (htf_structure == 1 ? "BULL" : (htf_structure == -1 ? "BEAR" : "NEUT")) + " " + htf_last_event + "]") : ""
+    table.cell(hud, 0, 3, "MTF Trend (" + mtf_res + "m):", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 3, mtf_txt + htf_tag, text_color=mtf_col, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 4, "Siqnal Vəziyyəti:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 4, cur_sig, text_color=sig_col, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 5, "ADX (14) Trend:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 5, adx_txt, text_color=adx_col, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 6, "RSI (14):", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 6, str.tostring(math.round(rsi14, 1)), text_color=color.white, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 7, "RSI Sparkline (10b):", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 7, rsi_spark, text_color=rsi_spark_col, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 8, "Həcm / Əhval Şkalası:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 8, gauge_str, text_color=gauge_col, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 9, "FVG & Likvidlik:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 9, fvg_status, text_color=fvg_color, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 10, "Kelly / Risk Faizi:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    kelly_col = half_kelly_pct >= 5.0 ? color.green : (half_kelly_pct > 0.0 ? color.yellow : color.red)
+    kelly_fmt = (kelly_pct < 1.0 ? "0" : "") + str.tostring(kelly_pct, "#0.00")
+    half_kelly_fmt = (half_kelly_pct < 1.0 ? "0" : "") + str.tostring(half_kelly_pct, "#0.00")
+    table.cell(hud, 1, 10, kelly_fmt + "% (Half: " + half_kelly_fmt + "%)", text_color=kelly_col, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 11, "$ " + str.tostring(account_bal, "#0.00") + " Balans | " + str.tostring(target_lev) + "x Marja:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 11, "$ " + str.tostring(rec_margin, "#0.00") + " (Mövqe: $ " + str.tostring(pos_val, "#0.00") + ")", text_color=color.yellow, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 12, "Giriş Qiyməti:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 12, na(entry_p) ? "--" : "$ " + str.tostring(entry_p, "#0.00"), text_color=color.white, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 13, "Dinamik SL / BE:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 13, na(sl_p) ? "--" : "$ " + str.tostring(sl_p, "#0.00"), text_color=is_be_active ? color.yellow : color.red, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 14, "Breakeven Hədəfi:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 14, be_status_txt, text_color=is_be_active ? color.yellow : color.orange, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 15, "Hədəflər (TP1 / TP2):", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 15, (na(tp1_p) ? "--" : "$ " + str.tostring(tp1_p, "#0.00")) + " / " + (na(tp2_p) ? "--" : "$ " + str.tostring(tp2_p, "#0.00")), text_color=color.green, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 16, "TradeOS Körpüsü:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 16, "AKTİV 🟢 (6+1 Confluence)", text_color=color.green, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 17, "--- CANLI BACKTEST ---", bgcolor=color.new(#1e222d, 0), text_color=color.aqua, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 17, "NƏTİCƏLƏR", bgcolor=color.new(#1e222d, 0), text_color=color.aqua, text_size=size.small, text_font_family=font.family_monospace)
+
+    table.cell(hud, 0, 18, "Total Trades (W/L/BE):", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    table.cell(hud, 1, 18, str.tostring(total_trades) + " (" + str.tostring(win_trades) + "W - " + str.tostring(loss_trades) + "L - " + str.tostring(be_trades) + "BE)", text_color=color.white, text_size=size.small, text_font_family=font.family_monospace)
+
+    protect_pct = total_trades > 0 ? ((win_trades + be_trades) * 100.0 / total_trades) : 0.0
+    table.cell(hud, 0, 19, "Win Rate | Qorunma:", text_color=color.gray, text_size=size.small, text_font_family=font.family_monospace)
+    wr_col = win_rate >= 60.0 ? color.green : (win_rate >= 45.0 ? color.yellow : color.red)
+    pnl_abs = math.abs(cum_pnl)
+    pnl_fmt = (pnl_abs < 1.0 ? "0" : "") + str.tostring(math.abs(cum_pnl), "#0.00")
+    pnl_str = (cum_pnl >= 0 ? "+$ " : "-$ ") + pnl_fmt
+    table.cell(hud, 1, 19, str.tostring(win_rate, "#0.00") + "% (Qorunma: " + str.tostring(protect_pct, "#0.00") + "%) | " + pnl_str, text_color=wr_col, text_size=size.small, text_font_family=font.family_monospace)
+
+// ==========================================
+// 7. ALERTS (TradeOS v2 Ingestion & Webhook Alerts)
+// ==========================================
+// Standard Static Webhook Templates for TradingView Alert Dialog (alertcondition)
+alertcondition(buy_sig, title="TradeOS v2 AI BUY (Webhook JSON)",
+     message='{"secret": "{{input.webhook_secret_key}}", "alert_id": "tos_{{time}}_{{ticker}}_BUY", "symbol": "{{ticker}}", "side": "BUY", "entryPrice": {{close}}, "stopLoss": {{plot("Dinamik SL / Breakeven")}}, "tp1": {{plot("Hədəf TP1")}}, "tp2": {{plot("Hədəf TP2")}}, "time": {{time}}, "ticker": "{{ticker}}", "action": "BUY", "price": {{close}}, "sl": {{plot("Dinamik SL / Breakeven")}}, "leverage": 10, "riskUsd": 3.0}')
+
+alertcondition(sell_sig, title="TradeOS v2 AI SELL (Webhook JSON)",
+     message='{"secret": "{{input.webhook_secret_key}}", "alert_id": "tos_{{time}}_{{ticker}}_SELL", "symbol": "{{ticker}}", "side": "SELL", "entryPrice": {{close}}, "stopLoss": {{plot("Dinamik SL / Breakeven")}}, "tp1": {{plot("Hədəf TP1")}}, "tp2": {{plot("Hədəf TP2")}}, "time": {{time}}, "ticker": "{{ticker}}", "action": "SELL", "price": {{close}}, "sl": {{plot("Dinamik SL / Breakeven")}}, "leverage": 10, "riskUsd": 3.0}')
+
+alertcondition(sl_hit, title="TradeOS v2 AI SL Hit (Webhook JSON)",
+     message='{"secret": "{{input.webhook_secret_key}}", "alert_id": "tos_{{time}}_{{ticker}}_SL", "symbol": "{{ticker}}", "side": "SELL", "entryPrice": {{close}}, "stopLoss": {{close}}, "tp1": 0.0, "tp2": 0.0, "time": {{time}}, "ticker": "{{ticker}}", "action": "CLOSE_SL", "price": {{close}}, "sl": {{close}}, "leverage": 10, "riskUsd": 3.0}')
+
+alertcondition(tp1_hit, title="TradeOS v2 AI TP Hit (Webhook JSON)",
+     message='{"secret": "{{input.webhook_secret_key}}", "alert_id": "tos_{{time}}_{{ticker}}_TP", "symbol": "{{ticker}}", "side": "BUY", "entryPrice": {{close}}, "stopLoss": 0.0, "tp1": {{close}}, "tp2": 0.0, "time": {{time}}, "ticker": "{{ticker}}", "action": "CLOSE_TP", "price": {{close}}, "sl": 0.0, "leverage": 10, "riskUsd": 3.0}')
+
+alertcondition(is_be_active and not is_be_active[1], title="TradeOS v2 AI Breakeven (Webhook JSON)",
+     message='{"secret": "{{input.webhook_secret_key}}", "alert_id": "tos_{{time}}_{{ticker}}_BE", "symbol": "{{ticker}}", "side": "BUY", "entryPrice": {{close}}, "stopLoss": {{close}}, "tp1": 0.0, "tp2": 0.0, "time": {{time}}, "ticker": "{{ticker}}", "action": "BREAKEVEN", "price": {{close}}, "sl": {{close}}, "leverage": 10, "riskUsd": 3.0}')
+
+// Canlı Bar Bağlanışı Zamanı Dinamik JSON Alert Göndərişi (TradeOS WebhookAlertPayload formatına 100% uyğun)
+buy_alert_id  = "tos_" + str.tostring(time) + "_" + active_sym + "_BUY"
+sell_alert_id = "tos_" + str.tostring(time) + "_" + active_sym + "_SELL"
+
+if buy_sig
+    alert('{"secret": "' + webhook_secret_key + '", "alert_id": "' + buy_alert_id + '", "symbol": "' + active_sym + '", "side": "BUY", "entryPrice": ' + str.tostring(close) + ', "stopLoss": ' + str.tostring(sl_p) + ', "tp1": ' + str.tostring(tp1_p) + ', "tp2": ' + str.tostring(tp2_p) + ', "time": ' + str.tostring(time) + ', "ticker": "' + active_sym + '", "action": "BUY", "price": ' + str.tostring(close) + ', "sl": ' + str.tostring(sl_p) + ', "leverage": ' + str.tostring(target_lev) + ', "riskUsd": ' + str.tostring(rec_margin) + '}', alert.freq_once_per_bar_close)
+
+if sell_sig
+    alert('{"secret": "' + webhook_secret_key + '", "alert_id": "' + sell_alert_id + '", "symbol": "' + active_sym + '", "side": "SELL", "entryPrice": ' + str.tostring(close) + ', "stopLoss": ' + str.tostring(sl_p) + ', "tp1": ' + str.tostring(tp1_p) + ', "tp2": ' + str.tostring(tp2_p) + ', "time": ' + str.tostring(time) + ', "ticker": "' + active_sym + '", "action": "SELL", "price": ' + str.tostring(close) + ', "sl": ' + str.tostring(sl_p) + ', "leverage": ' + str.tostring(target_lev) + ', "riskUsd": ' + str.tostring(rec_margin) + '}', alert.freq_once_per_bar_close)
+
+if alert_exit_sl
+    alert('{"secret": "' + webhook_secret_key + '", "alert_id": "tos_' + str.tostring(time) + '_' + active_sym + '_SL", "symbol": "' + active_sym + '", "side": "SELL", "entryPrice": ' + str.tostring(close) + ', "stopLoss": ' + str.tostring(close) + ', "tp1": 0.0, "tp2": 0.0, "time": ' + str.tostring(time) + ', "ticker": "' + active_sym + '", "action": "CLOSE_SL", "price": ' + str.tostring(close) + ', "sl": ' + str.tostring(close) + ', "leverage": ' + str.tostring(target_lev) + ', "riskUsd": ' + str.tostring(rec_margin) + '}', alert.freq_once_per_bar_close)
+
+if alert_exit_tp
+    alert('{"secret": "' + webhook_secret_key + '", "alert_id": "tos_' + str.tostring(time) + '_' + active_sym + '_TP", "symbol": "' + active_sym + '", "side": "BUY", "entryPrice": ' + str.tostring(close) + ', "stopLoss": 0.0, "tp1": ' + str.tostring(close) + ', "tp2": 0.0, "time": ' + str.tostring(time) + ', "ticker": "' + active_sym + '", "action": "CLOSE_TP", "price": ' + str.tostring(close) + ', "sl": 0.0, "leverage": ' + str.tostring(target_lev) + ', "riskUsd": ' + str.tostring(rec_margin) + '}', alert.freq_once_per_bar_close)
+
+if alert_exit_be or (alert_be_trigger and confirmed)
+    alert('{"secret": "' + webhook_secret_key + '", "alert_id": "tos_' + str.tostring(time) + '_' + active_sym + '_BE", "symbol": "' + active_sym + '", "side": "BUY", "entryPrice": ' + str.tostring(close) + ', "stopLoss": ' + str.tostring(close) + ', "tp1": 0.0, "tp2": 0.0, "time": ' + str.tostring(time) + ', "ticker": "' + active_sym + '", "action": "BREAKEVEN", "price": ' + str.tostring(close) + ', "sl": ' + str.tostring(close) + ', "leverage": ' + str.tostring(target_lev) + ', "riskUsd": ' + str.tostring(rec_margin) + '}', alert.freq_once_per_bar_close)

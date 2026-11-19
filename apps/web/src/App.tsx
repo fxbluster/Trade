@@ -1,5 +1,7 @@
 import React, { useEffect } from 'react';
 import { TopBar } from './components/TopBar';
+import { ConfluenceHUD } from './components/ConfluenceHUD';
+import { AutoPilotControls } from './components/AutoPilotControls';
 import { ChartCanvas } from './components/ChartCanvas';
 import { OrderTicket } from './components/OrderTicket';
 import { ActivePositionPanel } from './components/ActivePositionPanel';
@@ -25,9 +27,10 @@ export const App: React.FC = () => {
   useEffect(() => {
     const marketStore = useMarketStore.getState();
 
-    // 1. Initial State & Kline fetch
+    // 1. Initial State & Kline & Confluence fetch
     marketStore.refreshState().catch((err) => console.warn('Initial state fetch error:', err));
     marketStore.refreshKlines().catch((err) => console.warn('Initial klines fetch error:', err));
+    marketStore.refreshConfluence().catch(() => {});
 
     // 2. Configure WebSocket Handlers
     wsClient.setHandlers({
@@ -56,6 +59,12 @@ export const App: React.FC = () => {
           soundEffects.playAlert(useUiStore.getState().isAudioMuted);
         }
       },
+      onConfluence: (confluence) => {
+        useMarketStore.getState().setConfluence(confluence);
+      },
+      onAutoPilotStatus: (status) => {
+        useMarketStore.getState().setAutoPilotStatus(status);
+      },
       onStatusChange: (status) => {
         useMarketStore.getState().setWsStatus(status);
       },
@@ -74,17 +83,22 @@ export const App: React.FC = () => {
       {/* 1. Global Navigation TopBar */}
       <TopBar />
 
-      {/* 2. Main 70 / 30 Two-Column Layout */}
+      {/* 2. Main 70 / 30 Two-Column Cockpit Layout */}
       <main className="flex-1 flex overflow-hidden p-2 gap-2">
-        {/* Left / Center Zone (70%): Chart & Cockpit Bottom Tabs */}
-        <section className="flex-[7] flex flex-col min-w-0 h-full gap-2">
+        {/* Left / Center Zone (70%): Confluence HUD, Chart & Cockpit Bottom Tabs */}
+        <section className="flex-[7] flex flex-col min-w-0 h-full gap-2 overflow-hidden">
+          {/* 6+1 Confluence Decision Engine HUD */}
+          <div className="flex-shrink-0">
+            <ConfluenceHUD />
+          </div>
+
           {/* Chart Canvas Area */}
-          <div className="flex-[6] min-h-[350px] relative">
+          <div className="flex-[6] min-h-[300px] relative">
             <ChartCanvas className="h-full" />
           </div>
 
           {/* Bottom Cockpit Panel with Tab Switcher */}
-          <div className="flex-[4] flex flex-col min-h-[220px] bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden">
+          <div className="flex-[4] flex flex-col min-h-[200px] bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden">
             {/* Tab Header */}
             <div className="flex items-center space-x-1 px-3 py-1.5 border-b border-[#151d2c] bg-[#020305] font-mono text-xs">
               <button
@@ -141,9 +155,15 @@ export const App: React.FC = () => {
           </div>
         </section>
 
-        {/* Right Rail (30%): Order Execution Ticket & Sokrat Mentor */}
+        {/* Right Rail (30%): Auto-Pilot Controls, Order Execution Ticket & Sokrat Mentor */}
         <aside className="flex-[3] flex flex-col min-w-[340px] max-w-[420px] h-full gap-2 overflow-y-auto">
+          {/* Autonomous Auto-Pilot Controls */}
+          <AutoPilotControls />
+
+          {/* Manual Order Ticket */}
           <OrderTicket />
+
+          {/* Sokrat AI Mentor */}
           <SokratMentorPanel />
         </aside>
       </main>

@@ -15,6 +15,10 @@ apps/server/data/
 .env.local
 *.pem
 
+# Binaries
+bin/
+*.exe
+
 # Logs and OS files
 *.log
 .DS_Store

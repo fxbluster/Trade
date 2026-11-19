@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { calculateLiquidationPrice, computeOrderPreview } from '@tradeos/shared';
 import { useMarketStore } from '../../store/useMarketStore';
 import { useUiStore } from '../../store/useUiStore';
+import { formatLocalTime, updateCandleWithTick } from '../ChartCanvas';
 
 // Mock lightweight-charts createChart
 vi.mock('lightweight-charts', () => {
@@ -158,5 +159,34 @@ describe('ChartCanvas & Price Line Logic', () => {
     });
 
     expect(useMarketStore.getState().activePosition).toBeNull();
+  });
+
+  it('formats UTC epoch seconds into local Baku (UTC+4) time string', () => {
+    // 1795101000 is 2026-11-19 15:10:00 UTC -> 19:10:00 Baku (UTC+4)
+    const formatted = formatLocalTime(1795101000);
+    expect(formatted).toMatch(/19:10/);
+  });
+
+  it('updates live candle with incoming mark price dynamically (high, low, close)', () => {
+    const candle = {
+      time: 1795101000,
+      open: 100,
+      high: 105,
+      low: 95,
+      close: 100,
+      volume: 10,
+    };
+
+    // Upward breach
+    const updatedHigh = updateCandleWithTick(candle, 110);
+    expect(updatedHigh.high).toBe(110);
+    expect(updatedHigh.close).toBe(110);
+    expect(updatedHigh.low).toBe(95);
+
+    // Downward breach
+    const updatedLow = updateCandleWithTick(updatedHigh, 90);
+    expect(updatedLow.low).toBe(90);
+    expect(updatedLow.close).toBe(90);
+    expect(updatedLow.high).toBe(110);
   });
 });

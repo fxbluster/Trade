@@ -20,6 +20,35 @@ export interface ChartCanvasProps {
   className?: string;
 }
 
+/**
+ * Formats a UTC epoch seconds timestamp into local Baku (UTC+4) time.
+ */
+export function formatLocalTime(timestampSec: number): string {
+  const date = new Date(timestampSec * 1000);
+  return date.toLocaleTimeString('az-AZ', {
+    timeZone: 'Asia/Baku',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
+
+/**
+ * Updates a candlestick's high, low, and close dynamically using a mark price tick.
+ */
+export function updateCandleWithTick(
+  candle: { time: number; open: number; high: number; low: number; close: number; volume?: number },
+  markPrice: number
+) {
+  return {
+    ...candle,
+    high: Math.max(candle.high, markPrice),
+    low: Math.min(candle.low, markPrice),
+    close: markPrice,
+  };
+}
+
 export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -52,6 +81,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         fontFamily: "'JetBrains Mono', monospace",
         fontSize: 11,
       },
+      localization: {
+        timeFormatter: (timestamp: number) => formatLocalTime(timestamp),
+      },
       grid: {
         vertLines: { color: '#151d2c' },
         horzLines: { color: '#151d2c' },
@@ -82,6 +114,15 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         borderColor: '#151d2c',
         timeVisible: true,
         secondsVisible: false,
+        tickMarkFormatter: (time: number) => {
+          const date = new Date(time * 1000);
+          return date.toLocaleTimeString('az-AZ', {
+            timeZone: 'Asia/Baku',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false,
+          });
+        },
       },
     });
 
@@ -119,18 +160,19 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
       const c = tick.candle;
       if (c && c.time) {
+        const liveCandle = tick.markPrice > 0 ? updateCandleWithTick(c, tick.markPrice) : c;
         candleSeriesRef.current.update({
-          time: c.time as UTCTimestamp,
-          open: c.open,
-          high: c.high,
-          low: c.low,
-          close: c.close,
+          time: liveCandle.time as UTCTimestamp,
+          open: liveCandle.open,
+          high: liveCandle.high,
+          low: liveCandle.low,
+          close: liveCandle.close,
         });
 
         volumeSeriesRef.current.update({
-          time: c.time as UTCTimestamp,
-          value: c.volume,
-          color: c.close >= c.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
+          time: liveCandle.time as UTCTimestamp,
+          value: liveCandle.volume || 0,
+          color: liveCandle.close >= liveCandle.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
         });
       }
     };

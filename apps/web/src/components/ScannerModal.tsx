@@ -9,20 +9,36 @@ export const ScannerModal: React.FC = () => {
   const isScannerModalOpen = useUiStore((s) => s.isScannerModalOpen);
   const setIsScannerModalOpen = useUiStore((s) => s.setIsScannerModalOpen);
   const setSymbol = useMarketStore((s) => s.setSymbol);
+  const cachedScannerItems = useMarketStore((s) => s.cachedScannerItems);
+  const setCachedScannerItems = useMarketStore((s) => s.setCachedScannerItems);
 
-  const [items, setItems] = useState<ScannerItem[]>([]);
+  const [items, setItems] = useState<ScannerItem[]>(cachedScannerItems || []);
   const [filterText, setFilterText] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
   const [sortField, setSortField] = useState<'quoteVolume24h' | 'priceChangePercent24h'>('quoteVolume24h');
   const [sortAsc, setSortAsc] = useState(false);
 
   const loadScannerData = async () => {
     setIsLoading(true);
     try {
+      // 2500ms timeout for tunnel resilience
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
+
       const data = await apiClient.getScanner();
-      setItems(data);
+      clearTimeout(timeoutId);
+      if (Array.isArray(data) && data.length > 0) {
+        setItems(data);
+        setCachedScannerItems(data);
+        setIsOffline(false);
+      }
     } catch (err) {
-      console.error('Failed to load scanner data:', err);
+      console.warn('Scanner network timeout or error, falling back to cache:', err);
+      if (cachedScannerItems && cachedScannerItems.length > 0) {
+        setItems(cachedScannerItems);
+        setIsOffline(true);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -30,6 +46,9 @@ export const ScannerModal: React.FC = () => {
 
   useEffect(() => {
     if (isScannerModalOpen) {
+      if (cachedScannerItems && cachedScannerItems.length > 0 && items.length === 0) {
+        setItems(cachedScannerItems);
+      }
       loadScannerData();
     }
   }, [isScannerModalOpen]);
@@ -67,6 +86,11 @@ export const ScannerModal: React.FC = () => {
             <h2 className="text-sm font-bold uppercase tracking-wider text-[#e6edf3]">
               USDT-M Perpetual Market Scanner
             </h2>
+            {isOffline && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                Cached (Offline)
+              </span>
+            )}
           </div>
           <button
             onClick={() => setIsScannerModalOpen(false)}
@@ -128,33 +152,45 @@ export const ScannerModal: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#151d2c]/60">
-              {filteredItems.map((item) => {
-                const isPositive = item.priceChangePercent24h >= 0;
-                const volumeMillion = (item.quoteVolume24h / 1_000_000).toFixed(1);
-
-                return (
-                  <tr
-                    key={item.symbol}
-                    onClick={() => handleSelectSymbol(item.symbol)}
-                    className="hover:bg-[#151d2c]/40 cursor-pointer transition-colors"
-                  >
-                    <td className="py-2.5 px-3 font-bold text-[#e6edf3]">{item.symbol}</td>
-                    <td className="py-2.5 px-3 font-semibold text-[#e6edf3]">{item.lastPrice.toFixed(2)}</td>
-                    <td
-                      className={`py-2.5 px-3 font-bold ${
-                        isPositive ? 'text-[#0ecb81]' : 'text-[#f6465d]'
-                      }`}
-                    >
-                      {isPositive ? '+' : ''}
-                      {item.priceChangePercent24h.toFixed(2)}%
-                    </td>
-                    <td className="py-2.5 px-3 text-[#7d8590]">${volumeMillion}M</td>
-                    <td className="py-2.5 px-3 text-[#f0b90b]">
-                      {(item.fundingRate * 100).toFixed(4)}%
-                    </td>
+              {isLoading && filteredItems.length === 0 ? (
+                [...Array(6)].map((_, i) => (
+                  <tr key={i} className="animate-pulse">
+                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-20" /></td>
+                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-16" /></td>
+                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-14" /></td>
+                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-18" /></td>
+                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-12" /></td>
                   </tr>
-                );
-              })}
+                ))
+              ) : (
+                filteredItems.map((item) => {
+                  const isPositive = item.priceChangePercent24h >= 0;
+                  const volumeMillion = (item.quoteVolume24h / 1_000_000).toFixed(1);
+
+                  return (
+                    <tr
+                      key={item.symbol}
+                      onClick={() => handleSelectSymbol(item.symbol)}
+                      className="hover:bg-[#151d2c]/40 cursor-pointer transition-colors"
+                    >
+                      <td className="py-2.5 px-3 font-bold text-[#e6edf3]">{item.symbol}</td>
+                      <td className="py-2.5 px-3 font-semibold text-[#e6edf3]">{item.lastPrice.toFixed(2)}</td>
+                      <td
+                        className={`py-2.5 px-3 font-bold ${
+                          isPositive ? 'text-[#0ecb81]' : 'text-[#f6465d]'
+                        }`}
+                      >
+                        {isPositive ? '+' : ''}
+                        {item.priceChangePercent24h.toFixed(2)}%
+                      </td>
+                      <td className="py-2.5 px-3 text-[#7d8590]">${volumeMillion}M</td>
+                      <td className="py-2.5 px-3 text-[#f0b90b]">
+                        {(item.fundingRate * 100).toFixed(4)}%
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
             </tbody>
           </table>
         </div>

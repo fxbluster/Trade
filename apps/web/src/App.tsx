@@ -75,6 +75,15 @@ export const App: React.FC = () => {
     // 3. Connect WebSocket
     wsClient.connect();
 
+    // 4. Pre-cache top-50 symbols for instant offline/tunnel resilient scanner
+    apiClient.getScanner()
+      .then((items) => {
+        if (Array.isArray(items) && items.length > 0) {
+          useMarketStore.getState().setCachedScannerItems(items);
+        }
+      })
+      .catch((err) => console.warn('Background scanner pre-cache warning:', err));
+
     return () => {
       wsClient.disconnect();
     };
@@ -157,16 +166,18 @@ export const App: React.FC = () => {
           </div>
         </section>
 
-        {/* Right Rail (30%): Auto-Pilot Controls, Order Execution Ticket & Sokrat Mentor */}
-        <aside className="flex-[3] flex flex-col min-w-[340px] max-w-[420px] h-full gap-2 overflow-y-auto">
-          {/* Autonomous Auto-Pilot Controls */}
-          <AutoPilotControls />
+        {/* Right Rail (30%): Pinned Flight Deck Header, Scrollable Order Form and Mentor Rail */}
+        <aside className="flex-[3] flex flex-col min-w-[340px] max-w-[420px] h-full gap-2 overflow-hidden">
+          {/* Pinned Executive Flight Deck (Static, Never Scrolls) */}
+          <div className="flex-shrink-0">
+            <AutoPilotControls />
+          </div>
 
-          {/* Manual Order Ticket */}
-          <OrderTicket />
-
-          {/* Sokrat AI Mentor */}
-          <SokratMentorPanel />
+          {/* Scrollable Order Form and Mentor Rail */}
+          <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+            <OrderTicket />
+            <SokratMentorPanel />
+          </div>
         </aside>
       </main>
 

@@ -167,8 +167,9 @@ export const OrderTicket: React.FC = () => {
 
   // Cooldown status check
   const isCooldownActive = risk?.cooldown_until ? risk.cooldown_until > Date.now() : false;
-  const deadSlSafe = orderDraft.preview ? orderDraft.preview.deadSlSafe : true;
-  const isBlocked = isCooldownActive || !deadSlSafe || isSubmitting;
+  const hasValidSl = typeof orderDraft.stopLoss === 'number' && orderDraft.stopLoss > 0;
+  const deadSlSafe = orderDraft.preview ? orderDraft.preview.deadSlSafe : false;
+  const isBlocked = isCooldownActive || !hasValidSl || !deadSlSafe || isSubmitting;
 
   return (
     <div className="flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg p-3 space-y-3 select-none">
@@ -282,7 +283,23 @@ export const OrderTicket: React.FC = () => {
             return (
               <button
                 key={pct}
-                onClick={() => setOrderDraft({ marginUsd: amount })}
+                onClick={() => {
+                  const updates: any = { marginUsd: amount };
+                  // Auto-arm Stop Loss if empty
+                  if (!orderDraft.stopLoss || orderDraft.stopLoss <= 0) {
+                    const refPrice = orderDraft.orderType === 'LIMIT' && orderDraft.limitPrice && orderDraft.limitPrice > 0
+                      ? orderDraft.limitPrice
+                      : markPrice;
+                    if (refPrice > 0) {
+                      const effectiveAtr = atr > 0 ? atr : refPrice * 0.015;
+                      const delta = 1.5 * effectiveAtr;
+                      const isLong = orderDraft.side === 'BUY';
+                      const autoSl = isLong ? refPrice - delta : refPrice + delta;
+                      updates.stopLoss = Number(autoSl.toFixed(2));
+                    }
+                  }
+                  setOrderDraft(updates);
+                }}
                 className={`py-1 text-[10px] font-mono rounded border transition-colors ${
                   isSelected
                     ? pct >= 25
@@ -466,8 +483,14 @@ export const OrderTicket: React.FC = () => {
           onTouchStart={startHold}
           onTouchEnd={cancelHold}
           className={`relative w-full py-3 rounded font-mono text-xs font-bold uppercase overflow-hidden transition-all ${
-            isBlocked
+            isSubmitting
               ? 'bg-[#151d2c] text-[#7d8590] cursor-not-allowed'
+              : isCooldownActive
+              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30 cursor-not-allowed'
+              : !hasValidSl
+              ? 'bg-[#f0b90b]/10 text-[#f0b90b] border border-[#f0b90b]/40 cursor-not-allowed'
+              : !deadSlSafe
+              ? 'bg-[#f6465d]/10 text-[#f6465d] border border-[#f6465d]/40 cursor-not-allowed'
               : orderDraft.side === 'BUY'
               ? 'bg-[#0ecb81] text-[#020305] shadow-lg shadow-[#0ecb81]/25 hover:bg-[#0bb573]'
               : 'bg-[#f6465d] text-white shadow-lg shadow-[#f6465d]/25 hover:bg-[#e0394f]'
@@ -484,6 +507,8 @@ export const OrderTicket: React.FC = () => {
               <span>Executing Order...</span>
             ) : isCooldownActive ? (
               <span>Cooldown Locked</span>
+            ) : !hasValidSl ? (
+              <span>Set Stop Loss to Arm</span>
             ) : !deadSlSafe ? (
               <span>Dead-SL Blocked</span>
             ) : holdProgress > 0 ? (

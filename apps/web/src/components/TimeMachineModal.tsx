@@ -9,6 +9,7 @@ export const TimeMachineModal: React.FC = () => {
 
   const klines = useMarketStore((s) => s.klines);
   const markPrice = useMarketStore((s) => s.markPrice);
+  const indicators = useMarketStore((s) => s.indicators);
   const orderDraft = useUiStore((s) => s.orderDraft);
 
   const [isRunning, setIsRunning] = useState(false);
@@ -17,28 +18,33 @@ export const TimeMachineModal: React.FC = () => {
   const [timeoutProb, setTimeoutProb] = useState<number | null>(null);
   const [expectedSteps, setExpectedSteps] = useState<number | null>(null);
 
+  const isLong = orderDraft.side === 'BUY';
+  const entry = orderDraft.limitPrice && orderDraft.orderType === 'LIMIT'
+    ? orderDraft.limitPrice
+    : markPrice;
+
+  const effectiveAtr = indicators?.atr14 && indicators.atr14 > 0
+    ? indicators.atr14
+    : (entry > 0 ? entry * 0.015 : 1.0);
+
+  const activeSl = orderDraft.stopLoss && orderDraft.stopLoss > 0
+    ? orderDraft.stopLoss
+    : (entry > 0 ? Number((isLong ? entry - 1.5 * effectiveAtr : entry + 1.5 * effectiveAtr).toFixed(2)) : 0);
+
+  const activeTp = (orderDraft.tp1 && orderDraft.tp1 > 0)
+    ? orderDraft.tp1
+    : (orderDraft.tp2 && orderDraft.tp2 > 0)
+    ? orderDraft.tp2
+    : (entry > 0 ? Number((isLong ? entry + 2.0 * effectiveAtr : entry - 2.0 * effectiveAtr).toFixed(2)) : 0);
+
   const runSimulation = () => {
+    if (!entry || entry <= 0 || !activeSl || !activeTp) return;
     setIsRunning(true);
 
     setTimeout(() => {
       try {
-        const isLong = orderDraft.side === 'BUY';
-        const entry = orderDraft.limitPrice && orderDraft.orderType === 'LIMIT'
-          ? orderDraft.limitPrice
-          : markPrice;
-
-        const sl = orderDraft.stopLoss;
-        const tp = orderDraft.tp1 ?? orderDraft.tp2;
-
-        if (!entry || !sl || !tp) {
-          // Default fallbacks if user didn't enter values
-          setWinProb(0.58);
-          setLossProb(0.38);
-          setTimeoutProb(0.04);
-          setExpectedSteps(42);
-          setIsRunning(false);
-          return;
-        }
+        const sl = activeSl;
+        const tp = activeTp;
 
         // Calculate empirical log return standard deviation from klines
         let stdev = 0.003; // fallback 0.3% per candle
@@ -161,11 +167,15 @@ export const TimeMachineModal: React.FC = () => {
             </div>
             <div>
               <span className="text-[10px] text-[#7d8590] block">Target SL</span>
-              <span className="text-[#f6465d]">{orderDraft.stopLoss ?? '--'}</span>
+              <span className="text-[#f6465d]">
+                {orderDraft.stopLoss ? `$${orderDraft.stopLoss}` : `$${activeSl} (1.5x ATR)`}
+              </span>
             </div>
             <div>
               <span className="text-[10px] text-[#7d8590] block">Target TP</span>
-              <span className="text-[#0ecb81]">{orderDraft.tp1 ?? orderDraft.tp2 ?? '--'}</span>
+              <span className="text-[#0ecb81]">
+                {orderDraft.tp1 ? `$${orderDraft.tp1}` : orderDraft.tp2 ? `$${orderDraft.tp2}` : `$${activeTp} (2.0x ATR)`}
+              </span>
             </div>
           </div>
         </div>

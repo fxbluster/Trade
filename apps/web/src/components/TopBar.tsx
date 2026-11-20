@@ -10,6 +10,7 @@ import {
   Cpu,
   Clock,
   ShieldAlert,
+  ShieldCheck,
   ChevronDown,
 } from 'lucide-react';
 import type { BrokerMode } from '@tradeos/shared';
@@ -164,15 +165,19 @@ export const TopBar: React.FC = () => {
         {/* Cooldown Status Badge / Modal Trigger */}
         <button
           onClick={() => setIsCooldownModalOpen(true)}
-          className={`flex items-center space-x-1 px-2 py-1 rounded border transition-colors ${
+          className={`flex items-center space-x-1.5 px-2 py-1 rounded border transition-colors ${
             isCooldownActive
               ? 'bg-[#f6465d]/20 border-[#f6465d]/40 text-[#f6465d] animate-pulse font-bold'
-              : 'bg-[#020305] border-[#151d2c] text-[#7d8590] hover:text-[#e6edf3]'
+              : 'bg-[#0ecb81]/10 border-[#0ecb81]/30 text-[#0ecb81] hover:bg-[#0ecb81]/20'
           }`}
-          title="Cooldown Guard"
+          title="Risk Diagnostics & Cooldown Status"
         >
-          <Clock className="w-3.5 h-3.5" />
-          <span>{isCooldownActive ? 'Cooldown Active' : 'Cooldown'}</span>
+          {isCooldownActive ? (
+            <Clock className="w-3.5 h-3.5 text-[#f6465d]" />
+          ) : (
+            <ShieldCheck className="w-3.5 h-3.5 text-[#0ecb81]" />
+          )}
+          <span>{isCooldownActive ? 'Cooldown Active' : 'Cooldown: Inactive'}</span>
         </button>
 
         {/* Broker Mode Switch & Testnet Badge */}

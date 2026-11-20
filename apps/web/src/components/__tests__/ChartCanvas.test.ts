@@ -190,27 +190,27 @@ describe('ChartCanvas & Price Line Logic', () => {
     expect(updatedLow.high).toBe(110);
   });
 
-  it('resets corrupted klines when incoming tick price is drastically out of scale (>4x ratio)', () => {
-    // Populate store with BTC-scale klines (~$70,000)
+  it('preserves klines array reference during streaming ticks (60fps decoupling)', () => {
+    const initialKlines = [
+      { time: 1795101000, open: 71.0, high: 71.5, low: 70.8, close: 71.2, volume: 50 },
+    ];
     useMarketStore.setState({
       symbol: 'SOLUSDT',
-      markPrice: 70000,
-      klines: [
-        { time: 1795101000, open: 70000, high: 70100, low: 69900, close: 70050, volume: 50 },
-      ],
+      markPrice: 71.2,
+      klines: initialKlines,
     });
 
-    // An incoming tick for SOLUSDT arrives at $71.10
+    // An incoming streaming tick arrives at 4Hz
     useMarketStore.getState().applyTick({
       symbol: 'SOLUSDT',
-      markPrice: 71.10,
-      unrealizedPnl: 0,
-      candle: { time: 1795101060, open: 71.10, high: 71.20, low: 71.05, close: 71.10, volume: 10 },
+      markPrice: 71.4,
+      unrealizedPnl: 1.5,
+      candle: { time: 1795101000, open: 71.0, high: 71.6, low: 70.8, close: 71.4, volume: 55 },
     });
 
-    const currentKlines = useMarketStore.getState().klines;
-    // Corrupted $70,000 candles must have been discarded!
-    expect(currentKlines.length).toBe(1);
-    expect(currentKlines[0]?.close).toBe(71.10);
+    const state = useMarketStore.getState();
+    expect(state.markPrice).toBe(71.4);
+    // Crucial: klines reference identity must be preserved to prevent 4Hz canvas re-render thrashing!
+    expect(state.klines).toBe(initialKlines);
   });
 });

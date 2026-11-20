@@ -14,6 +14,7 @@ import type {
   ConfluenceSnapshot,
   AutoPilotConfig,
   WebhookAlertPayload,
+  ScannerItem,
 } from '@tradeos/shared';
 import type { WsStatus, TickData, AnalysisData, PositionEventData, AutoPilotStatusData } from '../lib/wsClient';
 import { apiClient } from '../lib/apiClient';
@@ -44,6 +45,7 @@ export interface MarketStoreState {
   autoPilot: AutoPilotStatusData;
   hidePineOverlay: boolean;
   pineSignals: WebhookAlertPayload[];
+  cachedScannerItems: ScannerItem[];
 
   // Actions
   setSymbol: (symbol: string) => Promise<void>;
@@ -65,6 +67,7 @@ export interface MarketStoreState {
   toggleHidePineOverlay: () => void;
   addPineSignal: (signal: WebhookAlertPayload) => void;
   refreshConfluence: () => Promise<void>;
+  setCachedScannerItems: (items: ScannerItem[]) => void;
 }
 
 const defaultAccount: AccountInfo = {
@@ -125,6 +128,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   },
   hidePineOverlay: false,
   pineSignals: [],
+  cachedScannerItems: [],
 
   setSymbol: async (symbol: string) => {
     const sym = symbol.toUpperCase();
@@ -198,31 +202,13 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
         };
       }
 
-      // Update latest candle in klines if exists
-      let updatedKlines = state.klines;
-      if (updatedKlines.length > 0 && tick.candle) {
-        const last = updatedKlines[updatedKlines.length - 1];
-        if (last) {
-          // Cross-symbol protection: if tick price is drastically out of scale (>4x or <0.25x),
-          // the existing klines array belongs to another symbol. Reset to avoid chart scale distortion!
-          const priceRatio = tick.markPrice > 0 && last.close > 0 ? tick.markPrice / last.close : 1;
-          if (priceRatio > 4 || priceRatio < 0.25) {
-            updatedKlines = [tick.candle];
-          } else if (last.time === tick.candle.time) {
-            updatedKlines = [...updatedKlines.slice(0, -1), tick.candle];
-          } else if (tick.candle.time > last.time) {
-            updatedKlines = [...updatedKlines, tick.candle];
-          }
-        }
-      } else if (tick.candle) {
-        updatedKlines = [tick.candle];
-      }
-
+      // Tier 2 Decoupled Telemetry:
+      // klines array reference is strictly preserved during live ticks.
+      // Direct 60fps canvas updates occur in ChartCanvas via wsClient.subscribeTick.
       return {
         markPrice: tick.markPrice,
         prevMarkPrice: state.markPrice,
         activePosition: updatedPosition,
-        klines: updatedKlines,
         account: {
           ...state.account,
           unrealizedPnl: tick.unrealizedPnl,
@@ -230,6 +216,10 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
         },
       };
     });
+  },
+
+  setCachedScannerItems: (items: ScannerItem[]) => {
+    set({ cachedScannerItems: items });
   },
 
   applyAnalysis: (data: AnalysisData) => {

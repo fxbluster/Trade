@@ -57,6 +57,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const lastFitSymbolRef = useRef<string | null>(null);
+  const isInitializedRef = useRef<boolean>(false);
 
   const symbol = useMarketStore((s) => s.symbol);
   const klines = useMarketStore((s) => s.klines);
@@ -148,6 +149,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     });
 
     chart.priceScale('volume').applyOptions({
+      visible: false,
       scaleMargins: {
         top: 0.8,
         bottom: 0,
@@ -160,7 +162,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
     // Direct 60fps tick callback bypassing React component state
     const handleTick = (tick: TickData) => {
-      if (!candleSeriesRef.current || !volumeSeriesRef.current) return;
+      if (!isInitializedRef.current || !candleSeriesRef.current || !volumeSeriesRef.current) return;
       if (tick.symbol !== useMarketStore.getState().symbol) return;
 
       const c = tick.candle;
@@ -215,6 +217,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   useEffect(() => {
     if (prevSymbolRef.current !== symbol) {
       prevSymbolRef.current = symbol;
+      isInitializedRef.current = false;
       if (candleSeriesRef.current) {
         candleSeriesRef.current.setData([]);
       }
@@ -279,6 +282,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       chartRef.current?.timeScale().fitContent();
       chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
       lastFitSymbolRef.current = symbol;
+      isInitializedRef.current = true;
     } catch (err) {
       console.warn('Lightweight charts setData suppressed error:', err);
     }

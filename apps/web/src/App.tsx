@@ -27,9 +27,11 @@ export const App: React.FC = () => {
   useEffect(() => {
     const marketStore = useMarketStore.getState();
 
-    // 1. Initial State & Kline & Confluence fetch
-    marketStore.refreshState().catch((err) => console.warn('Initial state fetch error:', err));
-    marketStore.refreshKlines().catch((err) => console.warn('Initial klines fetch error:', err));
+    // 1. Initial State & Kline & Confluence fetch (state synced first to ensure matching symbol)
+    marketStore
+      .refreshState()
+      .then(() => marketStore.refreshKlines())
+      .catch((err) => console.warn('Initial state/klines fetch error:', err));
     marketStore.refreshConfluence().catch(() => {});
 
     // 2. Configure WebSocket Handlers

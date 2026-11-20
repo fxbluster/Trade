@@ -189,4 +189,28 @@ describe('ChartCanvas & Price Line Logic', () => {
     expect(updatedLow.close).toBe(90);
     expect(updatedLow.high).toBe(110);
   });
+
+  it('resets corrupted klines when incoming tick price is drastically out of scale (>4x ratio)', () => {
+    // Populate store with BTC-scale klines (~$70,000)
+    useMarketStore.setState({
+      symbol: 'SOLUSDT',
+      markPrice: 70000,
+      klines: [
+        { time: 1795101000, open: 70000, high: 70100, low: 69900, close: 70050, volume: 50 },
+      ],
+    });
+
+    // An incoming tick for SOLUSDT arrives at $71.10
+    useMarketStore.getState().applyTick({
+      symbol: 'SOLUSDT',
+      markPrice: 71.10,
+      unrealizedPnl: 0,
+      candle: { time: 1795101060, open: 71.10, high: 71.20, low: 71.05, close: 71.10, volume: 10 },
+    });
+
+    const currentKlines = useMarketStore.getState().klines;
+    // Corrupted $70,000 candles must have been discarded!
+    expect(currentKlines.length).toBe(1);
+    expect(currentKlines[0]?.close).toBe(71.10);
+  });
 });

@@ -96,7 +96,7 @@ const defaultAutoPilotConfig: AutoPilotConfig = {
 };
 
 export const useMarketStore = create<MarketStoreState>((set, get) => ({
-  symbol: 'BTCUSDT',
+  symbol: 'SOLUSDT',
   markPrice: 0,
   prevMarkPrice: 0,
   priceChangePercent24h: 0,
@@ -156,6 +156,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   },
 
   applySnapshot: (snapshot: CockpitState) => {
+    const prevSymbol = get().symbol;
     set((state) => ({
       symbol: snapshot.symbol,
       markPrice: snapshot.markPrice,
@@ -172,6 +173,12 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       exchangeHealth: snapshot.exchangeHealth,
       brokerMode: snapshot.brokerMode,
     }));
+
+    // If server snapshot reports a different symbol, sync klines and confluence immediately
+    if (snapshot.symbol && snapshot.symbol !== prevSymbol) {
+      get().refreshKlines();
+      get().refreshConfluence();
+    }
   },
 
   applyTick: (tick: TickData) => {
@@ -195,11 +202,20 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       let updatedKlines = state.klines;
       if (updatedKlines.length > 0 && tick.candle) {
         const last = updatedKlines[updatedKlines.length - 1];
-        if (last && last.time === tick.candle.time) {
-          updatedKlines = [...updatedKlines.slice(0, -1), tick.candle];
-        } else if (last && tick.candle.time > last.time) {
-          updatedKlines = [...updatedKlines, tick.candle];
+        if (last) {
+          // Cross-symbol protection: if tick price is drastically out of scale (>4x or <0.25x),
+          // the existing klines array belongs to another symbol. Reset to avoid chart scale distortion!
+          const priceRatio = tick.markPrice > 0 && last.close > 0 ? tick.markPrice / last.close : 1;
+          if (priceRatio > 4 || priceRatio < 0.25) {
+            updatedKlines = [tick.candle];
+          } else if (last.time === tick.candle.time) {
+            updatedKlines = [...updatedKlines.slice(0, -1), tick.candle];
+          } else if (tick.candle.time > last.time) {
+            updatedKlines = [...updatedKlines, tick.candle];
+          }
         }
+      } else if (tick.candle) {
+        updatedKlines = [tick.candle];
       }
 
       return {

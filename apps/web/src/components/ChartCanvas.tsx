@@ -109,6 +109,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       },
       rightPriceScale: {
         borderColor: '#151d2c',
+        autoScale: true,
         scaleMargins: {
           top: 0.1,
           bottom: 0.2,
@@ -165,19 +166,23 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       const c = tick.candle;
       if (c && c.time) {
         const liveCandle = tick.markPrice > 0 ? updateCandleWithTick(c, tick.markPrice) : c;
-        candleSeriesRef.current.update({
-          time: liveCandle.time as UTCTimestamp,
-          open: liveCandle.open,
-          high: liveCandle.high,
-          low: liveCandle.low,
-          close: liveCandle.close,
-        });
+        try {
+          candleSeriesRef.current.update({
+            time: liveCandle.time as UTCTimestamp,
+            open: liveCandle.open,
+            high: liveCandle.high,
+            low: liveCandle.low,
+            close: liveCandle.close,
+          });
 
-        volumeSeriesRef.current.update({
-          time: liveCandle.time as UTCTimestamp,
-          value: liveCandle.volume || 0,
-          color: liveCandle.close >= liveCandle.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
-        });
+          volumeSeriesRef.current.update({
+            time: liveCandle.time as UTCTimestamp,
+            value: liveCandle.volume || 0,
+            color: liveCandle.close >= liveCandle.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
+          });
+        } catch (err) {
+          console.warn('Lightweight charts update tick suppressed error:', err);
+        }
       }
     };
 
@@ -205,12 +210,42 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     };
   }, []);
 
+  // Purge series immediately on symbol switch to prevent cross-symbol candle pollution
+  const prevSymbolRef = useRef<string>(symbol);
+  useEffect(() => {
+    if (prevSymbolRef.current !== symbol) {
+      prevSymbolRef.current = symbol;
+      if (candleSeriesRef.current) {
+        candleSeriesRef.current.setData([]);
+      }
+      if (volumeSeriesRef.current) {
+        volumeSeriesRef.current.setData([]);
+      }
+      chartRef.current?.timeScale().resetTimeScale();
+    }
+  }, [symbol]);
+
   // Update candles when klines store updates
   useEffect(() => {
-    if (!candleSeriesRef.current || !volumeSeriesRef.current || !Array.isArray(klines) || klines.length === 0) return;
+    if (!candleSeriesRef.current || !volumeSeriesRef.current) return;
 
+    if (!Array.isArray(klines) || klines.length === 0) {
+      candleSeriesRef.current.setData([]);
+      volumeSeriesRef.current.setData([]);
+      return;
+    }
+
+    // Sanity check: Ensure candles belong to current symbol
+    const currentPrice = useMarketStore.getState().markPrice;
     const validKlines = klines
-      .filter((k) => k && typeof k.time === 'number' && !isNaN(k.time))
+      .filter((k) => {
+        if (!k || typeof k.time !== 'number' || isNaN(k.time) || typeof k.close !== 'number') return false;
+        if (currentPrice > 0) {
+          const ratio = k.close / currentPrice;
+          if (ratio > 4 || ratio < 0.25) return false;
+        }
+        return true;
+      })
       .sort((a, b) => a.time - b.time);
 
     const uniqueMap = new Map<number, (typeof validKlines)[0]>();
@@ -218,7 +253,11 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       uniqueMap.set(k.time, k);
     }
     const sortedKlines = Array.from(uniqueMap.values()).sort((a, b) => a.time - b.time);
-    if (sortedKlines.length === 0) return;
+    if (sortedKlines.length === 0) {
+      candleSeriesRef.current.setData([]);
+      volumeSeriesRef.current.setData([]);
+      return;
+    }
 
     const candleData: CandlestickData[] = sortedKlines.map((k) => ({
       time: k.time as UTCTimestamp,
@@ -237,10 +276,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     try {
       candleSeriesRef.current.setData(candleData);
       volumeSeriesRef.current.setData(volumeData);
-      if (lastFitSymbolRef.current !== symbol) {
-        chartRef.current?.timeScale().fitContent();
-        lastFitSymbolRef.current = symbol;
-      }
+      chartRef.current?.timeScale().fitContent();
+      chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+      lastFitSymbolRef.current = symbol;
     } catch (err) {
       console.warn('Lightweight charts setData suppressed error:', err);
     }

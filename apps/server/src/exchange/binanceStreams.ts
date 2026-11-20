@@ -36,6 +36,14 @@ export interface BinanceStreamsOptions {
 export type MarkPriceListener = (event: MarkPriceEvent) => void;
 export type KlineListener = (event: KlineEvent) => void;
 export type AggTradeListener = (event: AggTradeEvent) => void;
+export interface DepthEvent {
+  symbol: string;
+  bids: [number, number][];
+  asks: [number, number][];
+  time: number;
+}
+export type DepthListener = (event: DepthEvent) => void;
+
 export type UserDataListener = (event: any) => void;
 export type ReconcileListener = (reason: string) => void;
 
@@ -67,6 +75,7 @@ export class BinanceStreamsManager {
   private markPriceListeners: Set<MarkPriceListener> = new Set();
   private klineListeners: Set<KlineListener> = new Set();
   private aggTradeListeners: Set<AggTradeListener> = new Set();
+  private depthListeners: Set<DepthListener> = new Set();
   private userDataListeners: Set<UserDataListener> = new Set();
   private reconcileListeners: Set<ReconcileListener> = new Set();
 
@@ -110,6 +119,14 @@ export class BinanceStreamsManager {
   /**
    * Register listener for aggTrade updates (CVD calculation).
    */
+  /**
+   * Register listener for L2 order book depth updates (OrderFlow calculation).
+   */
+  onDepth(cb: DepthListener): () => void {
+    this.depthListeners.add(cb);
+    return () => this.depthListeners.delete(cb);
+  }
+
   onAggTrade(cb: AggTradeListener): () => void {
     this.aggTradeListeners.add(cb);
     return () => this.aggTradeListeners.delete(cb);
@@ -172,6 +189,7 @@ export class BinanceStreamsManager {
         `${symLower}@kline_1m`,
         `${symLower}@kline_5m`,
         `${symLower}@aggTrade`,
+        `${symLower}@depth20@100ms`,
       ];
       this.publicWs.send(
         JSON.stringify({
@@ -198,6 +216,7 @@ export class BinanceStreamsManager {
         `${symLower}@kline_1m`,
         `${symLower}@kline_5m`,
         `${symLower}@aggTrade`,
+        `${symLower}@depth20@100ms`,
       ];
       this.publicWs.send(
         JSON.stringify({
@@ -313,6 +332,24 @@ export class BinanceStreamsManager {
           listener(ev);
         } catch (e) {
           console.error('[STREAMS] Kline listener error:', e);
+        }
+      }
+      return;
+    }
+
+    // L2 Depth Update (Order Book Imbalance)
+    if (eventType === 'depthUpdate' || (Array.isArray(msg.b) && Array.isArray(msg.a))) {
+      const ev: DepthEvent = {
+        symbol: msg.s || (msg.stream ? msg.stream.split('@')[0].toUpperCase() : ''),
+        bids: (msg.b || []).map((x: any) => [parseFloat(x[0]), parseFloat(x[1])]),
+        asks: (msg.a || []).map((x: any) => [parseFloat(x[0]), parseFloat(x[1])]),
+        time: msg.E || Date.now(),
+      };
+      for (const listener of this.depthListeners) {
+        try {
+          listener(ev);
+        } catch (e) {
+          console.error('[STREAMS] Depth listener error:', e);
         }
       }
       return;

@@ -277,11 +277,15 @@ export async function bootstrapServer(): Promise<{
     // 6+1 Confluence Matrix Evaluation & Throttled 2Hz Broadcast
     const ind = calculateIndicators(candles, 0.01);
     const cvdSnap = cvdEngine.getSnapshot();
+    const recentHigh = candles.length > 0 ? Math.max(...candles.slice(-20).map(c => c.high)) : undefined;
+    const recentLow = candles.length > 0 ? Math.min(...candles.slice(-20).map(c => c.low)) : undefined;
     const confluenceSnapshot = confluenceEngine.evaluate({
       symbol: event.symbol,
       currentPrice: event.markPrice,
       indicators: ind,
       cvd: cvdSnap,
+      recentHigh,
+      recentLow,
     });
     wsHub.broadcastConfluence(confluenceSnapshot);
 
@@ -306,6 +310,11 @@ export async function bootstrapServer(): Promise<{
     }
   });
 
+  streamsManager.onDepth((event) => {
+    if (event.symbol && event.symbol.toUpperCase() !== activeSymbol) return;
+    confluenceEngine.orderFlowEngine.updateDepth(event.bids, event.asks);
+  });
+
   streamsManager.onAggTrade((event) => {
     if (event.symbol !== activeSymbol) return;
     cvdEngine.processTrade({
@@ -315,6 +324,7 @@ export async function bootstrapServer(): Promise<{
       s: event.symbol,
       T: event.time,
     });
+    confluenceEngine.orderFlowEngine.processTrade(event.qty, event.isBuyerMaker);
   });
 
   streamsManager.onUserData((event) => {
@@ -432,6 +442,39 @@ export async function bootstrapServer(): Promise<{
     const p = parseFloat(mpData?.markPrice || '0');
     if (p > 0) markPriceMap.set(activeSymbol, p);
   } catch {}
+
+  // Pre-load 200 historical klines for immediate indicator warmup (EMA200, RSI, MACD, ATR)
+  try {
+    const rawKlines = await client.getKlines(activeSymbol, '1m', 200);
+    if (Array.isArray(rawKlines) && rawKlines.length > 0) {
+      const historicalCandles: KlineCandle[] = rawKlines.map((k: any) => ({
+        time: Math.floor(Number(k[0]) / 1000),
+        open: Number(k[1]),
+        high: Number(k[2]),
+        low: Number(k[3]),
+        close: Number(k[4]),
+        volume: Number(k[5]),
+      }));
+      candleHistoryMap.set(activeSymbol, historicalCandles);
+      console.log(`[BOOT] Preloaded ${historicalCandles.length} historical candles for ${activeSymbol}. Indicators fully warmed up!`);
+    }
+  } catch (err: any) {
+    console.warn(`[BOOT] Failed to preload historical klines: ${err.message}`);
+  }
+
+  // Preload initial L2 order book depth for Order Flow Engine
+  try {
+    const depthResp = await fetch(`https://fapi.binance.com/fapi/v1/depth?symbol=${activeSymbol}&limit=20`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (depthResp.ok) {
+      const depthData = (await depthResp.json()) as any;
+      confluenceEngine.orderFlowEngine.updateDepth(depthData.bids, depthData.asks);
+      console.log(`[BOOT] Preloaded initial L2 depth for ${activeSymbol}.`);
+    }
+  } catch (err: any) {
+    console.warn(`[BOOT] Failed to preload L2 depth: ${err.message}`);
+  }
 
   // Graceful shutdown helper
   const close = async () => {

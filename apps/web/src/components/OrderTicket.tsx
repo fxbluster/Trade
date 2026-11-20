@@ -178,8 +178,8 @@ export const OrderTicket: React.FC = () => {
           <span className="font-mono text-xs font-semibold text-[#e6edf3] uppercase tracking-wider">
             Order Execution
           </span>
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#151d2c] text-[#7d8590]">
-            50% Cap: ${maxMarginCap.toFixed(0)}
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-[#151d2c] text-[#0ecb81] border border-[#0ecb81]/30 font-semibold" title="Manual Discretionary Trading allows up to 50% margin allocation">
+            Max Cap (50%): ${maxMarginCap.toFixed(0)}
           </span>
         </div>
         <span className="font-mono text-xs text-[#7d8590]">
@@ -322,7 +322,7 @@ export const OrderTicket: React.FC = () => {
         <div className="flex items-center justify-between">
           <label className="text-[11px] font-mono text-[#7d8590] uppercase">Stop Loss (USDT)</label>
           {atr > 0 && (
-            <span className="text-[10px] font-mono text-[#7d8590]">ATR(14): {atr.toFixed(1)}</span>
+            <span className="text-[10px] font-mono text-[#7d8590]">ATR(14): ${atr.toFixed(2)}</span>
           )}
         </div>
         <input
@@ -414,7 +414,9 @@ export const OrderTicket: React.FC = () => {
           <div className="flex justify-between text-[#7d8590]">
             <span>Risk : Reward:</span>
             <span className={orderDraft.preview.rrRatio >= 1.5 ? 'text-[#0ecb81] font-bold' : 'text-[#f0b90b]'}>
-              1 : {orderDraft.preview.rrRatio.toFixed(2)}
+              {orderDraft.stopLoss && (orderDraft.tp1 || orderDraft.tp2) && orderDraft.preview.rrRatio > 0
+                ? `1 : ${orderDraft.preview.rrRatio.toFixed(2)}`
+                : '—'}
             </span>
           </div>
 

@@ -205,6 +205,7 @@ describe('ChartCanvas & Price Line Logic', () => {
       symbol: 'SOLUSDT',
       markPrice: 71.4,
       unrealizedPnl: 1.5,
+      cvd: 100,
       candle: { time: 1795101000, open: 71.0, high: 71.6, low: 70.8, close: 71.4, volume: 55 },
     });
 

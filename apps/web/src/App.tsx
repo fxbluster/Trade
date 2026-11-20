@@ -14,6 +14,7 @@ import { TimeMachineModal } from './components/TimeMachineModal';
 import { useMarketStore } from './store/useMarketStore';
 import { useUiStore } from './store/useUiStore';
 import { wsClient } from './lib/wsClient';
+import { apiClient } from './lib/apiClient';
 import { soundEffects } from './lib/audio';
 import { ShieldCheck, ListOrdered, BookOpen } from 'lucide-react';
 
@@ -77,12 +78,12 @@ export const App: React.FC = () => {
 
     // 4. Pre-cache top-50 symbols for instant offline/tunnel resilient scanner
     apiClient.getScanner()
-      .then((items) => {
+      .then((items: any) => {
         if (Array.isArray(items) && items.length > 0) {
           useMarketStore.getState().setCachedScannerItems(items);
         }
       })
-      .catch((err) => console.warn('Background scanner pre-cache warning:', err));
+      .catch((err: any) => console.warn('Background scanner pre-cache warning:', err));
 
     return () => {
       wsClient.disconnect();

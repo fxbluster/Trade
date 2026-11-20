@@ -149,14 +149,16 @@ export function computeOrderPreview(
   const estimatedLiquidation = formatByTickSize(rawLiq, tickSize);
 
   // Dead Stop-Loss Armor:
+  // Stop Loss is strictly mandatory: if omitted, null, or <= 0, deadSlSafe is FALSE.
   // For Long: SL must be strictly above estimated liquidation price.
   // For Short: SL must be strictly below estimated liquidation price.
-  let deadSlSafe = true;
-  if (req.stopLoss && req.stopLoss > 0) {
+  const hasStopLoss = typeof req.stopLoss === 'number' && req.stopLoss > 0;
+  let deadSlSafe = false;
+  if (hasStopLoss) {
     if (req.side === 'BUY') {
-      deadSlSafe = req.stopLoss > estimatedLiquidation;
+      deadSlSafe = req.stopLoss! > estimatedLiquidation;
     } else {
-      deadSlSafe = req.stopLoss < estimatedLiquidation;
+      deadSlSafe = req.stopLoss! < estimatedLiquidation;
     }
   }
 

@@ -294,7 +294,7 @@ describe('TradeOS v2 — Math Engine (@tradeos/shared/math)', () => {
         expect(computeOrderPreview(reqSlBelowLiq, 100, 0.01, 0.01).deadSlSafe).toBe(true);
       });
 
-      it('marks deadSlSafe = true when no stop-loss is set', () => {
+      it('flags deadSlSafe = false when no stop-loss is set (mandatory SL invariant)', () => {
         const noSlReq: OpenOrderRequest = {
           symbol: 'SOLUSDT',
           side: 'BUY',
@@ -303,8 +303,26 @@ describe('TradeOS v2 — Math Engine (@tradeos/shared/math)', () => {
           leverage: 10,
         };
         const preview = computeOrderPreview(noSlReq, 100, 0.01, 0.01);
-        expect(preview.deadSlSafe).toBe(true);
+        expect(preview.deadSlSafe).toBe(false);
         expect(preview.maxLossUsd).toBe(50); // Entire margin
+      });
+
+      it('flags deadSlSafe = false when stopLoss is 0 or negative', () => {
+        const zeroSlReq: OpenOrderRequest = {
+          symbol: 'SOLUSDT',
+          side: 'BUY',
+          orderType: 'MARKET',
+          marginUsd: 50,
+          leverage: 10,
+          stopLoss: 0,
+        };
+        expect(computeOrderPreview(zeroSlReq, 100, 0.01, 0.01).deadSlSafe).toBe(false);
+
+        const negSlReq: OpenOrderRequest = {
+          ...zeroSlReq,
+          stopLoss: -10,
+        };
+        expect(computeOrderPreview(negSlReq, 100, 0.01, 0.01).deadSlSafe).toBe(false);
       });
     });
 

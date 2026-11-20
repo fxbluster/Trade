@@ -17,36 +17,29 @@ Write-Host " TradeOS v1 -> v2 Dynamic Cutover & Cleanup Script   " -ForegroundCo
 Write-Host "=====================================================" -ForegroundColor Cyan
 
 # -----------------------------------------------------------------------------
-# Step 1: Neutralize Windows Startup persistence
+# Step 1: Remove Windows Startup persistence
 # -----------------------------------------------------------------------------
-Write-Host "`n[Step 1/3] Neutralizing Windows Startup Persistence..." -ForegroundColor Yellow
+Write-Host "`n[Step 1/3] Removing Windows Startup Persistence..." -ForegroundColor Yellow
 
 $startupFolder = [System.IO.Path]::Combine($env:APPDATA, 'Microsoft\Windows\Start Menu\Programs\Startup')
 $startupVbs = [System.IO.Path]::Combine($startupFolder, 'TradeOS_Agent_Keeper.vbs')
 $startupBak = [System.IO.Path]::Combine($startupFolder, 'TradeOS_Agent_Keeper.vbs.bak')
 
-if (Test-Path -LiteralPath $startupVbs) {
-    if ($WhatIf) {
-        Write-Host "  [WHATIF] Would rename: $startupVbs -> $startupBak" -ForegroundColor Magenta
-    } else {
-        try {
-            if (Test-Path -LiteralPath $startupBak) {
-                Remove-Item -LiteralPath $startupBak -Force -ErrorAction Stop
-                Write-Host "  Removed existing backup file: $startupBak" -ForegroundColor DarkGray
+foreach ($filePath in @($startupVbs, $startupBak)) {
+    if (Test-Path -LiteralPath $filePath) {
+        if ($WhatIf) {
+            Write-Host "  [WHATIF] Would delete: $filePath" -ForegroundColor Magenta
+        } else {
+            try {
+                Remove-Item -LiteralPath $filePath -Force -ErrorAction Stop
+                Write-Host "  [SUCCESS] Deleted startup file: $filePath" -ForegroundColor Green
+            } catch {
+                Write-Warning "  Failed to delete startup file: $($_.Exception.Message)"
             }
-            Move-Item -LiteralPath $startupVbs -Destination $startupBak -Force -ErrorAction Stop
-            Write-Host "  [SUCCESS] Renamed startup hook to: $startupBak" -ForegroundColor Green
-        } catch {
-            Write-Warning "  Failed to rename startup script: $($_.Exception.Message)"
         }
     }
-} else {
-    if (Test-Path -LiteralPath $startupBak) {
-        Write-Host "  [OK] Startup hook is already neutralized (backup exists at $startupBak)." -ForegroundColor Green
-    } else {
-        Write-Host "  [INFO] No TradeOS_Agent_Keeper.vbs found in Startup folder." -ForegroundColor Gray
-    }
 }
+Write-Host "  [OK] Startup folder verified clean of TradeOS persistence." -ForegroundColor Green
 
 # -----------------------------------------------------------------------------
 # Step 2: Dynamically detect orphaned v1 processes

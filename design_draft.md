@@ -1,4 +1,4 @@
-# TradeOS v2: 6+1 Confluence Engine, Autonomous Auto-Pilot Execution, and PineScript v6 Ingestion
+# TradeOS v2: Cockpit Stabilization & Forensic Remediation
 
 *   **Author:** fxbluster
 *   **Status:** Draft
@@ -8,351 +8,340 @@
 
 ## Overview
 
-TradeOS v2 provides institutional-grade risk limits and direct Binance Demo/Testnet execution. This specification introduces an advanced market intelligence and algorithmic execution layer:
-1. **6+1 Confluence Decision Engine:** Six core real-time quantitative pillars (MTF Trend, Momentum/Volatility, Order Flow Footprint, CVD Absorption, Liquidation Magnets, NLP News Sentiment) plus a 7th backend pillar (TradingView PineScript v6 Smart Money Webhook Ingestion).
-2. **Dual-Mode Execution Architecture:**
-   - **Manual Mode:** Visual status cards for all pillars with human-in-the-loop 400ms physical hold-to-trade confirmation.
-   - **Autonomous Auto-Pilot Mode:** Triggers algorithmic bracket entry (Entry, Stop-Loss, TP1, TP2) when consensus reaches >= 4 out of 7 pillars, with automated position lifecycle management (auto-breakeven, trailing stops, and opposite-confluence emergency early exit).
-3. **UI Enhancements & Control:** Expanded margin allocation presets (2.5%, 5%, 10%, 25%, up to 50%) and visual chart overlay toggles (hiding PineScript graphics on chart while keeping the 7th pillar active in the backend).
+This technical design document outlines the stabilization architecture for the TradeOS v2 trading cockpit. It resolves the severe 4Hz canvas freeze identified in live operations, alongside seven user experience, risk enforcement, and quantitative telemetry failure modes discovered during forensic video analysis of session `D:\Recording 2026-11-20 185617.mp4`.
+
+The primary design goal is ensuring zero-latency, 60fps charting performance and strict fail-closed liquidation protection across volatile market regimes, decoupling streaming tick consumption from React DOM reconciliation, and automating risk-arm invariants.
+
+--------------------------------------------------------------------------------
 
 ## The Problem
 
-Crypto futures markets operate 24/7 with rapid regime shifts. Traders face cognitive fatigue and execution delay trying to manually cross-reference order books, multi-timeframe moving averages, delta absorption, and breaking headlines. In TradeOS v1, analytical tools were tightly coupled into a fragile monolithic script. In TradeOS v2, core execution is robust, but the user currently lacks:
-- A synthesized multi-factor validation framework to confirm entries before pulling the trigger.
-- An optional hands-off Auto-Pilot mode to capture high-probability algorithmic setups when consensus is strong.
-- Flexibility in margin sizing (previously capped at 10% presets).
-- Clean ingestion of external Smart Money Concept (SMC) signals from TradingView without visual clutter on the chart.
+1. **4Hz UI Thread Event Loop Freezes:** In `useMarketStore.ts`, incoming WebSocket ticks (streaming at up to 4Hz) trigger immutable cloning of the 400-candle `klines` array. In `ChartCanvas.tsx`, an active `useEffect` hook listening to `[klines, symbol]` responds by invoking `series.setData(candleData)` and `timeScale().fitContent()` up to 4 times per second. This forcibly reconstructs the Lightweight Charts canvas geometry and resets viewport panning/zoom, choking the browser main thread and rendering user interactions unresponsive ("baya takılır").
+2. **Naked Order Execution Risk:** The Order Ticket permits order staging without a Stop Loss, and `@tradeos/shared` defaults `deadSlSafe = true` when Stop Loss is undefined. This exposes traders to catastrophic margin liquidations if an order is executed before an SL is set.
+3. **Quantitative Inversion in Order Flow Telemetry:** Unpruned historical aggressive taker volumes accumulate in `orderFlowEngine.ts`, overriding current Level 2 book depth ($8.0M bids vs $6.0M asks) and printing contradictory `2.7x Sell` signals.
+4. **Cockpit Flight Deck Ergonomic Loss:** The right 30% sidebar places the Autonomous Auto-Pilot controls in a scrollable rail above the Order Ticket. Scrolling down to manage leverage or margin moves the Auto-Pilot kill switch and state status completely off-screen.
+5. **Scanner & Stochastic Simulation Brittleness:** The Market Scanner lacks fallback handling and fails open into a blank dark container under tunnel latency. Concurrently, the Monte Carlo simulation displays decoupled 58%/38% probabilities without binding to active trade targets.
+
+--------------------------------------------------------------------------------
 
 ## Goals
 
-*   **G1 (6+1 Confluence Matrix):** Implement modular quantitative calculators in `@tradeos/shared` and `apps/server/src/quant` covering MTF Trend, Momentum, Order Flow, CVD, Liquidation Magnet, NLP News Sentiment, and PineScript Webhook Signals.
-*   **G2 (Consensus Engine >= 4 of 7):** Formulate an algorithmic consensus score where >= 4 confirming pillars in the same direction unlocks auto-execution or marks manual entry as high-confidence.
-*   **G3 (Fail-Closed Auto-Pilot):** Implement an autonomous trading state machine that places bracket orders with strict 10x leverage, monitors open positions, migrates SL to breakeven at 1.5x ATR profit, and closes immediately if market consensus flips to the opposite direction.
-*   **G4 (Circuit-Breakers):** Enforce strict safety throttles in auto-pilot: max 1 concurrent open position, max 2 consecutive losses before a mandatory 60-minute cooldown, and 0.10% max slippage rejection.
-*   **G5 (Background PineScript Ingestion with UI Toggle):** Support TradingView alert webhooks (`POST /api/webhook`) with HMAC authentication and deduplication, allowing the user to hide visual chart markers while keeping the backend signal pillar active.
-*   **G6 (Expanded Margin Allocation):** Update order execution controls to support 2.5%, 5.0%, 10.0%, 25.0%, and up to 50.0% margin allocation presets with real-time balance recalculation.
+*   **Goal 1 (60fps Decoupled Charting):** Eliminate all calls to `series.setData()` and `timeScale().fitContent()` from the streaming tick path. Restrict full dataset re-renders strictly to discrete initial loads, symbol changes, and interval switches. Stream live price ticks exclusively through `wsClient.subscribeTick` direct series updates at 60fps with zero React state overhead.
+*   **Goal 2 (Zero-Friction Dead-SL Armor):** Enforce strict mandatory Stop Loss validation in `@tradeos/shared` (`deadSlSafe = false` when SL is absent or zero). Automatically populate Stop Loss at $-1.5\text{x ATR}$ upon margin preset selection, rendering the SL bracket line immediately on the chart canvas.
+*   **Goal 3 (Order Flow Depth Alignment):** Implement a 60-second sliding window / exponential decay for aggressive trade volume in `orderFlowEngine.ts`, ensuring Book Depth Ratio and Taker Flow are presented as distinct, non-contradictory metrics.
+*   **Goal 4 (Pinned Cockpit Flight Deck):** Pin `<AutoPilotControls />` at the top of the right rail as an unscrollable executive flight deck header, guaranteeing continuous visibility of the emergency halt switch and consensus meter.
+*   **Goal 5 (Resilient Scanner & Dynamic FHT Bounds):** Provide skeleton loading and in-memory caching of top-50 volume pairs in `ScannerModal.tsx`. Bind Monte Carlo FHT simulation boundaries dynamically to active order draft targets or real-time ATR.
+*   **Goal 6 (Volume Scale De-cluttering):** Suppress volume histogram price scale labels on the right margin to prevent number collisions with candlestick prices.
+
+--------------------------------------------------------------------------------
 
 ## Non-Goals
 
-*   **NG1 (Uncapped Martingale / Averaging Down):** No grid trading or martingale doubling on losing positions. Each trade has an independent fixed risk envelope.
-*   **NG2 (Desktop WPF/Electron Overlay):** No re-creation of legacy Windows desktop native overlays; all controls and cards reside in the responsive web cockpit.
-*   **NG3 (Paid Data Subscriptions):** All 6 quantitative pillars and sentiment feeds must operate on free public feeds (Binance WebSocket, CryptoPanic public API, CoinDesk RSS).
+*   Replacing the native Lightweight Charts engine with an external third-party charting library.
+*   Allowing unhedged naked futures positions without a Stop Loss under any broker mode.
+*   Altering the global dark visual theme or design tokens.
+*   Implementing multi-symbol split charting in a single browser window.
+
+--------------------------------------------------------------------------------
 
 ## Open Questions
 
-*   **Question 1 (Auto-Pilot Order Type):** Should Auto-Pilot execute via Taker MARKET orders to guarantee fill on fast breakouts, or via MAKER LIMIT orders placed at the nearest Order Block / FVG zone to save fees?
-*   **Question 2 (Auto-Pilot Re-Entry Throttling):** After an auto-trade hits TP1 or closes at breakeven, how many candles (e.g. minimum 3 bars / 3 minutes) must elapse before entering another trade on the same symbol?
+*   **Question 1 (Auto-Arm Sensitivity):** Should the $-1.5\text{x ATR}$ Stop Loss auto-arm calculate from current mark price for Market orders and from limit price for Limit orders?
+*   **Question 2 (Scanner Refresh Cadence):** Should the in-memory top-50 scanner cache refresh in the background every 30 seconds via server push, or on-demand when the modal is opened?
+
+--------------------------------------------------------------------------------
 
 ## Critical User Journeys (CUJs)
 
-### CUJ 1: Autonomous Auto-Pilot Entry & Opposite-Confluence Exit
-*   **Given**: Auto-Pilot mode is enabled with 10% margin, 10x leverage, and consensus threshold set to >= 4 pillars.
-*   **When**: MTF Trend (Bullish), CVD Divergence (Bullish Absorption), Order Flow (+320% Buy Imbalance), and PineScript Webhook (SMC Long) confirm simultaneously (4/7 pillars).
-*   **Then**: The engine automatically places a BUY order on Binance Testnet, sets Stop-Loss at 1.5x ATR below entry, sets TP1 at +2.5%, and updates the UI status badge to "AUTO-PILOT ACTIVE". If 15 minutes later 5 pillars flip to Bearish, the engine immediately executes a reduceOnly market close to safeguard capital.
+### CUJ 1: High-Volatility Chart Navigation & Order Execution
+*   **Given:** Trader is viewing SOLUSDT during active 4Hz tick streaming over a Cloudflare tunnel.
+*   **When:** Trader scrolls, zooms in on historical swing lows, and pans across the chart canvas while selecting a 10% margin preset.
+*   **Then:** Viewport remains stable without snapping back, canvas maintains smooth 60fps interaction without UI lockup, Stop Loss is automatically populated at $-1.5\text{x ATR}$, and the red SL line renders immediately on the canvas.
 
-### CUJ 2: Manual Trading with 6-Card Confluence HUD
-*   **Given**: Manual mode is active. The user is observing SOLUSDT.
-*   **When**: The trader inspects the 6 Confluence Cards. Three are Green (Bullish), two are Gray (Neutral), and one is Red (Bearish) (3/7 pillars).
-*   **Then**: Sokrat Mentor displays "CAUTION: Insufficient Confluence (3/7)". The trader waits until a fourth card turns Green, then holds the 400ms button to execute with full risk armor.
-
-### CUJ 3: Background PineScript Signal Ingestion with Chart Toggle Off
-*   **Given**: TradingView indicator is sending webhook alerts to `POST /api/webhook`. The user finds the chart too cluttered.
-*   **When**: The user toggles the "Hide Pine Overlay" button on the TradeOS chart.
-*   **Then**: The chart displays clean candles without visual noise, but Pillar 7 in the backend and on the Confluence HUD continues to register PineScript signals in real time.
+### CUJ 2: Safe Order Dispatch with Emergency Halt Access
+*   **Given:** Trader is preparing a Limit Long order with 10x leverage and adjusts stop loss price while Auto-Pilot is engaged.
+*   **When:** Trader scrolls down to inspect Sokrat Quant Mentor feedback.
+*   **Then:** Auto-Pilot flight deck header remains permanently pinned at the top of the right rail, allowing instantaneous access to the one-click emergency kill-switch.
 
 --------------------------------------------------------------------------------
 
 ## Technical Plan (Architecture)
 
-### 1. High-Level System Architecture
+### 1. Three-Tier Streaming & State Decoupling Architecture
+
+To completely eliminate the 4Hz UI thread freeze, the streaming pipeline is decomposed into three isolated architectural tiers:
 
 ```mermaid
 flowchart TD
-    subgraph DataIngestion["1. Data Ingestion Layer"]
-        A1["Binance Futures WebSocket (Ticks, Klines, BookDepth)"]
-        A2["CryptoNews Cron (CryptoPanic API + CoinDesk RSS)"]
-        A3["TradingView Alert Webhook (HMAC-SHA256, POST /api/webhook)"]
+    subgraph Binance_Exchange ["Binance WebSocket Streams"]
+        TICK["@markPrice & @kline_1m"]
+        DEPTH["@depth20@100ms & @aggTrade"]
     end
 
-    subgraph QuantEngine["2. Quant Confluence Core (confluenceEngine.ts)"]
-        B1["Pillar 1: MTF Trend (EMA 9/21/50/200 + ADX)"]
-        B2["Pillar 2: Momentum & Volatility (RSI 14 + MACD + ATR)"]
-        B3["Pillar 3: Order Flow Footprint (>300% Bid/Ask Imbalance)"]
-        B4["Pillar 4: Spot vs Perp CVD (Absorption & Divergence)"]
-        B5["Pillar 5: Liquidation Magnet (Cluster Proximity)"]
-        B6["Pillar 6: NLP Sentiment Harvester (VADER -1.0 to +1.0)"]
-        B7["Pillar 7: PineScript v6 SMC Webhook Signal (OB / BOS)"]
-        
-        M1["Consensus Evaluator (Threshold >= 4 of 7 Confirming)"]
+    subgraph Server_Layer ["TradeOS Backend Server"]
+        WSHUB["WsHub Throttled 4Hz Broadcaster"]
+        ENGINES["ConfluenceEngine & OrderFlowEngine"]
     end
 
-    subgraph ExecutionLayer["3. Execution & Supervision (autoPilotManager.ts)"]
-        C1{"Mode Evaluator"}
-        C2["Manual Mode: Feed Sokrat HUD & Confluence Cards"]
-        C3["Auto-Pilot Mode: Risk Gate & Bracket Order Placement"]
-        C4["Position Monitor (Breakeven @ 1.5x ATR, Opposite-Signal Exit)"]
+    subgraph Client_Tier1 ["Tier 1: Canvas Ultra-Fast Path (60fps, Zero React)"]
+        WSCLIENT["wsClient.subscribeTick"]
+        CANDLE_UPDATE["candleSeries.update(liveCandle)"]
+        VOL_UPDATE["volumeSeries.update(liveVolume)"]
     end
 
-    subgraph UI["4. Frontend Web Cockpit"]
-        D1["6+1 Confluence Cards HUD (Green / Red / Gray)"]
-        D2["Auto-Pilot Master Switch (ON/OFF) & Consensus Counter"]
-        D3["Expanded Margin Presets (2.5%, 5%, 10%, 25%, 50%)"]
-        D4["Chart Canvas with Pine Overlay Toggle"]
+    subgraph Client_Tier2 ["Tier 2: Scalar Telemetry (React State)"]
+        STORE["useMarketStore.applyTick"]
+        SCALARS["markPrice, unrealizedPnl, equity"]
     end
 
-    A1 --> B1
-    A1 --> B2
-    A1 --> B3
-    A1 --> B4
-    A1 --> B5
-    A2 --> B6
-    A3 --> B7
+    subgraph Client_Tier3 ["Tier 3: Discrete Structural Snapshots"]
+        REST["apiClient.getKlines / setSymbol"]
+        FULL_SET["candleSeries.setData(400) & fitContent()"]
+    end
 
-    B1 & B2 & B3 & B4 & B5 & B6 & B7 --> M1
-    M1 --> C1
-
-    C1 -->|Manual| C2
-    C1 -->|Auto-Pilot| C3
-    C3 --> C4
-
-    C2 --> D1
-    C3 --> D2
-    C4 --> D1
+    TICK --> WSHUB
+    DEPTH --> ENGINES --> WSHUB
+    WSHUB --> WSCLIENT
+    WSCLIENT --> CANDLE_UPDATE
+    WSCLIENT --> VOL_UPDATE
+    WSCLIENT --> STORE --> SCALARS
+    REST --> FULL_SET
 ```
 
-### 2. Component Boundaries & Responsibilities
+*   **Tier 1: Canvas Ultra-Fast Path (60fps, Zero React):**
+    `wsClient.subscribeTick` attaches directly to the Lightweight Charts instance. Incoming ticks invoke `candleSeriesRef.current.update(liveCandle)` and `volumeSeriesRef.current.update(liveVolume)` directly. React Virtual DOM reconciliation is completely bypassed.
+*   **Tier 2: Scalar Telemetry Path:**
+    `useMarketStore.applyTick` is modified to update only scalar primitives (`markPrice`, `unrealizedPnl`, `equity`). The historical `klines` array reference is preserved without cloning or mutation during ticks. This prevents re-triggering dependent components.
+*   **Tier 3: Discrete Structural Snapshots:**
+    `candleSeries.setData()` and `timeScale().fitContent()` are strictly confined to discrete user actions: initial page load, symbol switching, and interval toggling (`1m` / `5m` / `15m` / `1h`).
 
-#### A. `@tradeos/shared` (Data Types & Invariants)
-- **`ConfluencePillarId`**: `'MTF_TREND' | 'MOMENTUM' | 'ORDER_FLOW' | 'CVD' | 'LIQ_MAGNET' | 'NLP_NEWS' | 'PINE_SMC'`.
-- **`PillarEvaluation`**:
-  ```typescript
-  export interface PillarEvaluation {
-    id: ConfluencePillarId;
-    title: string;
-    score: number; // 0 to 100
-    bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-    valueText: string;
-    subText: string;
-    confirmed: boolean; // meets pillar threshold
-    updatedAt: number;
-  }
-  ```
-- **`ConfluenceSnapshot`**:
-  ```typescript
-  export interface ConfluenceSnapshot {
-    symbol: string;
-    pillars: PillarEvaluation[];
-    bullishCount: number;
-    bearishCount: number;
-    neutralCount: number;
-    consensusBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-    consensusMet: boolean; // confirmingCount >= threshold (default 4)
-    threshold: number; // 4
-    compositeScore: number; // 0 - 100
-    recommendedAction: 'STRONG_BUY' | 'BUY' | 'GÖZLƏ' | 'SELL' | 'STRONG_SELL';
-  }
-  ```
-- **`AutoPilotConfig`**:
-  ```typescript
-  export interface AutoPilotConfig {
-    enabled: boolean;
-    consensusThreshold: number; // default 4
-    marginAllocationPct: number; // 2.5, 5, 10, 25, 50
-    leverage: number; // strict 10
-    oppositeExitEnabled: boolean; // true
-    circuitBreakerConsecutiveLosses: number; // 2
-    circuitBreakerCooldownMs: number; // 3,600,000 (1 hour)
-  }
-  ```
+### 2. Zero-Friction Dead-SL Armor Invariant
 
-#### B. Quantitative Calculation Engines (`apps/server/src/quant/`)
-1. **`confluenceEngine.ts`**: Aggregates the 7 pillars into a cohesive snapshot. Caches previous evaluations to eliminate duplicate CPU cycles.
-2. **`orderFlowEngine.ts`**: Analyzes the recent tick ring buffer and level-2 depth to detect bid-ask aggression and trade size imbalances exceeding 3.0x.
-3. **`cvdEngine.ts` (Upgraded)**: Tracks cumulative delta volume and compares perpetual futures volume vs spot reference klines to flag hidden institutional absorption.
-4. **`sentimentHarvester.ts`**: Background worker polling CryptoPanic API and CoinDesk RSS every 3 minutes. Evaluates headlines using a zero-dependency VADER lexicon analyzer.
-5. **`liquidationEngine.ts`**: Evaluates price distance to open interest liquidation magnet clusters.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Trader
+    participant Ticket as OrderTicket.tsx
+    participant Math as @tradeos/shared (math.ts)
+    participant Chart as ChartCanvas.tsx
+    participant Server as TradeManager (REST API)
 
-#### C. Autonomous Auto-Pilot Service (`apps/server/src/services/autoPilotManager.ts`)
-- Evaluates the active symbol's `ConfluenceSnapshot` on every candle close and 4Hz tick.
-- **Entry Logic**:
-  - Preconditions: `AutoPilotConfig.enabled === true`, no existing active trade on symbol (`tradesRepo.getActivePosition(mode, symbol) === null`), cooldown lock not active.
-  - Signal Trigger: `consensusMet === true` (at least 4 pillars confirm BUY or SELL).
-  - Validation: Runs `validateOrderRisk()` via `riskEngine.ts`.
-  - Execution: Calls `tradeManager.openPosition({ symbol, side, marginUsd, leverage: 10, stopLoss, tp1, tp2 })`.
-- **Position Management & Early Exit Logic**:
-  - Monitors open position. Migrates Stop-Loss to Breakeven (+0.15% fee buffer) when unrealized PnL reaches 1.5x ATR.
-  - **Opposite-Confluence Exit**: If currently in a LONG position and the Confluence Engine flips to Bearish consensus (>= 4 pillars BEARISH), auto-pilot triggers `tradeManager.closePosition(symbol, 'OPPOSITE_CONFLUENCE_REVERSAL')` to protect capital.
+    Trader->>Ticket: Clicks Margin Preset (e.g., 2.5% = $120.85)
+    Ticket->>Ticket: Check if Stop Loss is defined
+    alt Stop Loss is Empty
+        Ticket->>Ticket: Auto-populate SL = entry - 1.5 * ATR (Long)
+        Ticket->>Chart: Broadcast preview Stop Loss line (Red Dotted)
+    end
+    Ticket->>Math: computeOrderPreview(request, markPrice)
+    Note over Math: If SL <= 0 or beyond Liq Price: deadSlSafe = FALSE
+    Math-->>Ticket: Returns { deadSlSafe, quantity, liqPrice, rrRatio }
+    alt deadSlSafe == TRUE
+        Ticket->>Ticket: Arm HOLD 400MS TO LONG (Active Green)
+        Trader->>Ticket: Holds button for 400ms
+        Ticket->>Server: POST /api/orders/open with verified bracket SL
+    else deadSlSafe == FALSE
+        Ticket->>Ticket: Lock button: "SET STOP LOSS TO ARM" (Amber Disabled)
+    end
+```
 
-#### D. External Webhook Receiver (`apps/server/src/api/routes.ts`)
-- **`POST /api/webhook`**:
-  - Validates `x-tradeos-signature` using HMAC-SHA256 (`WEBHOOK_SECRET`).
-  - Checks timestamp drift (rejects requests older than 30 seconds to prevent replay attacks).
-  - Validates payload: `{ symbol, side, entryPrice, stopLoss, tp1, tp2, time }`.
-  - Updates Pillar 7 (`PINE_SMC`) in the Confluence Engine.
-  - If Auto-Pilot is enabled and consensus is satisfied, forwards order to `autoPilotManager`.
+*   **Validation Hardening:** In `packages/shared/src/math.ts`, `computeOrderPreview` enforces:
+    `deadSlSafe = Boolean(req.stopLoss && req.stopLoss > 0 && isSafeDistance(req.stopLoss, liqPrice));`.
+    An order without an anchored Stop Loss is treated as structurally invalid.
+*   **Auto-Arming Interaction:** When a trader clicks a margin allocation preset (`2.5%`, `5%`, `10%`, `25%`, `50%`), `OrderTicket.tsx` automatically executes `applyAtrPreset('SL', 1.5)` if the SL field is empty. The red Stop Loss line is immediately drawn on the chart canvas, giving instantaneous visual confirmation.
 
-#### E. Frontend Cockpit Enhancements (`apps/web/src/components/`)
-1. **`ConfluenceHUD.tsx`**: Top-level 6+1 card grid with color-coded status badges, real-time pillar metrics, and a master consensus progress meter (e.g. `[4/7 BUY CONFIRMED]`).
-2. **`AutoPilotControls.tsx`**: Toggle switch for Autonomous mode with safety visual indicators (cooldown status, daily loss guard).
-3. **`OrderForm.tsx` Expansion**: Update margin quick-select buttons to: `[2.5%] [5.0%] [10.0%] [25.0%] [50.0%]`.
-4. **`ChartCanvas.tsx`**: Add toggle button `[Hide/Show Pine Overlay]` to suppress TradingView visual markers while keeping background ingestion active.
+### 3. Order Flow Imbalance Engine Time-Decay
+
+*   **Decay Formula:** In `apps/server/src/quant/orderFlowEngine.ts`, replace cumulative volume addition with a 60-second sliding time window:
+    $$V_{\text{buy}}(t) = \sum_{i \in \text{trades}(t - 60s \le T_i \le t)} q_i \cdot \mathbb{I}(\text{side}_i = \text{BUY})$$
+    $$V_{\text{sell}}(t) = \sum_{i \in \text{trades}(t - 60s \le T_i \le t)} q_i \cdot \mathbb{I}(\text{side}_i = \text{SELL})$$
+*   **Dual-Metric Telemetry:** In `confluenceEngine.ts`, separate the Order Flow card into two explicit metrics:
+    1.  `L2 Book Depth Ratio`: $\frac{\text{Bid Depth}}{\text{Ask Depth}}$ (e.g., $1.33\text{x BUY}$).
+    2.  `60s Taker Aggression`: $\frac{V_{\text{buy}}}{V_{\text{sell}}}$ or net aggressive delta.
+
+### 4. Pinned Cockpit Flight Deck Layout
+
+In `apps/web/src/App.tsx`, the right rail (30% width) is restructured to pin `<AutoPilotControls />` at the top:
+
+```tsx
+<aside className="flex-[3] flex flex-col h-full gap-2 overflow-hidden">
+  {/* Pinned Executive Flight Deck (Static, No Overflow) */}
+  <div className="flex-shrink-0">
+    <AutoPilotControls />
+  </div>
+
+  {/* Scrollable Order Form and Mentor Rail */}
+  <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+    <OrderTicket />
+    <SokratMentorPanel />
+  </div>
+</aside>
+```
+
+### 5. Resilient Market Scanner & Stochastic Simulation
+
+*   **Scanner Skeleton & Cache:** `ScannerModal.tsx` implements a pulsing table skeleton during `isLoading`. On mount, it immediately renders cached top-50 symbols from memory. If the network times out, it displays the cached data with a "Cached (Offline)" badge and a retry button.
+*   **Dynamic Monte Carlo FHT Bounds:** `TimeMachineModal.tsx` dynamically binds to the active order draft. If the draft SL/TP are empty, it automatically projects boundaries using the active symbol's mark price and 14-period ATR ($\pm 1.5\text{x ATR}$ for SL, $\pm 2.0\text{x ATR}$ for TP), ensuring First-Hitting-Time calculations are grounded in current volatility.
+
+### 6. Volume Axis Label Suppression
+
+In `ChartCanvas.tsx`, suppress price axis labels for the volume histogram series:
+```tsx
+chart.priceScale('volume').applyOptions({
+  visible: false,
+  scaleMargins: { top: 0.8, bottom: 0 },
+});
+```
 
 --------------------------------------------------------------------------------
 
 ## Alternatives Considered
 
-### Alternative A: 7-out-of-7 Unanimous Consensus Requirement
-*   **Pros**: Filters out maximum noise; only trades when every single technical, order book, delta, sentiment, and external indicator aligns in the exact same direction.
-*   **Cons**: Markets rarely exhibit complete synchronization across all disparate timeframes and metrics simultaneously. Results in near-zero trade frequency.
-*   **Reason for Rejection**: *Rejected by author: A 7/7 unanimous consensus rule paralyzes the trading system, causing valid high-probability trend moves to be missed. A >= 4 out of 7 threshold provides the optimal balance of statistical edge and actionable frequency.*
+### Alternative 1: Throttling React Component Re-renders via `useThrottle` / RequestAnimationFrame
+*   **Pros:** Requires fewer structural changes to store subscriptions; keeps all state synchronized within Zustand.
+*   **Cons:** Even when throttled to 2Hz, calling `setData(400)` in a React component unmounts and reconstructs canvas geometries. It wipes active crosshair coordinates, forcibly resets manual zoom/pan levels via `fitContent()`, and produces visible stutter during fast market breakouts.
+*   **Reason for Rejection:** Rejected by author: Direct series streaming (`candleSeries.update()`) via `wsClient` listeners operates at native 60fps with zero Virtual DOM overhead. Streaming ticks must not touch the historical klines array reference.
 
-### Alternative B: Direct Webhook-to-Exchange Execution
-*   **Pros**: Simplifies architecture into a dumb pass-through webhook proxy from TradingView to Binance.
-*   **Cons**: Exposes capital to unfiltered indicator errors, external network spam, and false signals during high-volatility news spikes. Bypasses the local risk engine.
-*   **Reason for Rejection**: *Rejected by author: External webhook signals must act as an input (Pillar 7) within the 7-pillar confluence matrix and pass deterministic risk checks (`validateOrderRisk`) before triggering any trade.*
+### Alternative 2: Blocking Unhedged Order Entry with Invasive Pop-Up Modal Dialogs
+*   **Pros:** Explicitly informs the user why an order was not accepted; requires no automatic calculation of prices.
+*   **Cons:** Pop-up modal dialogs create high friction during volatile scalping situations. An unexpected modal requires the trader to manually dismiss it, causing missed entries and slippage.
+*   **Reason for Rejection:** Rejected by author: Institutional LiquidationGuard requires zero-friction safety defaults. Auto-arming Stop Loss to $-1.5\text{x ATR}$ upon margin preset selection provides an immediate safety boundary that the trader can visually fine-tune or drag on the chart without modal interruptions.
 
-### Alternative C: Uncapped Martingale Averaging Down in Auto-Pilot
-*   **Pros**: Temporarily elevates nominal win rates in choppy range-bound markets.
-*   **Cons**: Exponential liquidation risk during strong directional trend days. Guaranteed account ruin over sufficient sample size.
-*   **Reason for Rejection**: *Rejected by author: Violates the core TradeOS solvency invariant. Auto-Pilot strictly executes isolated bracket trades with predetermined Stop-Loss envelopes and zero position doubling.*
+### Alternative 3: On-Demand Lazy-Loading of All 767 Binance Pairs on Modal Mount
+*   **Pros:** Ensures the client always fetches the latest 24h ticker prices without consuming memory at startup.
+*   **Cons:** Aggregating 767 ticker pairs over tunnel connections (Cloudflare) introduces 800ms–1500ms network latency. Network blips or rate limits cause the modal to fail open as a blank dark box, degrading trader confidence.
+*   **Reason for Rejection:** Rejected by author: Caching top-50 high-volume pairs in memory at application startup guarantees sub-100ms instantaneous modal display, with background fallback refresh.
 
-### Alternative D: Synchronous In-Process Scraping for Pillar 6 (News Sentiment)
-*   **Pros**: Guarantees headlines are evaluated on the exact millisecond of every price tick.
-*   **Cons**: External HTTP requests to RSS feeds take 500ms–3000ms. Running them synchronously blocks the Node.js event loop, freezing WebSocket price broadcasts and order execution.
-*   **Reason for Rejection**: *Rejected by author: Pillar 6 must operate as an asynchronous background worker with a 3-minute atomic cache, ensuring 0ms latency impact on the core trade execution loop.*
+### Alternative 4: Migration to Third-Party Charting Engines (e.g. TradingView TA Library)
+*   **Pros:** Native PineScript indicator drawing overlays and built-in drawing toolbars.
+*   **Cons:** Introduces proprietary commercial licensing restrictions, excessive bundle bloat (>3MB minified), and complex iframe messaging bridges that exacerbate UI latency.
+*   **Reason for Rejection:** Rejected by author: TradingView Lightweight Charts is open-source (Apache 2.0), lightweight (<150KB), and easily achieves 60fps rendering once decoupled from React re-render thrashing.
+
+--------------------------------------------------------------------------------
+
+## Non-Functional Requirements
+
+*   **Performance & Latency:**
+    *   Tick-to-canvas rendering latency must remain below 16ms (60fps animation budget) on desktop and mobile browsers.
+    *   Zero canvas DOM reconstructions or `fitContent()` executions during active WebSocket mark price streams.
+*   **Safety & Liquidation Invariants:**
+    *   Fail-closed order validation: Under no circumstances can an order without a verified Stop Loss be dispatched to Binance API or Local Paper broker.
+*   **Observability & Telemetry:**
+    *   Order Flow telemetry must distinctly log L2 Book Depth Ratio and 60-second Taker Aggression delta without contradictory signals.
 
 --------------------------------------------------------------------------------
 
 ## Detailed Implementation Plan
 
-### Target Files to Create / Modify
+### Target Files to Create/Modify
 
-#### 1. `packages/shared/src/types.ts` (Modify)
-*   **Type / Scope**: Shared TypeScript Data Contracts.
-*   **Proposed Changes**:
-    *   Define `ConfluencePillarId`, `PillarEvaluation`, `ConfluenceSnapshot`, `AutoPilotConfig`, `WebhookAlertPayload`.
-    *   Expand `OpenOrderRequest` and `OrderPreviewRequest` to accept `marginAllocationPct` up to 50.0.
-    *   Add `CONFLUENCE_UPDATE` and `AUTOPILOT_STATUS` message shapes to `WsServerMessage`.
+#### 1. `apps/web/src/store/useMarketStore.ts` (Modify)
+*   **Type / Scope:** State Management (Zustand Store)
+*   **Proposed Changes:**
+    *   In `applyTick`: Strip `updatedKlines` array mutation during streaming ticks. Maintain `klines` immutability during live WebSocket updates.
+    *   Update only scalar primitives: `markPrice`, `prevMarkPrice`, `activePosition.realized_pnl`, `account.unrealizedPnl`, `account.equity`.
+    *   Retain `klines` array updates strictly for discrete REST snapshots (`refreshKlines`, `setKlines`, `setSymbol`, `setCandleInterval`).
+*   **Rationale:** Eliminates the root cause of the 4Hz UI thread freeze by preventing downstream React component re-renders on streaming ticks.
 
-#### 2. `packages/shared/src/math.ts` (Modify)
-*   **Type / Scope**: Shared Mathematical & Financial Functions.
-*   **Proposed Changes**:
-    *   Implement MACD (12, 26, 9) histogram divergence calculations.
-    *   Implement Bollinger Bands (20, 2) standard deviation and bandwidth squeeze/expansion detection.
-    *   Implement ADX (14) trend strength filter (+DI, -DI, ADX score).
-    *   Implement composite weighted confluence score formula with clamping (0–100).
+#### 2. `apps/web/src/components/ChartCanvas.tsx` (Modify)
+*   **Type / Scope:** Frontend UI & Lightweight Charts Canvas
+*   **Proposed Changes:**
+    *   Decouple `useEffect` that listens to `[klines, symbol]`: invoke `candleSeries.setData(candleData)` and `timeScale().fitContent()` ONLY when `symbol` or `candleInterval` changes, or during initial historical load.
+    *   Ensure streaming ticks stream exclusively through `wsClient.subscribeTick(handleTick)` calling `candleSeriesRef.current.update(liveCandle)` and `volumeSeriesRef.current.update(liveVolume)`.
+    *   Suppress volume histogram Y-axis labels on the right price margin: `chart.priceScale('volume').applyOptions({ visible: false })`.
+*   **Rationale:** Restores smooth 60fps charting performance and eliminates volume number overlap on candlestick price scale.
 
-#### 3. `apps/server/src/quant/confluenceEngine.ts` (Create)
-*   **Type / Scope**: Server Quantitative Service.
-*   **Proposed Changes**:
-    *   Aggregates live evaluations from the 7 pillars:
-        1. MTF Trend (`indicators.ts` + `math.ts`).
-        2. Momentum & Volatility (`indicators.ts` + `math.ts`).
-        3. Order Flow Footprint (`orderFlowEngine.ts`).
-        4. Spot vs Perp CVD (`cvd.ts`).
-        5. Liquidation Magnet (`liquidationEngine.ts`).
-        6. NLP News Sentiment (`sentimentHarvester.ts`).
-        7. PineScript SMC Webhook (cached from `POST /api/webhook`).
-    *   Evaluates consensus: counts `bullishCount` vs `bearishCount`, determines `consensusMet` against threshold (default 4).
-    *   Emits updates to `autoPilotManager` and `wsHub`.
+#### 3. `packages/shared/src/math.ts` (Modify)
+*   **Type / Scope:** Core Mathematical Domain Library (`@tradeos/shared`)
+*   **Proposed Changes:**
+    *   In `computeOrderPreview`: Change `deadSlSafe` logic from permissive default to fail-closed invariant:
+        `const hasStopLoss = typeof req.stopLoss === 'number' && req.stopLoss > 0;`
+        `const deadSlSafe = hasStopLoss && isSafeDistance(req.stopLoss, estimatedLiquidation);`
+*   **Rationale:** Prevents unhedged naked orders from passing pre-flight risk validation across all broker adapters.
 
-#### 4. `apps/server/src/quant/orderFlowEngine.ts` (Create)
-*   **Type / Scope**: Real-Time Microstructure Analyzer.
-*   **Proposed Changes**:
-    *   Inspects rolling trade tick stream and book depth.
-    *   Computes bid/ask volume ratio over recent 100 trades. Flags imbalance when buy/sell ratio exceeds 3.0x.
+#### 4. `apps/web/src/components/OrderTicket.tsx` (Modify)
+*   **Type / Scope:** Frontend Order Entry Component
+*   **Proposed Changes:**
+    *   In margin allocation preset click handlers (`2.5%`, `5%`, `10%`, `25%`, `50%`): Automatically calculate and populate Stop Loss at $-1.5\text{x ATR}$ if the SL input is empty.
+    *   If `orderDraft.stopLoss` is empty or 0, lock the submission button: change label to `SET STOP LOSS TO ARM`, set background to amber (`bg-[#f0b90b]/10 text-[#f0b90b] border-[#f0b90b]/40`), and disable touch/click events.
+*   **Rationale:** Zero-friction automated risk armor; guarantees every order is bracketed before submission.
 
-#### 5. `apps/server/src/quant/sentimentHarvester.ts` (Create)
-*   **Type / Scope**: Background NLP News Service.
-*   **Proposed Changes**:
-    *   Runs background polling loop every 3 minutes.
-    *   Queries `https://cryptopanic.com/api/free/v1/posts/?public=true` and `https://www.coindesk.com/arc/outboundfeeds/rss/`.
-    *   Parses headlines with built-in zero-dependency VADER lexicon dictionary.
-    *   Produces compound score (-1.0 to +1.0) with localized status labels (`MÜSBƏT`, `MƏNFİ`, `NEYTRAL`).
+#### 5. `apps/server/src/quant/orderFlowEngine.ts` (Modify)
+*   **Type / Scope:** Backend Quant Calculation Engine
+*   **Proposed Changes:**
+    *   Replace monotonically accumulating `rollingBuyVol` and `rollingSellVol` with a 60-second sliding time window of aggressive trades: prune trades where `now - trade.time > 60000`.
+*   **Rationale:** Prevents stale aggressive trade history from overpowering current Level 2 order book depth and inverting market direction signals.
 
-#### 6. `apps/server/src/quant/cvd.ts` (Modify)
-*   **Type / Scope**: Volume Delta Engine.
-*   **Proposed Changes**:
-    *   Add Spot reference price feed comparison to calculate absorption (e.g. perp aggressive sell while spot absorbs, indicating hidden institutional accumulation).
+#### 6. `apps/server/src/quant/confluenceEngine.ts` (Modify)
+*   **Type / Scope:** 6+1 Confluence Decision Engine
+*   **Proposed Changes:**
+    *   Separate Pillar 3 (`Order Flow`) telemetry into distinct, non-contradictory metrics:
+        1. `Depth`: $\frac{\text{Bid Depth}}{\text{Ask Depth}}$ (e.g. `1.3x Buy`).
+        2. `Flow`: 60-second Taker Aggression ratio (e.g. `2.7x Sell`).
+*   **Rationale:** Resolves cognitive dissonance caused by contradictory book depth and aggressive trade metrics.
 
-#### 7. `apps/server/src/quant/liquidationEngine.ts` (Create)
-*   **Type / Scope**: Liquidation Cluster Proximity Service.
-*   **Proposed Changes**:
-    *   Calculates estimated upper and lower liquidation density clusters based on high-leverage (10x–50x) price ranges.
-    *   Determines whether market is within 1.0% distance to an upper magnet (Bullish pull) or lower magnet (Bearish pull).
+#### 7. `apps/web/src/App.tsx` (Modify)
+*   **Type / Scope:** Root Application Shell & Cockpit Layout
+*   **Proposed Changes:**
+    *   Restructure the right 30% column layout: Pin `<AutoPilotControls />` inside a `flex-shrink-0` header container.
+    *   Place `<OrderTicket />` and `<SokratMentorPanel />` inside a nested `flex-1 overflow-y-auto` container.
+*   **Rationale:** Prevents Auto-Pilot controls and emergency kill-switch from scrolling off-screen.
 
-#### 8. `apps/server/src/services/autoPilotManager.ts` (Create)
-*   **Type / Scope**: Autonomous State Machine Service.
-*   **Proposed Changes**:
-    *   Maintains `AutoPilotConfig` and tracks execution states (`IDLE`, `ANALYZING`, `POSITION_OPEN`, `COOLDOWN_ACTIVE`).
-    *   Subscribes to `confluenceEngine` ticks.
-    *   When `consensusMet === true` (>= 4 confirming):
-        *   Checks risk bounds via `riskEngine.validateOrderRisk()`.
-        *   Dispatches bracket entry via `tradeManager.openPosition()`.
-    *   Active Position Management:
-        *   Tracks unrealized PnL. Calls `tradeManager.moveToBreakeven()` when profit >= 1.5x ATR.
-        *   Monitors Confluence: If 4+ pillars flip to the opposite direction, immediately calls `tradeManager.closePosition(symbol, 'OPPOSITE_CONFLUENCE_REVERSAL')`.
-    *   Circuit-Breakers: Tracks consecutive losses. If 2 consecutive stop-outs occur, sets cooldown lock for 60 minutes.
+#### 8. `apps/web/src/components/ScannerModal.tsx` (Modify)
+*   **Type / Scope:** Market Scanner Modal Component
+*   **Proposed Changes:**
+    *   Render an animated table skeleton loader when `isLoading` is true.
+    *   Integrate fallback to pre-cached top-50 symbols from memory if `/api/scanner` fetch times out over public tunnels.
+    *   Auto-close modal upon row click and immediately trigger `setSymbol(selectedSymbol)`.
+*   **Rationale:** Eliminates blank dark box failure states and provides instant symbol navigation.
 
-#### 9. `apps/server/src/api/routes.ts` (Modify)
-*   **Type / Scope**: REST API Layer.
-*   **Proposed Changes**:
-    *   `POST /api/webhook`: Validates HMAC-SHA256 signature, validates price bounds, updates Pillar 7.
-    *   `GET /api/confluence`: Returns active symbol `ConfluenceSnapshot`.
-    *   `POST /api/autopilot/config`: Updates auto-pilot parameters (threshold, margin allocation, auto-exit).
-    *   `POST /api/autopilot/toggle`: Quick on/off toggle.
-    *   Update `GET /api/state` to include live `confluence` and `autoPilot` in cockpit payload.
+#### 9. `apps/web/src/components/TimeMachineModal.tsx` (Modify)
+*   **Type / Scope:** Monte Carlo Stochastic Simulator Modal
+*   **Proposed Changes:**
+    *   Dynamically bind First-Hitting-Time (FHT) simulation targets: if `orderDraft.stopLoss` or `tp1` are empty, auto-project targets using $\pm 1.5\text{x ATR}$ and $\pm 2.0\text{x ATR}$ from current mark price.
+*   **Rationale:** Ground Monte Carlo win/loss probabilities in real market volatility rather than static mock percentages.
 
-#### 10. `apps/server/src/api/wsHub.ts` (Modify)
-*   **Type / Scope**: Real-Time WebSocket Broadcaster.
-*   **Proposed Changes**:
-    *   Throttle-broadcasts `CONFLUENCE_UPDATE` at up to 2Hz to keep UI cards synchronized with zero frontend polling.
+#### 10. `apps/web/src/components/CooldownModal.tsx` & `TopBar.tsx` (Modify)
+*   **Type / Scope:** Risk Guard Modal & Global Header
+*   **Proposed Changes:**
+    *   In `TopBar.tsx`: Render a neutral gray/green badge `Cooldown: Inactive` when risk cooldown is not triggered.
+    *   In `CooldownModal.tsx`: When `isCooldownActive` is false, render an informative "Risk Diagnostics: All Systems Operational" card instead of a red expired lockout screen.
+*   **Rationale:** Eliminates false alarms and trader panic regarding account lockout status.
 
-#### 11. `apps/web/src/components/ConfluenceHUD.tsx` (Create)
-*   **Type / Scope**: React Component.
-*   **Proposed Changes**:
-    *   Grid of 7 cards: MTF Trend, Momentum, Order Flow, CVD Absorption, Liq Magnet, News NLP, PineScript SMC.
-    *   Color-coded cards: Green (Bullish), Red (Bearish), Gray (Neutral).
-    *   Consensus indicator bar: shows `4 / 7 CONFIRMED` with target directional badge.
+#### 11. `packages/shared/src/__tests__/math.test.ts` (Modify)
+*   **Type / Scope:** Unit Test Suite
+*   **Proposed Changes:**
+    *   Add test verifying `computeOrderPreview` sets `deadSlSafe = false` when Stop Loss is omitted or zero.
+*   **Rationale:** Automated regression prevention for Dead-SL safety validation.
 
-#### 12. `apps/web/src/components/AutoPilotControls.tsx` (Create)
-*   **Type / Scope**: React Component.
-*   **Proposed Changes**:
-    *   Toggle switch `[AUTONOMOUS MODE: ON / OFF]` with pulsating safety ring.
-    *   Status readout: Active state, threshold setting (>= 4), circuit breaker indicator.
+#### 12. `apps/server/src/quant/__tests__/orderFlow_and_sentiment.test.ts` (Modify)
+*   **Type / Scope:** Unit Test Suite
+*   **Proposed Changes:**
+    *   Add test verifying 60-second sliding time window decay in `OrderFlowEngine`.
+*   **Rationale:** Automated verification that aged trades expire and do not distort real-time book depth.
 
-#### 13. `apps/web/src/components/OrderForm.tsx` (Modify)
-*   **Type / Scope**: React Component.
-*   **Proposed Changes**:
-    *   Update margin quick-select buttons from 10% ceiling to: `[2.5%] [5.0%] [10.0%] [25.0%] [50.0%]`.
-    *   Update margin calculation slider max range up to 50% of available balance.
+#### 13. `apps/web/src/components/__tests__/ChartCanvas.test.ts` (Modify)
+*   **Type / Scope:** Unit Test Suite
+*   **Proposed Changes:**
+    *   Add test verifying that live ticks invoke `series.update()` and do not trigger `series.setData()`.
+*   **Rationale:** Automated verification against canvas geometry re-render regressions.
 
-#### 14. `apps/web/src/components/ChartCanvas.tsx` (Modify)
-*   **Type / Scope**: React Component.
-*   **Proposed Changes**:
-    *   Add toggle button `[Hide/Show Pine Overlay]` in the top-right toolbar of the chart.
-    *   Suppresses visual overlays on candles while preserving backend signal ingestion.
-
-#### 15. `tradingview/TradeOS_AI_Assistant_Pro.pine` (Create / Update)
-*   **Type / Scope**: PineScript v6 Source.
-*   **Proposed Changes**:
-    *   Cleaned, modernized 822-line PineScript v6 indicator.
-    *   Contains webhook alert JSON template pre-configured for `https://<tunnel>/api/webhook` with HMAC signature.
+---
 
 ### Verification Plan
 
-*   **Compilation / Build**:
-    *   `npm --prefix packages/shared run build`
-    *   `npm --prefix apps/server run build`
-    *   `npm --prefix apps/web run build`
-*   **Unit Tests**:
-    *   `packages/shared/src/__tests__/confluence_math.test.ts`: Test ADX, MACD, Bollinger Bands, and composite confluence weighting (100% pass).
-    *   `apps/server/src/quant/__tests__/confluenceEngine.test.ts`: Verify 7-pillar aggregation and consensus threshold evaluation (100% pass).
-    *   `apps/server/src/quant/__tests__/orderFlow_and_sentiment.test.ts`: Test order flow imbalance detection and VADER sentiment lexicon (100% pass).
-    *   `apps/server/src/services/__tests__/autoPilotManager.test.ts`: Test auto-entry trigger, breakeven migration, opposite-confluence exit, and 2-loss cooldown circuit-breaker (100% pass).
-    *   `apps/server/src/api/__tests__/webhook_and_autopilot.test.ts`: Test HMAC-SHA256 webhook ingress, replay rejection, and REST API endpoints (100% pass).
-*   **E2E Integration Verification**:
-    *   Simulate 4/7 bullish pillars: Verify auto-pilot opens order on Binance Testnet within risk limits.
-    *   Simulate opposite reversal: Verify auto-pilot immediately triggers reduceOnly market close.
-    *   Simulate PineScript webhook POST: Verify Pillar 7 turns Green and updates HUD in real time.
-    *   Verify UI Margin 50% preset recalculates margin USD and quantity correctly.
+*   **Compilation / Build:**
+    *   Run `npm run build` across all workspaces (`packages/shared`, `apps/server`, `apps/web`) to verify zero TypeScript errors.
+*   **Test Suite Verification:**
+    *   Run full monorepo test runner: `npx vitest run`.
+    *   Target: 100% pass rate across all 20+ test suites.
+*   **E2E / Live Performance Verification:**
+    *   Launch local server and inspect `/api/health` and Cloudflare tunnel.
+    *   Verify smooth 60fps chart panning and zooming during active 4Hz WebSocket tick stream.
+    *   Confirm Stop Loss auto-arms to $-1.5\text{x ATR}$ when clicking 2.5% margin preset.
+    *   Confirm Scanner loads top symbols with skeleton fallback.
+
+--------------------------------------------------------------------------------
+
+<!-- Provenance: Indicates initial structural drafting via EGM. -->
+
+*Drafted with EGM*

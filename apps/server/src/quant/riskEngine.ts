@@ -86,6 +86,15 @@ export function validateOrderRisk(
   }
 
   // Gate 5: Pre-Trade Dead Stop-Loss Armor (LiquidationGuard)
+  // 4. Strict Mandatory Stop-Loss Validation (Fail-Closed Risk Guard)
+  if (!req.stopLoss || req.stopLoss <= 0) {
+    return {
+      allowed: false,
+      code: 'ERR_MISSING_STOP_LOSS',
+      reason: 'Pre-Trade Dead SL Armor: Stop-Loss təyin edilməyib! Bütün əməliyyatlar üçün Stop-Loss mütləqdir.',
+    };
+  }
+
   const effectiveEntry =
     req.orderType === 'LIMIT' && req.limitPrice && req.limitPrice > 0
       ? req.limitPrice
@@ -94,25 +103,23 @@ export function validateOrderRisk(
   if (effectiveEntry > 0 && req.leverage > 0) {
     const estLiq = calculateLiquidationPrice(req.side, effectiveEntry, req.leverage);
 
-    if (req.stopLoss && req.stopLoss > 0) {
-      if (req.side === 'BUY' && req.stopLoss <= estLiq) {
-        return {
-          allowed: false,
-          code: 'ERR_DEAD_STOP_LOSS',
-          reason: `Pre-Trade Dead SL Armor: Long Stop-Loss ($${req.stopLoss}) likvidasiya qiymətini ($${estLiq.toFixed(
-            2
-          )}) aşıb!`,
-        };
-      }
-      if (req.side === 'SELL' && req.stopLoss >= estLiq) {
-        return {
-          allowed: false,
-          code: 'ERR_DEAD_STOP_LOSS',
-          reason: `Pre-Trade Dead SL Armor: Short Stop-Loss ($${req.stopLoss}) likvidasiya qiymətini ($${estLiq.toFixed(
-            2
-          )}) aşıb!`,
-        };
-      }
+    if (req.side === 'BUY' && req.stopLoss <= estLiq) {
+      return {
+        allowed: false,
+        code: 'ERR_DEAD_STOP_LOSS',
+        reason: `Pre-Trade Dead SL Armor: Long Stop-Loss ($${req.stopLoss}) likvidasiya qiymətini ($${estLiq.toFixed(
+          2
+        )}) aşıb!`,
+      };
+    }
+    if (req.side === 'SELL' && req.stopLoss >= estLiq) {
+      return {
+        allowed: false,
+        code: 'ERR_DEAD_STOP_LOSS',
+        reason: `Pre-Trade Dead SL Armor: Short Stop-Loss ($${req.stopLoss}) likvidasiya qiymətini ($${estLiq.toFixed(
+          2
+        )}) aşıb!`,
+      };
     }
   }
 

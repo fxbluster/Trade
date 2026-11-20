@@ -97,6 +97,25 @@ describe('TradeOS v2 — Risk Engine & Sokrat Mentor', () => {
       expect(validateOrderRisk(smallReq, smallAccount, smallDdState, 100).allowed).toBe(false);
     });
 
+    it('rejects orders without a valid Stop-Loss (Fail-Closed Mandatory SL)', () => {
+      const noSlReq: OpenOrderRequest = {
+        ...baseOrderReq,
+        stopLoss: undefined,
+      };
+      const res1 = validateOrderRisk(noSlReq, baseAccount, baseRiskState, 100);
+      expect(res1.allowed).toBe(false);
+      expect(res1.code).toBe('ERR_MISSING_STOP_LOSS');
+      expect(res1.reason).toContain('Stop-Loss təyin edilməyib');
+
+      const zeroSlReq: OpenOrderRequest = {
+        ...baseOrderReq,
+        stopLoss: 0,
+      };
+      const res2 = validateOrderRisk(zeroSlReq, baseAccount, baseRiskState, 100);
+      expect(res2.allowed).toBe(false);
+      expect(res2.code).toBe('ERR_MISSING_STOP_LOSS');
+    });
+
     it('enforces Pre-Trade Dead Stop-Loss Armor for Long and Short', () => {
       // Entry 100, Lev 10 -> Long Liq is ~90.45
       const deadLongReq: OpenOrderRequest = {

@@ -81,6 +81,34 @@ describe('OrderFlowEngine', () => {
     expect(evalResult.confirmed).toBe(true);
   });
 
+  it('expires aggressive trade volume older than 60 seconds (60-bucket rolling ring buffer)', () => {
+    const t0 = 1700000000000;
+    engine.updateDepth([[100, 10]], [[101, 10]]);
+
+    // Trade at t0
+    engine.processTrade(1000, false, t0);
+    // At t0 + 10s, trade is still active in the 60s window
+    const activeResult = engine.evaluate(100, t0 + 10000);
+    expect(activeResult.bias).toBe('BULLISH');
+    expect(activeResult.confirmed).toBe(true);
+
+    // At t0 + 65s, trade has expired outside the 60s window
+    const expiredResult = engine.evaluate(100, t0 + 65000);
+    expect(expiredResult.bias).toBe('NEUTRAL');
+    expect(expiredResult.confirmed).toBe(false);
+  });
+
+  it('formats separate Depth and 60s Flow telemetry in subText', () => {
+    engine.updateDepth([[100, 80]], [[101, 60]]);
+    const t0 = 1700000000000;
+    engine.processTrade(50, true, t0); // Sell flow
+
+    const evalResult = engine.evaluate(100, t0);
+    expect(evalResult.subText).toContain('Bids:');
+    expect(evalResult.subText).toContain('Asks:');
+    expect(evalResult.subText).toContain('Flow:');
+  });
+
   it('resets state cleanly', () => {
     engine.updateDepth([[100, 500]], [[101, 10]]);
     engine.reset();

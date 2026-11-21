@@ -130,10 +130,10 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         borderColor: '#151d2c',
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 12,
-        barSpacing: 8,
-        minBarSpacing: 2,
-        fixLeftEdge: true,
+        rightOffset: 8,
+        barSpacing: 10,
+        minBarSpacing: 1,
+        fixLeftEdge: false,
         fixRightEdge: false,
         tickMarkFormatter: (time: number) => {
           const date = new Date(time * 1000);

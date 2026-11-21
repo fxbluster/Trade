@@ -70,9 +70,15 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const toggleHidePineOverlay = useMarketStore((s) => s.toggleHidePineOverlay);
   const pineSignals = useMarketStore((s) => s.pineSignals);
   const activeFvgs = useMarketStore((s) => s.activeFvgs);
+  const activeOrderBlocks = useMarketStore((s) => s.activeOrderBlocks);
   const latestSweep = useMarketStore((s) => s.latestSweep);
   const showSmcOverlay = useMarketStore((s) => s.showSmcOverlay);
   const toggleShowSmcOverlay = useMarketStore((s) => s.toggleShowSmcOverlay);
+
+  const unmitigatedFvgsCount = Array.isArray(activeFvgs)
+    ? activeFvgs.filter((fvg) => !fvg.mitigated).length
+    : 0;
+  const activeObsCount = Array.isArray(activeOrderBlocks) ? activeOrderBlocks.length : 0;
 
   // Initialize Lightweight Charts instance
   useEffect(() => {
@@ -124,6 +130,11 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         borderColor: '#151d2c',
         timeVisible: true,
         secondsVisible: false,
+        rightOffset: 12,
+        barSpacing: 8,
+        minBarSpacing: 2,
+        fixLeftEdge: true,
+        fixRightEdge: false,
         tickMarkFormatter: (time: number) => {
           const date = new Date(time * 1000);
           return date.toLocaleTimeString('az-AZ', {
@@ -195,7 +206,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     // Attach tick listener to wsClient
     const unsubscribeTick = wsClient.subscribeTick(handleTick);
 
-    // Handle container resize
+    // Handle container resize & auto-fit
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
       resizeObserver = new ResizeObserver((entries) => {
@@ -203,14 +214,24 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         const { width, height } = entries[0].contentRect;
         if (width > 0 && height > 0) {
           chart.applyOptions({ width, height });
+          chart.timeScale().fitContent();
         }
       });
       resizeObserver.observe(containerRef.current);
     }
 
+    // Double-click to reset / fit content
+    const handleDblClick = () => {
+      chart.timeScale().fitContent();
+      chart.priceScale('right').applyOptions({ autoScale: true });
+    };
+    const containerEl = containerRef.current;
+    containerEl?.addEventListener('dblclick', handleDblClick);
+
     return () => {
       unsubscribeTick();
       resizeObserver?.disconnect();
+      containerEl?.removeEventListener('dblclick', handleDblClick);
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -510,7 +531,38 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         }
       }
 
-      // 4.B Liquidity Sweep Price Line
+      // 4.B Active Order Blocks: Twin Price Lines (OB HIGH & OB LOW)
+      if (Array.isArray(activeOrderBlocks)) {
+        for (const ob of activeOrderBlocks) {
+          const high = ob.high;
+          const low = ob.low;
+          if (typeof high === 'number' && typeof low === 'number' && high > 0 && low > 0) {
+            const isBull = ob.type === 'BULLISH';
+            const color = isBull ? 'rgba(59, 130, 246, 0.7)' : 'rgba(239, 68, 68, 0.7)';
+            const obHigh = candleSeries.createPriceLine({
+              price: high,
+              color,
+              lineWidth: 1,
+              lineStyle: LineStyle.Dotted,
+              axisLabelVisible: true,
+              title: `OB HIGH [${ob.type}]`,
+            });
+            priceLinesRef.current.push(obHigh);
+
+            const obLow = candleSeries.createPriceLine({
+              price: low,
+              color,
+              lineWidth: 1,
+              lineStyle: LineStyle.Dotted,
+              axisLabelVisible: true,
+              title: `OB LOW [${ob.type}]`,
+            });
+            priceLinesRef.current.push(obLow);
+          }
+        }
+      }
+
+      // 4.C Liquidity Sweep Price Line
       if (latestSweep && latestSweep.sweepPrice && latestSweep.sweepPrice > 0) {
         const isHigh = latestSweep.direction === 'SWEEP_HIGH' || (latestSweep as any).bias === 'BEARISH';
         const sweepLine = candleSeries.createPriceLine({
@@ -541,10 +593,36 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       }
       (candleSeries as any).setMarkers(markers);
     }
-  }, [activePosition, orderDraft, markPrice, hidePineOverlay, pineSignals, showSmcOverlay, activeFvgs, latestSweep]);
+  }, [
+    activePosition,
+    orderDraft,
+    markPrice,
+    hidePineOverlay,
+    pineSignals,
+    showSmcOverlay,
+    activeFvgs,
+    activeOrderBlocks,
+    latestSweep,
+  ]);
 
   return (
     <div className={`relative flex flex-col w-full h-full bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden ${className}`}>
+      {/* Floating Status Badges for Active Overlays */}
+      <div className="absolute top-12 left-4 z-10 flex flex-col space-y-1.5 pointer-events-none">
+        {showSmcOverlay && unmitigatedFvgsCount === 0 && activeObsCount === 0 && (
+          <div className="px-2.5 py-1 bg-[#080c14]/90 border border-[#151d2c] rounded text-[11px] font-mono text-[#7d8590] flex items-center space-x-1.5 backdrop-blur-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#0ecb81]/60 animate-pulse"></span>
+            <span>SMC Aktiv: 0 aktiv FVG/OB zonası (bazar tarazlıqdadır)</span>
+          </div>
+        )}
+        {!hidePineOverlay && pineSignals.length === 0 && (
+          <div className="px-2.5 py-1 bg-[#080c14]/90 border border-[#151d2c] rounded text-[11px] font-mono text-[#7d8590] flex items-center space-x-1.5 backdrop-blur-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#3b82f6]/60"></span>
+            <span>PineScript Aktiv: Vebhook gözlənilir (0 aktiv siqnal)</span>
+          </div>
+        )}
+      </div>
+
       {/* Chart Top Header Toolbar */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-[#151d2c] bg-[#080c14] z-10 select-none">
         <div className="flex items-center space-x-2">
@@ -567,7 +645,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           >
             {!showSmcOverlay ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
             <span className="hidden sm:inline">
-              {!showSmcOverlay ? 'SMC Overlay Off' : 'SMC Overlay On'}
+              {!showSmcOverlay
+                ? 'SMC Overlay Off'
+                : `SMC Overlay On (${unmitigatedFvgsCount + activeObsCount})`}
             </span>
           </button>
 
@@ -583,8 +663,20 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           >
             {hidePineOverlay ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
             <span className="hidden sm:inline">
-              {hidePineOverlay ? 'Pine Overlay Off' : 'Pine Overlay On'}
+              {hidePineOverlay ? 'Pine Overlay Off' : `Pine Overlay On (${pineSignals.length})`}
             </span>
+          </button>
+
+          {/* Fit / Reset Scale Button */}
+          <button
+            onClick={() => {
+              chartRef.current?.timeScale().fitContent();
+              chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+            }}
+            title="Qrafiki ekrana tam sığdır (və ya qrafikə iki dəfə klikləyin)"
+            className="px-2 py-1 text-xs font-mono rounded bg-[#151d2c] text-[#7d8590] hover:text-[#0ecb81] border border-[#151d2c] transition-colors"
+          >
+            Fit ⛶
           </button>
 
           {/* Interval Selector */}

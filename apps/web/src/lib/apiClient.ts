@@ -206,4 +206,50 @@ export const apiClient = {
       body: JSON.stringify({ enabled }),
     });
   },
+
+  async downloadDailyAudit(
+    format: 'json' | 'markdown' = 'markdown',
+    session: 'current' | 'all' = 'current'
+  ): Promise<void> {
+    return downloadDailyAudit(format, session);
+  },
 };
+
+export async function downloadDailyAudit(
+  format: 'json' | 'markdown' = 'markdown',
+  session: 'current' | 'all' = 'current'
+): Promise<void> {
+  const token =
+    (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('tradeos_session_token') : null) ||
+    'local-dev-token';
+
+  const res = await fetch(`/api/audit/daily?format=${encodeURIComponent(format)}&session=${encodeURIComponent(session)}`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Audit export failed: ${res.statusText}`);
+  }
+
+  const blob = await res.blob();
+  let filename = `tradeos-daily-audit-${Date.now()}.${format === 'markdown' ? 'md' : 'json'}`;
+  const disposition = res.headers.get('content-disposition');
+  if (disposition) {
+    const match = disposition.match(/filename=["']?([^"';]+)["']?/i);
+    if (match && match[1]) {
+      filename = match[1].trim();
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(objectUrl);
+}

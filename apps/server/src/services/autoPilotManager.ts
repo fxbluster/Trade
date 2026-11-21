@@ -29,6 +29,17 @@ export interface AutoPilotManagerOptions {
   getAtr?: (symbol: string) => number;
   broadcastWs?: (msg: WsServerMessage) => void;
   config?: Partial<AutoPilotConfig>;
+  onOrderDispatched?: (event: {
+    symbol: string;
+    side: TradeSide;
+    action: 'EXECUTED' | 'FAILED';
+    price: number;
+    marginUsd: number;
+    leverage: number;
+    atr: number;
+    tradeId?: string;
+    errorMessage?: string;
+  }) => void;
 }
 
 /**
@@ -52,6 +63,17 @@ export class AutoPilotManager {
   private getMarkPriceFn: (symbol: string) => number;
   private getAtrFn?: (symbol: string) => number;
   private broadcastWsFn?: (msg: WsServerMessage) => void;
+  private onOrderDispatched?: (event: {
+    symbol: string;
+    side: TradeSide;
+    action: 'EXECUTED' | 'FAILED';
+    price: number;
+    marginUsd: number;
+    leverage: number;
+    atr: number;
+    tradeId?: string;
+    errorMessage?: string;
+  }) => void;
 
   private tradesRepo: TradesRepo;
   private settingsRepo: SettingsRepo;
@@ -82,6 +104,7 @@ export class AutoPilotManager {
     this.getMarkPriceFn = options.getMarkPrice;
     this.getAtrFn = options.getAtr;
     this.broadcastWsFn = options.broadcastWs;
+    this.onOrderDispatched = options.onOrderDispatched;
 
     this.tradesRepo = new TradesRepo(this.db);
     this.settingsRepo = new SettingsRepo(this.db);
@@ -273,117 +296,164 @@ export class AutoPilotManager {
    * Executes algorithmic bracket entry with IOC marketable limit pricing (0.10% slippage ceiling).
    */
   private async executeAutoEntry(symbol: string, side: TradeSide, markPrice: number): Promise<void> {
-    const account = await this.broker.getAccount();
-    const balance = account.walletBalance;
-
-    if (balance <= 0) {
-      this.state = 'IDLE';
-      return;
-    }
-
-    // Strictly enforce 10% maximum margin allocation
-    const marginAllocationPct = Math.min(10.0, this.config.marginAllocationPct);
-    const targetMarginUsd = Number(((balance * marginAllocationPct) / 100).toFixed(2));
-    const marginUsd = Math.min(targetMarginUsd, account.availableBalance);
-
-    if (marginUsd < 5.0) {
-      this.state = 'IDLE';
-      return;
-    }
-
-    // Marketable IOC limit price: 0.10% slippage ceiling
+    const leverage = this.config.leverage || 10;
     const limitPrice = Number(
       (side === 'BUY' ? markPrice * 1.0010 : markPrice * 0.9990).toFixed(2)
     );
-
-    // Calculate ATR (fallback to 0.5% of mark price)
     const atr = this.getAtrFn ? this.getAtrFn(symbol) : markPrice * 0.005;
+    let marginUsd = 0;
 
-    // Dead-SL Armor Clamping:
-    // Raw SL at 1.5x ATR, strictly clamped to safe side of isolated liquidation:
-    // stopLoss = side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)
-    const leverage = this.config.leverage || 10;
-    const estLiq = calculateLiquidationPrice(side, limitPrice, leverage, 0.005);
-    const rawSl = side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr;
-    const stopLoss = Number(
-      (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(2)
-    );
+    try {
+      const account = await this.broker.getAccount();
+      const balance = account.walletBalance;
 
-    // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
-    const risk = Math.abs(limitPrice - stopLoss);
-    const snapshot = this.confluenceEngine.getSnapshot(symbol);
-    const clusters = this.confluenceEngine.liquidationEngine.projectClusters(limitPrice, 100_000_000);
+      if (balance <= 0) {
+        this.state = 'IDLE';
+        this.onOrderDispatched?.({
+          symbol,
+          side,
+          action: 'FAILED',
+          price: limitPrice,
+          marginUsd: 0,
+          leverage,
+          atr,
+          errorMessage: 'Insufficient balance: walletBalance <= 0',
+        });
+        return;
+      }
 
-    let clusterTp1: number | null = null;
-    if (snapshot?.macroRegime) {
-      if (side === 'BUY') {
-        const shortClusters = clusters
-          .filter((c) => c.side === 'SHORT_LIQ' && c.price > limitPrice)
-          .sort((a, b) => a.price - b.price);
+      // Strictly enforce 10% maximum margin allocation
+      const marginAllocationPct = Math.min(10.0, this.config.marginAllocationPct);
+      const targetMarginUsd = Number(((balance * marginAllocationPct) / 100).toFixed(2));
+      marginUsd = Math.min(targetMarginUsd, account.availableBalance);
 
-        for (const sc of shortClusters) {
-          const reward = sc.price - limitPrice;
-          const distPct = reward / limitPrice;
-          const rr = risk > 0 ? reward / risk : 0;
-          if (distPct >= 0.005 && rr >= 1.5) {
-            clusterTp1 = sc.price;
-            break;
+      if (marginUsd < 5.0) {
+        this.state = 'IDLE';
+        this.onOrderDispatched?.({
+          symbol,
+          side,
+          action: 'FAILED',
+          price: limitPrice,
+          marginUsd,
+          leverage,
+          atr,
+          errorMessage: `Calculated margin ${marginUsd} USD below minimum 5.0 USD threshold`,
+        });
+        return;
+      }
+
+      // Dead-SL Armor Clamping:
+      // Raw SL at 1.5x ATR, strictly clamped to safe side of isolated liquidation:
+      // stopLoss = side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)
+      const estLiq = calculateLiquidationPrice(side, limitPrice, leverage, 0.005);
+      const rawSl = side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr;
+      const stopLoss = Number(
+        (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(2)
+      );
+
+      // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
+      const risk = Math.abs(limitPrice - stopLoss);
+      const snapshot = this.confluenceEngine.getSnapshot(symbol);
+      const clusters = this.confluenceEngine.liquidationEngine.projectClusters(limitPrice, 100_000_000);
+
+      let clusterTp1: number | null = null;
+      if (snapshot?.macroRegime) {
+        if (side === 'BUY') {
+          const shortClusters = clusters
+            .filter((c) => c.side === 'SHORT_LIQ' && c.price > limitPrice)
+            .sort((a, b) => a.price - b.price);
+
+          for (const sc of shortClusters) {
+            const reward = sc.price - limitPrice;
+            const distPct = reward / limitPrice;
+            const rr = risk > 0 ? reward / risk : 0;
+            if (distPct >= 0.005 && rr >= 1.5) {
+              clusterTp1 = sc.price;
+              break;
+            }
           }
-        }
-      } else {
-        const longClusters = clusters
-          .filter((c) => c.side === 'LONG_LIQ' && c.price < limitPrice)
-          .sort((a, b) => b.price - a.price);
+        } else {
+          const longClusters = clusters
+            .filter((c) => c.side === 'LONG_LIQ' && c.price < limitPrice)
+            .sort((a, b) => b.price - a.price);
 
-        for (const lc of longClusters) {
-          const reward = limitPrice - lc.price;
-          const distPct = reward / limitPrice;
-          const rr = risk > 0 ? reward / risk : 0;
-          if (distPct >= 0.005 && rr >= 1.5) {
-            clusterTp1 = lc.price;
-            break;
+          for (const lc of longClusters) {
+            const reward = limitPrice - lc.price;
+            const distPct = reward / limitPrice;
+            const rr = risk > 0 ? reward / risk : 0;
+            if (distPct >= 0.005 && rr >= 1.5) {
+              clusterTp1 = lc.price;
+              break;
+            }
           }
         }
       }
-    }
 
-    let tp1: number;
-    if (clusterTp1 !== null) {
-      tp1 = Number(clusterTp1.toFixed(2));
-    } else {
-      const fallbackReward = snapshot?.macroRegime
-        ? Math.max(2.0 * atr, risk * 1.5)
-        : markPrice * 0.025;
-      tp1 = Number(
-        (side === 'BUY' ? markPrice + fallbackReward : markPrice - fallbackReward).toFixed(2)
+      let tp1: number;
+      if (clusterTp1 !== null) {
+        tp1 = Number(clusterTp1.toFixed(2));
+      } else {
+        const fallbackReward = snapshot?.macroRegime
+          ? Math.max(2.0 * atr, risk * 1.5)
+          : markPrice * 0.025;
+        tp1 = Number(
+          (side === 'BUY' ? markPrice + fallbackReward : markPrice - fallbackReward).toFixed(2)
+        );
+      }
+
+      // Dynamic TP2: +4.0x ATR or +5.0% baseline
+      const tp2Reward = snapshot?.macroRegime
+        ? Math.max(4.0 * atr, Math.abs(tp1 - markPrice) * 2)
+        : markPrice * 0.050;
+      const tp2 = Number(
+        (side === 'BUY' ? markPrice + tp2Reward : markPrice - tp2Reward).toFixed(2)
       );
+
+      const trade = await this.tradeManager.openPosition({
+        symbol,
+        side,
+        orderType: 'LIMIT',
+        limitPrice,
+        marginUsd,
+        leverage,
+        stopLoss,
+        tp1,
+        tp2,
+        marginAllocationPct,
+      });
+
+      this.openTradeId = trade.id;
+      this.state = 'POSITION_OPEN';
+      this.oppositeConsensusTickCount = 0;
+      this.broadcastStatus();
+
+      this.onOrderDispatched?.({
+        symbol,
+        side,
+        action: 'EXECUTED',
+        price: limitPrice,
+        marginUsd,
+        leverage,
+        atr,
+        tradeId: trade.id,
+      });
+    } catch (err: any) {
+      this.state = 'IDLE';
+      this.openTradeId = null;
+      this.broadcastStatus();
+
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      this.onOrderDispatched?.({
+        symbol,
+        side,
+        action: 'FAILED',
+        price: limitPrice,
+        marginUsd,
+        leverage,
+        atr,
+        errorMessage,
+      });
     }
-
-    // Dynamic TP2: +4.0x ATR or +5.0% baseline
-    const tp2Reward = snapshot?.macroRegime
-      ? Math.max(4.0 * atr, Math.abs(tp1 - markPrice) * 2)
-      : markPrice * 0.050;
-    const tp2 = Number(
-      (side === 'BUY' ? markPrice + tp2Reward : markPrice - tp2Reward).toFixed(2)
-    );
-
-    const trade = await this.tradeManager.openPosition({
-      symbol,
-      side,
-      orderType: 'LIMIT',
-      limitPrice,
-      marginUsd,
-      leverage: 10,
-      stopLoss,
-      tp1,
-      tp2,
-      marginAllocationPct,
-    });
-
-    this.openTradeId = trade.id;
-    this.state = 'POSITION_OPEN';
-    this.oppositeConsensusTickCount = 0;
-    this.broadcastStatus();
   }
 
   /**

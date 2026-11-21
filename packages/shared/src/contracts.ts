@@ -253,6 +253,62 @@ export interface AuditLogRecord {
 }
 
 // ----------------------------------------------------------------------------
+// Decision Log & Shadow Tracking Contracts
+// ----------------------------------------------------------------------------
+
+export type ShadowSetupStatus =
+  | 'OPEN'
+  | 'SAVED_CAPITAL'
+  | 'MISSED_PROFIT'
+  | 'EXPIRED'
+  | 'RESOLVED_AMBIGUOUS_VOLATILITY';
+
+export type DecisionAction = 'EXECUTED' | 'BLOCKED' | 'FAILED';
+
+export interface DecisionLogRecord {
+  id: string;
+  timestamp: number;
+  symbol: string;
+  side: TradeSide;
+  action: DecisionAction;
+  composite_score: number;
+  pillars_json: string;
+  macro_regime: MacroRegime;
+  macro_veto_active: number;
+  veto_reasons_json: string | null;
+  execution_price: number;
+  margin_usd: number;
+  leverage: number;
+  atr: number;
+  trade_id: string | null;
+  shadow_status: ShadowSetupStatus | null;
+  shadow_sl: number | null;
+  shadow_tp: number | null;
+  shadow_pnl_usd: number | null;
+  expires_at: number | null;
+  shadow_closed_at: number | null;
+  error_message: string | null;
+  created_at: number;
+}
+
+export interface DailyAuditSummary {
+  total_setups: number;
+  executed_trades: number;
+  blocked_setups: number;
+  capital_saved_usd: number;
+  missed_profit_usd: number;
+  expired_pnl_usd: number;
+  net_risk_value_usd: number;
+  veto_breakdown: Record<string, number>;
+}
+
+export interface DailyAuditResponse {
+  summary: DailyAuditSummary;
+  records: DecisionLogRecord[];
+  generated_at: number;
+}
+
+// ----------------------------------------------------------------------------
 // Market & Quant Contracts
 // ----------------------------------------------------------------------------
 

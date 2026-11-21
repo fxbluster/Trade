@@ -87,3 +87,34 @@ CREATE TABLE IF NOT EXISTS settings (
 -- Seed initial paper wallet balance ($10,000 USDT)
 INSERT OR IGNORE INTO settings (key, value_json, updated_at)
 VALUES ('paper_wallet_balance', '{"balance": 10000.0, "currency": "USDT"}', strftime('%s','now')*1000);
+
+CREATE TABLE IF NOT EXISTS decision_logs (
+    id TEXT PRIMARY KEY,
+    timestamp INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    action TEXT NOT NULL,
+    composite_score REAL NOT NULL,
+    pillars_json TEXT NOT NULL,
+    macro_regime TEXT NOT NULL,
+    macro_veto_active INTEGER DEFAULT 0,
+    veto_reasons_json TEXT,
+    execution_price REAL NOT NULL,
+    margin_usd REAL NOT NULL,
+    leverage INTEGER NOT NULL,
+    atr REAL NOT NULL,
+    trade_id TEXT REFERENCES trades(id) ON DELETE SET NULL,
+    shadow_status TEXT,
+    shadow_sl REAL,
+    shadow_tp REAL,
+    shadow_pnl_usd REAL,
+    expires_at INTEGER,
+    shadow_closed_at INTEGER,
+    error_message TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_logs_ts ON decision_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_decision_logs_sym_ts ON decision_logs(symbol, timestamp);
+CREATE INDEX IF NOT EXISTS idx_decision_logs_shadow ON decision_logs(shadow_status, expires_at);
+

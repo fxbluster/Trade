@@ -46,6 +46,7 @@ import {
 import { SESSION_TOKEN, WEBHOOK_SECRET } from '../config.js';
 import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
 import type { AutoPilotManager } from '../services/autoPilotManager.js';
+import type { DecisionAuditService } from '../services/decisionAuditService.js';
 
 export interface AppContext {
   tradeManager: TradeManager;
@@ -55,6 +56,7 @@ export interface AppContext {
   cvdEngine?: CvdEngine;
   confluenceEngine?: ConfluenceEngine;
   autoPilotManager?: AutoPilotManager;
+  decisionAuditService?: DecisionAuditService;
   activeSymbol?: string;
   getMarkPrice?: (symbol: string) => number;
   setActiveSymbol?: (symbol: string) => void;
@@ -63,6 +65,8 @@ export interface AppContext {
   getFunding?: (symbol: string) => { rate: number | null; nextTime: number | null };
   onBrokerModeChange?: (adapter: BrokerAdapter) => void;
 }
+
+export type RouteOptions = AppContext;
 
 function sendJson(res: Response, statusCode: number, data: unknown): void {
   res.statusCode = statusCode;
@@ -556,13 +560,44 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     sendJson(res, 404, { error: 'AutoPilotManager not initialized' });
   });
 
+  // 21. GET /api/audit/daily — Daily decision audit summary & counterfactual report
+  app.get('/api/audit/daily', (req: Request, res: Response) => {
+    if (!ctx.decisionAuditService) {
+      return sendJson(res, 503, { error: 'DecisionAuditService not initialized' });
+    }
+
+    const query = (req.query || {}) as Record<string, string>;
+    const session = query.session || 'current';
+    const format = query.format || 'json';
+
+    const sinceMs = session === 'current' ? Date.now() - 28_800_000 : undefined;
+    const summary = ctx.decisionAuditService.generateSessionSummary(sinceMs);
+
+    if (format === 'markdown') {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        `attachment; filename="tradeos-session-audit-${new Date().toISOString().slice(0, 10)}.md"`
+      );
+      res.end(ctx.decisionAuditService.formatMarkdownReport(summary));
+      return;
+    }
+
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify(summary));
+  });
+
   return app;
 }
 
 /**
- * Creates and configures a Polka app with all 16 endpoints.
+ * Creates and configures a Polka app with all endpoints.
  */
 export function createRouter(ctx: AppContext): PolkaInstance {
   const app = polka();
   return registerRoutes(app, ctx);
 }
+
+export const createRoutes = registerRoutes;

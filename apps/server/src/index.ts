@@ -19,7 +19,8 @@ import {
   BINANCE_DEMO_API_SECRET,
   CRYPTOPANIC_API_KEY,
 } from './config.js';
-import { initializeDatabase, TradesRepo, RiskStateRepo } from './db/sqlite.js';
+import { initializeDatabase, TradesRepo, RiskStateRepo, DecisionLogsRepo } from './db/sqlite.js';
+import { DecisionAuditService } from './services/decisionAuditService.js';
 import { BinanceClient } from './exchange/binanceClient.js';
 import { BinanceStreamsManager } from './exchange/binanceStreams.js';
 import { BrokerFactory } from './exchange/broker.js';
@@ -65,17 +66,30 @@ export async function bootstrapServer(): Promise<{
   sentimentHarvester: SentimentHarvester;
   mtfManager: HierarchicalMtfManager;
   smcEngine: NativeSmcEngine;
+  decisionAuditService: DecisionAuditService;
   close: () => Promise<void>;
 }> {
   // 1. Initialize SQLite WAL Database Engine
   const db = initializeDatabase(DB_PATH);
   const tradesRepo = new TradesRepo(db);
   const riskRepo = new RiskStateRepo(db);
+  const decisionLogsRepo = new DecisionLogsRepo(db);
+  const decisionAuditService = new DecisionAuditService(decisionLogsRepo);
 
   // 2. Initialize Binance REST Client & Adapters
   const client = new BinanceClient({
     apiKey: BINANCE_DEMO_API_KEY,
     apiSecret: BINANCE_DEMO_API_SECRET,
+  });
+
+  const logger = {
+    error: (obj: unknown, msg?: string) => console.error(msg, obj),
+    warn: (obj: unknown, msg?: string) => console.warn(msg, obj),
+    info: (obj: unknown, msg?: string) => console.log(msg, obj),
+  };
+
+  decisionAuditService.recoverDowntimeGaps(client).catch((err) => {
+    logger.error({ err }, 'Failed to recover downtime shadow gaps');
   });
 
   const broker = BrokerFactory.getAdapter('BINANCE_DEMO', { client, db });
@@ -265,6 +279,7 @@ export async function bootstrapServer(): Promise<{
       return ind?.atr14 || (markPriceMap.get(sym) || 100) * 0.005;
     },
     broadcastWs: (msg) => wsHub.broadcast(msg),
+    onOrderDispatched: (event) => decisionAuditService.recordExecution(event),
   });
 
   // 9. Wire Stream Events to TradeManager, CvdEngine, and WsHub
@@ -335,6 +350,9 @@ export async function bootstrapServer(): Promise<{
     });
     wsHub.broadcastConfluence(confluenceSnapshot);
 
+    const atr = ind?.atr14 || (markPriceMap.get(event.symbol) || event.markPrice || 100) * 0.005;
+    decisionAuditService.evaluateSnapshot(confluenceSnapshot, atr, event.markPrice);
+
     // Autonomous Auto-Pilot Tick Evaluation
     autoPilotManager.onTick(event.symbol, event.markPrice).catch(() => {});
   });
@@ -368,6 +386,11 @@ export async function bootstrapServer(): Promise<{
       const closedCandles = mtfManager.getCandles(sym, interval as any);
       smcEngine.onCandleClosed(sym, interval, closedCandles);
     }
+
+    // Trigger Decision Audit shadow tracking on confirmed 1m candle close
+    if (event.isFinal && interval === '1m') {
+      decisionAuditService.onCandleClose(sym, event.candle);
+    }
   });
 
   streamsManager.onDepth((event) => {
@@ -398,6 +421,7 @@ export async function bootstrapServer(): Promise<{
   // 10. Register 16 REST API Endpoints
   registerRoutes(app, {
     tradeManager,
+    decisionAuditService,
     get broker() {
       return activeBroker;
     },
@@ -597,6 +621,7 @@ export async function bootstrapServer(): Promise<{
     sentimentHarvester,
     mtfManager,
     smcEngine,
+    decisionAuditService,
     close,
   };
 }

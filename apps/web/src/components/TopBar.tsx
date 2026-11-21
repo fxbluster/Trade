@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useMarketStore } from '../store/useMarketStore';
 import { useUiStore } from '../store/useUiStore';
+import { apiClient } from '../lib/apiClient';
 import {
   Activity,
   Radio,
@@ -12,6 +13,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   ChevronDown,
+  FileText,
 } from 'lucide-react';
 import type { BrokerMode } from '@tradeos/shared';
 
@@ -37,6 +39,7 @@ export const TopBar: React.FC = () => {
 
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
   const [isSwitchingBroker, setIsSwitchingBroker] = useState(false);
+  const [auditExportStatus, setAuditExportStatus] = useState<'idle' | 'exporting' | 'success' | 'error'>('idle');
 
   // Price direction color
   const priceColor =
@@ -47,6 +50,20 @@ export const TopBar: React.FC = () => {
       : 'text-[#e6edf3]';
 
   const isCooldownActive = risk?.cooldown_until ? risk.cooldown_until > Date.now() : false;
+
+  const handleExportAudit = async () => {
+    if (auditExportStatus === 'exporting') return;
+    setAuditExportStatus('exporting');
+    try {
+      await apiClient.downloadDailyAudit('markdown');
+      setAuditExportStatus('success');
+      setTimeout(() => setAuditExportStatus('idle'), 3000);
+    } catch (err: any) {
+      console.error('Audit export failed:', err);
+      setAuditExportStatus('error');
+      setTimeout(() => setAuditExportStatus('idle'), 4000);
+    }
+  };
 
   const handleBrokerToggle = async () => {
     const nextMode: BrokerMode = brokerMode === 'BINANCE_DEMO' ? 'LOCAL_PAPER' : 'BINANCE_DEMO';
@@ -160,6 +177,44 @@ export const TopBar: React.FC = () => {
         >
           <Cpu className="w-3.5 h-3.5 text-[#8b5cf6]" />
           <span className="hidden sm:inline">10k Sim</span>
+        </button>
+
+        {/* Daily Decision Audit Export */}
+        <button
+          onClick={handleExportAudit}
+          disabled={auditExportStatus === 'exporting'}
+          data-testid="audit-export-btn"
+          className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-[#020305] border border-[#151d2c] text-[#7d8590] hover:text-[#00f2fe] hover:border-[#00f2fe]/40 transition-colors disabled:opacity-50"
+          title="Export Daily Decision Audit Trail (Markdown)"
+        >
+          <FileText
+            className={`w-3.5 h-3.5 transition-colors ${
+              auditExportStatus === 'exporting'
+                ? 'text-[#00f2fe] animate-pulse'
+                : auditExportStatus === 'success'
+                ? 'text-[#0ecb81]'
+                : auditExportStatus === 'error'
+                ? 'text-[#f6465d]'
+                : 'text-[#00f2fe]'
+            }`}
+          />
+          <span
+            className={`hidden sm:inline ${
+              auditExportStatus === 'success'
+                ? 'text-[#0ecb81] font-medium'
+                : auditExportStatus === 'error'
+                ? 'text-[#f6465d] font-medium'
+                : ''
+            }`}
+          >
+            {auditExportStatus === 'exporting'
+              ? 'Exporting...'
+              : auditExportStatus === 'success'
+              ? 'Exported!'
+              : auditExportStatus === 'error'
+              ? 'Failed'
+              : 'Daily Audit'}
+          </span>
         </button>
 
         {/* Cooldown Status Badge / Modal Trigger */}

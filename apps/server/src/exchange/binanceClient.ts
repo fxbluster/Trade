@@ -386,16 +386,29 @@ export class BinanceClient {
   /**
    * Fetch historical klines from Mainnet public streams.
    */
-  async getKlines(symbol: string, interval: string = '1m', limit: number = 400): Promise<any[]> {
+  async getKlines(
+    symbol: string,
+    interval: string = '1m',
+    limit: number = 400,
+    startTime?: number,
+    endTime?: number
+  ): Promise<any[]> {
+    const params: Record<string, unknown> = {
+      symbol: symbol.toUpperCase(),
+      interval,
+      limit,
+    };
+    if (startTime !== undefined) {
+      params.startTime = startTime;
+    }
+    if (endTime !== undefined) {
+      params.endTime = endTime;
+    }
     return this.request<any[]>('/fapi/v1/klines', {
       method: 'GET',
       isPublicData: true,
       priority: 'P2',
-      params: {
-        symbol: symbol.toUpperCase(),
-        interval,
-        limit,
-      },
+      params,
     });
   }
 

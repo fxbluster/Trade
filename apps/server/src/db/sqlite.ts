@@ -7,7 +7,10 @@ import type {
   FillRecord,
   RiskStateRecord,
   AuditLogRecord,
-  BrokerMode
+  BrokerMode,
+  DecisionLogRecord,
+  ShadowSetupStatus,
+  TradeSide
 } from '@tradeos/shared';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -333,3 +336,109 @@ export class AuditLogRepo {
     return stmt.all(limit) as unknown as AuditLogRecord[];
   }
 }
+
+/**
+ * Repository for decision_logs table.
+ */
+export class DecisionLogsRepo {
+  constructor(private db: DatabaseSync) {}
+
+  insert(record: DecisionLogRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO decision_logs (
+        id, timestamp, symbol, side, action, composite_score,
+        pillars_json, macro_regime, macro_veto_active, veto_reasons_json,
+        execution_price, margin_usd, leverage, atr, trade_id,
+        shadow_status, shadow_sl, shadow_tp, shadow_pnl_usd,
+        expires_at, shadow_closed_at, error_message, created_at
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?
+      )
+    `);
+
+    stmt.run(
+      record.id,
+      record.timestamp,
+      record.symbol,
+      record.side,
+      record.action,
+      record.composite_score,
+      record.pillars_json,
+      record.macro_regime,
+      record.macro_veto_active ?? 0,
+      record.veto_reasons_json ?? null,
+      record.execution_price,
+      record.margin_usd,
+      record.leverage,
+      record.atr,
+      record.trade_id ?? null,
+      record.shadow_status ?? null,
+      record.shadow_sl ?? null,
+      record.shadow_tp ?? null,
+      record.shadow_pnl_usd ?? null,
+      record.expires_at ?? null,
+      record.shadow_closed_at ?? null,
+      record.error_message ?? null,
+      record.created_at
+    );
+  }
+
+  getOpenShadowSetups(symbol?: string): DecisionLogRecord[] {
+    if (symbol) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM decision_logs 
+        WHERE shadow_status = 'OPEN' AND symbol = ? 
+        ORDER BY timestamp ASC
+      `);
+      return stmt.all(symbol) as unknown as DecisionLogRecord[];
+    } else {
+      const stmt = this.db.prepare(`
+        SELECT * FROM decision_logs 
+        WHERE shadow_status = 'OPEN' 
+        ORDER BY timestamp ASC
+      `);
+      return stmt.all() as unknown as DecisionLogRecord[];
+    }
+  }
+
+  hasOpenShadowSetup(symbol: string, side: TradeSide): boolean {
+    const stmt = this.db.prepare(`
+      SELECT 1 FROM decision_logs 
+      WHERE shadow_status = 'OPEN' AND symbol = ? AND side = ? 
+      LIMIT 1
+    `);
+    return !!stmt.get(symbol, side);
+  }
+
+  updateShadowOutcome(id: string, status: ShadowSetupStatus, pnlUsd: number, closedAt: number): void {
+    const stmt = this.db.prepare(`
+      UPDATE decision_logs
+      SET shadow_status = ?,
+          shadow_pnl_usd = ?,
+          shadow_closed_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(status, pnlUsd, closedAt, id);
+  }
+
+  listSessionDecisions(sinceMs: number): DecisionLogRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM decision_logs 
+      WHERE timestamp >= ? 
+      ORDER BY timestamp ASC
+    `);
+    return stmt.all(sinceMs) as unknown as DecisionLogRecord[];
+  }
+
+  pruneOldRecords(retentionDays: number = 30): number {
+    const cutoffMs = Date.now() - retentionDays * 86_400_000;
+    const stmt = this.db.prepare('DELETE FROM decision_logs WHERE timestamp < ?');
+    const result = stmt.run(cutoffMs) as { changes?: number | bigint };
+    return Number(result.changes ?? 0);
+  }
+}
+

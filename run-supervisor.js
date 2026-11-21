@@ -19,15 +19,18 @@ let isShuttingDown = false;
 function startServer() {
   if (isShuttingDown) return;
 
-  log('[TradeOS Supervisor] Launching TradeOS server process...');
+  log('[TradeOS Supervisor] Launching TradeOS server process with file-backed stdio...');
+  const outStream = fs.openSync(logFile, 'a');
+  
   const proc = spawn('npx', ['tsx', 'apps/server/src/index.ts'], {
     shell: true,
-    stdio: 'inherit',
+    stdio: ['ignore', outStream, outStream],
     env: process.env,
   });
 
   proc.on('exit', (code, signal) => {
     log(`[TradeOS Supervisor] Server exited with code: ${code}, signal: ${signal}`);
+    try { fs.closeSync(outStream); } catch {}
     if (!isShuttingDown) {
       log('[TradeOS Supervisor] Auto-restarting TradeOS server in 2 seconds...');
       setTimeout(startServer, 2000);
@@ -36,6 +39,7 @@ function startServer() {
 
   proc.on('error', (err) => {
     log(`[TradeOS Supervisor] Server spawn error: ${err.message}`);
+    try { fs.closeSync(outStream); } catch {}
     if (!isShuttingDown) {
       setTimeout(startServer, 3000);
     }

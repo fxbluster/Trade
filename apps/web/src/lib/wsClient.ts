@@ -72,6 +72,31 @@ class WsClient {
   private maxReconnectDelay = 8000;
   private currentSubscribedSymbol: string | null = null;
 
+  constructor() {
+    if (typeof window !== 'undefined') {
+      // Reconnect immediately when user switches back to tab or window gains focus
+      window.addEventListener('focus', () => {
+        if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+          this.connect();
+        }
+      });
+
+      // Reconnect immediately when PC reconnects to internet
+      window.addEventListener('online', () => {
+        this.connect();
+      });
+
+      // Handle background tab sleep/wake
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          if (!this.ws || this.ws.readyState === WebSocket.CLOSED || this.ws.readyState === WebSocket.CLOSING) {
+            this.connect();
+          }
+        }
+      });
+    }
+  }
+
   public setHandlers(handlers: MessageHandlers) {
     this.handlers = { ...this.handlers, ...handlers };
   }

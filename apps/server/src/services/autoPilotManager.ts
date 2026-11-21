@@ -86,6 +86,13 @@ export class AutoPilotManager {
     this.tradesRepo = new TradesRepo(this.db);
     this.settingsRepo = new SettingsRepo(this.db);
 
+    // Restore persisted Auto-Pilot config (including enabled state & margin cap) from SQLite
+    const persistedConfig = this.settingsRepo.get<AutoPilotConfig>('autopilot_config');
+    if (persistedConfig) {
+      this.config = { ...this.config, ...persistedConfig };
+      this.confluenceEngine.setConsensusThreshold(this.config.consensusThreshold);
+    }
+
     if (options.config) {
       this.updateConfig(options.config);
     }
@@ -134,6 +141,10 @@ export class AutoPilotManager {
       this.config.circuitBreakerCooldownMs = partial.circuitBreakerCooldownMs;
     }
 
+    try {
+      this.settingsRepo.set('autopilot_config', this.config);
+    } catch {}
+
     this.broadcastStatus();
   }
 
@@ -144,6 +155,11 @@ export class AutoPilotManager {
     } else if (!enabled && this.state !== 'POSITION_OPEN') {
       this.state = 'IDLE';
     }
+
+    try {
+      this.settingsRepo.set('autopilot_config', this.config);
+    } catch {}
+
     this.broadcastStatus();
   }
 

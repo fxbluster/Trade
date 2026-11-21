@@ -172,6 +172,11 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
       threshold: 4,
       compositeScore: 78,
       recommendedAction: 'BUY',
+      macroVetoActive: false,
+      macroRegime: 'MACRO_BULLISH',
+      activeFvgs: [],
+      activeOrderBlocks: [],
+      latestSweep: null,
       ...snapshot,
     };
     confluenceEngine.getSnapshot = () => fullSnapshot;
@@ -249,9 +254,10 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     // Stop loss at 1.5x ATR (1.5 * 1.5 = 2.25) -> 100 - 2.25 = 97.75
     expect(orderReq.stopLoss).toBe(97.75);
 
-    // TP1 at +2.5% -> 102.50, TP2 at +5.0% -> 105.00
-    expect(orderReq.tp1).toBe(102.50);
-    expect(orderReq.tp2).toBe(105.00);
+    // Dynamic TP1 pins to nearest liquidation cluster (25x short liq at 104.10, R:R >= 1.5)
+    expect(orderReq.tp1).toBe(104.10);
+    // Dynamic TP2 runner scales with TP1 ratio: 100 + (4.10 * 2) = 108.20
+    expect(orderReq.tp2).toBe(108.20);
 
     expect(autoPilot.getState()).toBe('POSITION_OPEN');
   });

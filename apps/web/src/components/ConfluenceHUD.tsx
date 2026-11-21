@@ -8,25 +8,26 @@ import {
   Waves,
   Magnet,
   Newspaper,
-  Code2,
+  Layers,
   CheckCircle2,
   XCircle,
   Clock,
   ShieldAlert,
   Zap,
+  AlertTriangle,
 } from 'lucide-react';
 
-const PILLAR_METADATA: Record<
+export const PILLAR_METADATA: Record<
   ConfluencePillarId,
   { name: string; weight: string; icon: React.ComponentType<{ className?: string }> }
 > = {
-  MTF_TREND: { name: 'MTF Trend', weight: '20%', icon: TrendingUp },
-  ORDER_FLOW: { name: 'Order Flow', weight: '20%', icon: BarChart3 },
-  MOMENTUM: { name: 'Momentum', weight: '15%', icon: Activity },
-  CVD: { name: 'CVD Absorption', weight: '15%', icon: Waves },
-  LIQ_MAGNET: { name: 'Liq Magnet', weight: '10%', icon: Magnet },
-  NLP_NEWS: { name: 'NLP News Sentiment', weight: '10%', icon: Newspaper },
-  PINE_SMC: { name: 'PineScript SMC', weight: '10%', icon: Code2 },
+  MACRO_REGIME: { name: 'Macro Regime', weight: '25%', icon: TrendingUp },
+  NATIVE_SMC: { name: 'Native SMC', weight: '25%', icon: Layers },
+  CVD_ABSORPTION: { name: 'CVD Absorption', weight: '20%', icon: Waves },
+  ORDER_FLOW_L2: { name: 'Order Flow L2', weight: '15%', icon: BarChart3 },
+  LIQ_CLUSTERS: { name: 'Liq Clusters', weight: '7.5%', icon: Magnet },
+  MOMENTUM_RVOL: { name: 'Momentum & rVol', weight: '5%', icon: Activity },
+  SENTIMENT_MACRO: { name: 'Macro Sentiment', weight: '2.5%', icon: Newspaper },
 };
 
 export const ConfluenceHUD: React.FC = () => {
@@ -37,72 +38,72 @@ export const ConfluenceHUD: React.FC = () => {
   // Fallback / initial simulated pillars if backend snapshot not yet delivered
   const defaultPillars: PillarEvaluation[] = [
     {
-      id: 'MTF_TREND',
-      title: 'MTF Trend',
-      score: indicators?.ema9 && indicators?.ema21 && indicators.ema9 > indicators.ema21 ? 75 : 45,
-      bias: indicators?.ema9 && indicators?.ema21 && indicators.ema9 > indicators.ema21 ? 'BULLISH' : 'NEUTRAL',
-      valueText: indicators?.ema9 && indicators?.ema21 && indicators.ema9 > indicators.ema21 ? 'EMA 9 > 21 Bullish' : 'Neutral Stack',
-      subText: 'ADX Trend Momentum',
-      confirmed: indicators?.ema9 && indicators?.ema21 ? indicators.ema9 > indicators.ema21 : false,
-      updatedAt: Date.now(),
-    },
-    {
-      id: 'ORDER_FLOW',
-      title: 'Order Flow Footprint',
-      score: 55,
+      id: 'MACRO_REGIME',
+      title: 'Macro Regime (1h EMA200)',
+      score: 50,
       bias: 'NEUTRAL',
-      valueText: 'Depth Imbalance 1.2x',
-      subText: 'Evaluating L2 Book',
+      valueText: 'Macro 1h Stack',
+      subText: 'EMA200 / SuperTrend',
       confirmed: false,
       updatedAt: Date.now(),
     },
     {
-      id: 'MOMENTUM',
-      title: 'Momentum & Volatility',
-      score: indicators?.rsi14 ? Math.round(indicators.rsi14) : 50,
-      bias: indicators?.rsi14 && indicators.rsi14 > 55 ? 'BULLISH' : indicators?.rsi14 && indicators.rsi14 < 45 ? 'BEARISH' : 'NEUTRAL',
-      valueText: indicators?.rsi14 ? `RSI ${indicators.rsi14.toFixed(1)}` : 'RSI 50.0',
-      subText: 'MACD Momentum',
-      confirmed: indicators?.rsi14 ? indicators.rsi14 > 55 || indicators.rsi14 < 45 : false,
+      id: 'NATIVE_SMC',
+      title: 'Native SMC (FVG/OB)',
+      score: 50,
+      bias: 'NEUTRAL',
+      valueText: 'Scanning Structure',
+      subText: 'FVG & Order Blocks',
+      confirmed: false,
       updatedAt: Date.now(),
     },
     {
-      id: 'CVD',
-      title: 'Spot vs Perp CVD',
-      score: cvd && cvd.cvd > 0 ? 70 : 45,
+      id: 'CVD_ABSORPTION',
+      title: 'CVD Absorption Divergence',
+      score: cvd && cvd.cvd > 0 ? 70 : 50,
       bias: cvd && cvd.cvd > 0 ? 'BULLISH' : 'NEUTRAL',
       valueText: cvd ? `Delta: ${cvd.cvd.toFixed(1)}` : 'Delta 0.0',
-      subText: 'Absorption Tracker',
+      subText: 'Z-Score Divergence',
       confirmed: cvd ? cvd.cvd > 0 : false,
       updatedAt: Date.now(),
     },
     {
-      id: 'LIQ_MAGNET',
-      title: 'Liquidation Magnet',
+      id: 'ORDER_FLOW_L2',
+      title: 'Order Flow L2 Footprint',
       score: 50,
       bias: 'NEUTRAL',
-      valueText: 'Proximity > 1.5 ATR',
-      subText: 'Clusters Inactive',
+      valueText: 'Depth Imbalance 1.0x',
+      subText: 'L2 Micro-Book & POC',
       confirmed: false,
       updatedAt: Date.now(),
     },
     {
-      id: 'NLP_NEWS',
-      title: 'NLP News Sentiment',
-      score: 60,
-      bias: 'BULLISH',
-      valueText: 'VADER +0.32 Positive',
-      subText: 'CryptoPanic / CoinDesk',
-      confirmed: true,
+      id: 'LIQ_CLUSTERS',
+      title: 'Liquidation Clusters',
+      score: 50,
+      bias: 'NEUTRAL',
+      valueText: 'Proximity > 1.5 ATR',
+      subText: 'OI Leverage Clusters',
+      confirmed: false,
       updatedAt: Date.now(),
     },
     {
-      id: 'PINE_SMC',
-      title: 'PineScript SMC Signal',
+      id: 'MOMENTUM_RVOL',
+      title: 'Momentum & rVol',
+      score: indicators?.rsi14 ? Math.round(indicators.rsi14) : 50,
+      bias: indicators?.rsi14 && indicators.rsi14 > 55 ? 'BULLISH' : indicators?.rsi14 && indicators.rsi14 < 45 ? 'BEARISH' : 'NEUTRAL',
+      valueText: indicators?.rsi14 ? `RSI ${indicators.rsi14.toFixed(1)}` : 'RSI 50.0',
+      subText: 'Relative Volume & ADX',
+      confirmed: indicators?.rsi14 ? indicators.rsi14 > 55 || indicators.rsi14 < 45 : false,
+      updatedAt: Date.now(),
+    },
+    {
+      id: 'SENTIMENT_MACRO',
+      title: 'Sentiment Macro',
       score: 50,
       bias: 'NEUTRAL',
-      valueText: 'Waiting for TV Alert',
-      subText: 'Webhook Ingress TTL',
+      valueText: 'Neutral (0.0)',
+      subText: 'CryptoPanic / News Feed',
       confirmed: false,
       updatedAt: Date.now(),
     },
@@ -124,6 +125,7 @@ export const ConfluenceHUD: React.FC = () => {
       case 'STRONG_SELL':
       case 'SELL':
         return 'text-[#f6465d] bg-[#f6465d]/15 border-[#f6465d]/40';
+      case 'WAIT':
       case 'GÖZLƏ':
       default:
         return 'text-[#f0b90b] bg-[#f0b90b]/15 border-[#f0b90b]/40';
@@ -139,7 +141,7 @@ export const ConfluenceHUD: React.FC = () => {
           <div className="flex items-center space-x-1.5">
             <Zap className="w-4 h-4 text-[#f0b90b]" />
             <span className="font-bold text-[#e6edf3] uppercase tracking-wide">
-              6+1 Confluence Matrix
+              Institutional Confluence Matrix
             </span>
           </div>
 
@@ -190,7 +192,18 @@ export const ConfluenceHUD: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. Responsive 6+1 Cards Grid */}
+      {/* Macro Veto Warning Banner */}
+      {confluence?.macroVetoActive && (
+        <div
+          data-testid="macro-veto-banner"
+          className="flex items-center space-x-2 px-3 py-2 bg-[#f0b90b]/15 border border-[#f0b90b]/50 rounded text-[#f0b90b] text-xs font-bold tracking-wide animate-pulse"
+        >
+          <AlertTriangle className="w-4 h-4 flex-shrink-0 text-[#f0b90b]" />
+          <span>MACRO VETO ENGAGED: Longs blocked below 1h EMA200</span>
+        </div>
+      )}
+
+      {/* 2. Responsive 7-Pillars Cards Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-1.5">
         {pillars.map((pillar) => {
           const meta = PILLAR_METADATA[pillar.id] || {

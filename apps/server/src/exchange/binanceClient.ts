@@ -216,7 +216,8 @@ export class BinanceClient {
     const isPublicMarketData =
       endpoint.startsWith('/fapi/v1/klines') ||
       endpoint.startsWith('/fapi/v1/ticker') ||
-      endpoint.startsWith('/fapi/v1/premiumIndex');
+      endpoint.startsWith('/fapi/v1/premiumIndex') ||
+      endpoint.startsWith('/fapi/v1/openInterest');
     const baseUrl =
       options.baseUrl ||
       (options.isPublicData || (isPublicMarketData && !options.forceTestnet)
@@ -409,6 +410,20 @@ export class BinanceClient {
       isPublicData: true,
       priority: 'P2',
       params,
+    });
+  }
+
+  /**
+   * Fetch live open interest for symbol (/fapi/v1/openInterest).
+   */
+  async getOpenInterest(symbol: string): Promise<{ symbol: string; openInterest: string; time: number }> {
+    return this.request<{ symbol: string; openInterest: string; time: number }>('/fapi/v1/openInterest', {
+      method: 'GET',
+      isPublicData: true,
+      priority: 'P2',
+      params: {
+        symbol: symbol.toUpperCase(),
+      },
     });
   }
 

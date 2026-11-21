@@ -19,14 +19,46 @@ export type AlertLevel = 'INFO' | 'WARN' | 'CRITICAL';
 
 export type MentorMode = 'DISCIPLINE' | 'CAUTION' | 'AGGRESSIVE' | 'LOCKOUT';
 
+export type MacroRegime = 'MACRO_BULLISH' | 'MACRO_BEARISH' | 'MACRO_RANGING' | 'DEGRADED';
+
+export interface FairValueGap {
+  id: string;
+  timeframe: string;
+  type: 'BULLISH' | 'BEARISH';
+  high: number;
+  low: number;
+  mitigated: boolean;
+  formedAt: number;
+}
+
+export interface OrderBlock {
+  id: string;
+  timeframe: string;
+  type: 'BULLISH' | 'BEARISH';
+  high: number;
+  low: number;
+  invalidationPrice: number;
+  volume: number;
+}
+
+export interface LiquiditySweep {
+  id: string;
+  direction: 'SWEEP_HIGH' | 'SWEEP_LOW';
+  sweepPrice: number;
+  reclaimPrice: number;
+  time: number;
+}
+
 export type ConfluencePillarId =
-  | 'MTF_TREND'
-  | 'MOMENTUM'
-  | 'ORDER_FLOW'
-  | 'CVD'
-  | 'LIQ_MAGNET'
-  | 'NLP_NEWS'
-  | 'PINE_SMC';
+  | 'MACRO_REGIME'
+  | 'NATIVE_SMC'
+  | 'CVD_ABSORPTION'
+  | 'ORDER_FLOW_L2'
+  | 'LIQ_CLUSTERS'
+  | 'MOMENTUM_RVOL'
+  | 'SENTIMENT_MACRO';
+
+export type ConfluenceAction = 'STRONG_BUY' | 'BUY' | 'WAIT' | 'SELL' | 'STRONG_SELL' | 'GÖZLƏ';
 
 export interface PillarEvaluation {
   id: ConfluencePillarId;
@@ -49,7 +81,12 @@ export interface ConfluenceSnapshot {
   consensusMet: boolean; // confirmingCount >= threshold (default 4)
   threshold: number; // default 4
   compositeScore: number; // 0 - 100
-  recommendedAction: 'STRONG_BUY' | 'BUY' | 'GÖZLƏ' | 'SELL' | 'STRONG_SELL';
+  recommendedAction: 'STRONG_BUY' | 'BUY' | 'WAIT' | 'SELL' | 'STRONG_SELL' | 'GÖZLƏ';
+  macroVetoActive: boolean;
+  macroRegime: MacroRegime;
+  activeFvgs: FairValueGap[];
+  activeOrderBlocks: OrderBlock[];
+  latestSweep: LiquiditySweep | null;
 }
 
 export interface AutoPilotConfig {

@@ -5,43 +5,59 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { calculateLiquidationPrice, computeOrderPreview } from '@tradeos/shared';
 import { useMarketStore } from '../../store/useMarketStore';
 import { useUiStore } from '../../store/useUiStore';
-import { formatLocalTime, updateCandleWithTick } from '../ChartCanvas';
+import { formatLocalTime, updateCandleWithTick, ChartCanvas } from '../ChartCanvas';
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import { flushSync } from 'react-dom';
+import type { FairValueGap, LiquiditySweep } from '@tradeos/shared';
 
 // Mock lightweight-charts createChart
-vi.mock('lightweight-charts', () => {
+const { mockSeries, mockChart } = vi.hoisted(() => {
   const mockSeries = {
     setData: vi.fn(),
     update: vi.fn(),
-    createPriceLine: vi.fn((opts) => ({ ...opts, id: Math.random() })),
+    createPriceLine: vi.fn((opts: any) => ({ ...opts, id: Math.random() })),
     removePriceLine: vi.fn(),
+    setMarkers: vi.fn(),
   };
 
   const mockChart = {
     applyOptions: vi.fn(),
     addCandlestickSeries: vi.fn(() => mockSeries),
     addHistogramSeries: vi.fn(() => mockSeries),
+    priceScale: vi.fn(() => ({
+      applyOptions: vi.fn(),
+    })),
     timeScale: vi.fn(() => ({
       fitContent: vi.fn(),
+      resetTimeScale: vi.fn(),
     })),
     remove: vi.fn(),
   };
 
-  return {
-    createChart: vi.fn(() => mockChart),
-    ColorType: { Solid: 'solid' },
-    LineStyle: { Solid: 0, Dotted: 1, Dashed: 2, LargeDashed: 3 },
-    CrosshairMode: { Normal: 0, Magnet: 1 },
-  };
+  return { mockSeries, mockChart };
 });
+
+vi.mock('lightweight-charts', () => ({
+  createChart: vi.fn(() => mockChart),
+  ColorType: { Solid: 'solid' },
+  LineStyle: { Solid: 0, Dotted: 1, Dashed: 2, LargeDashed: 3 },
+  CrosshairMode: { Normal: 0, Magnet: 1 },
+}));
 
 describe('ChartCanvas & Price Line Logic', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSeries.createPriceLine.mockClear();
+    mockSeries.setMarkers.mockClear();
     useMarketStore.setState({
       symbol: 'BTCUSDT',
       markPrice: 90000,
       activePosition: null,
       klines: [],
+      activeFvgs: [],
+      latestSweep: null,
+      showSmcOverlay: true,
     });
     useUiStore.getState().resetOrderDraft();
   });
@@ -213,5 +229,132 @@ describe('ChartCanvas & Price Line Logic', () => {
     expect(state.markPrice).toBe(71.4);
     // Crucial: klines reference identity must be preserved to prevent 4Hz canvas re-render thrashing!
     expect(state.klines).toBe(initialKlines);
+  });
+
+  it('renders twin price lines for active FVG zones and sweep markers when showSmcOverlay is enabled', () => {
+    const activeFvg: FairValueGap = {
+      id: 'fvg-1',
+      timeframe: '15m',
+      type: 'BULLISH',
+      high: 92000,
+      low: 91500,
+      mitigated: false,
+      formedAt: 1795101000,
+    };
+
+    const mitigatedFvg: FairValueGap = {
+      id: 'fvg-2',
+      timeframe: '15m',
+      type: 'BULLISH',
+      high: 90000,
+      low: 89500,
+      mitigated: true,
+      formedAt: 1795100000,
+    };
+
+    const sweep: LiquiditySweep = {
+      id: 'sw-1',
+      direction: 'SWEEP_HIGH',
+      sweepPrice: 93500,
+      reclaimPrice: 93200,
+      time: 1795101000,
+    };
+
+    useMarketStore.setState({
+      symbol: 'BTCUSDT',
+      activeFvgs: [activeFvg, mitigatedFvg],
+      latestSweep: sweep,
+      showSmcOverlay: true,
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ChartCanvas));
+    });
+
+    // Check createPriceLine calls on mock series
+    expect(mockSeries).not.toBeNull();
+    const calls = mockSeries.createPriceLine.mock.calls.map((c: any) => c[0]);
+
+    // FVG HIGH line
+    const highFvgLine = calls.find((c: any) => c.title === 'FVG HIGH');
+    expect(highFvgLine).toBeDefined();
+    expect(highFvgLine.price).toBe(92000);
+    expect(highFvgLine.color).toBe('rgba(14, 203, 129, 0.6)');
+    expect(highFvgLine.axisLabelVisible).toBe(true);
+
+    // FVG LOW line
+    const lowFvgLine = calls.find((c: any) => c.title === 'FVG LOW');
+    expect(lowFvgLine).toBeDefined();
+    expect(lowFvgLine.price).toBe(91500);
+    expect(lowFvgLine.color).toBe('rgba(14, 203, 129, 0.3)');
+    expect(lowFvgLine.axisLabelVisible).toBe(true);
+
+    // Mitigated FVG lines should NOT be created
+    const mitigatedHigh = calls.find((c: any) => c.price === 90000);
+    expect(mitigatedHigh).toBeUndefined();
+
+    // Liquidity Sweep price line
+    const sweepLine = calls.find((c: any) => c.title === 'SWEEP HIGH');
+    expect(sweepLine).toBeDefined();
+    expect(sweepLine.price).toBe(93500);
+
+    // Liquidity Sweep marker on candle series
+    expect(mockSeries.setMarkers).toHaveBeenCalled();
+    const markerCall = mockSeries.setMarkers.mock.calls[mockSeries.setMarkers.mock.calls.length - 1][0];
+    expect(markerCall).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: 'SWEEP HIGH',
+          shape: 'arrowDown',
+        }),
+      ])
+    );
+  });
+
+  it('hides FVG twin price lines and sweep markers when showSmcOverlay is false', () => {
+    const activeFvg: FairValueGap = {
+      id: 'fvg-1',
+      timeframe: '15m',
+      type: 'BULLISH',
+      high: 92000,
+      low: 91500,
+      mitigated: false,
+      formedAt: 1795101000,
+    };
+
+    const sweep: LiquiditySweep = {
+      id: 'sw-1',
+      direction: 'SWEEP_HIGH',
+      sweepPrice: 93500,
+      reclaimPrice: 93200,
+      time: 1795101000,
+    };
+
+    useMarketStore.setState({
+      symbol: 'BTCUSDT',
+      activeFvgs: [activeFvg],
+      latestSweep: sweep,
+      showSmcOverlay: false,
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ChartCanvas));
+    });
+
+    const calls = mockSeries.createPriceLine.mock.calls.map((c: any) => c[0]);
+    expect(calls.find((c: any) => c.title === 'FVG HIGH')).toBeUndefined();
+    expect(calls.find((c: any) => c.title === 'FVG LOW')).toBeUndefined();
+    expect(calls.find((c: any) => c.title === 'SWEEP HIGH')).toBeUndefined();
+
+    const markerCall = mockSeries.setMarkers.mock.calls[mockSeries.setMarkers.mock.calls.length - 1][0];
+    expect(markerCall).toEqual([]);
+    root.unmount();
+    container.remove();
   });
 });

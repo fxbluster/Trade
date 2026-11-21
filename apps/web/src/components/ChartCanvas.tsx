@@ -69,6 +69,10 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const hidePineOverlay = useMarketStore((s) => s.hidePineOverlay);
   const toggleHidePineOverlay = useMarketStore((s) => s.toggleHidePineOverlay);
   const pineSignals = useMarketStore((s) => s.pineSignals);
+  const activeFvgs = useMarketStore((s) => s.activeFvgs);
+  const latestSweep = useMarketStore((s) => s.latestSweep);
+  const showSmcOverlay = useMarketStore((s) => s.showSmcOverlay);
+  const toggleShowSmcOverlay = useMarketStore((s) => s.toggleShowSmcOverlay);
 
   // Initialize Lightweight Charts instance
   useEffect(() => {
@@ -192,19 +196,21 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     const unsubscribeTick = wsClient.subscribeTick(handleTick);
 
     // Handle container resize
-    const resizeObserver = new ResizeObserver((entries) => {
-      if (!entries || entries.length === 0 || !entries[0]) return;
-      const { width, height } = entries[0].contentRect;
-      if (width > 0 && height > 0) {
-        chart.applyOptions({ width, height });
-      }
-    });
-
-    resizeObserver.observe(containerRef.current);
+    let resizeObserver: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
+      resizeObserver = new ResizeObserver((entries) => {
+        if (!entries || entries.length === 0 || !entries[0]) return;
+        const { width, height } = entries[0].contentRect;
+        if (width > 0 && height > 0) {
+          chart.applyOptions({ width, height });
+        }
+      });
+      resizeObserver.observe(containerRef.current);
+    }
 
     return () => {
       unsubscribeTick();
-      resizeObserver.disconnect();
+      resizeObserver?.disconnect();
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -471,7 +477,71 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         priceLinesRef.current.push(pineLine);
       }
     }
-  }, [activePosition, orderDraft, markPrice, hidePineOverlay, pineSignals]);
+
+    // 4. Draw Native SMC Overlay (Active FVG Zones & Liquidity Sweeps)
+    if (showSmcOverlay) {
+      // 4.A Active FVG Zones: Twin Price Lines (FVG HIGH & FVG LOW)
+      if (Array.isArray(activeFvgs)) {
+        const unmitigatedFvgs = activeFvgs.filter((fvg) => !fvg.mitigated);
+        for (const fvg of unmitigatedFvgs) {
+          const high = fvg.high ?? (fvg as any).top;
+          const low = fvg.low ?? (fvg as any).bottom;
+          if (typeof high === 'number' && typeof low === 'number' && high > 0 && low > 0) {
+            const upperLine = candleSeries.createPriceLine({
+              price: high,
+              color: 'rgba(14, 203, 129, 0.6)',
+              lineWidth: 1,
+              lineStyle: LineStyle.Dashed,
+              axisLabelVisible: true,
+              title: 'FVG HIGH',
+            });
+            priceLinesRef.current.push(upperLine);
+
+            const lowerLine = candleSeries.createPriceLine({
+              price: low,
+              color: 'rgba(14, 203, 129, 0.3)',
+              lineWidth: 1,
+              lineStyle: LineStyle.Dashed,
+              axisLabelVisible: true,
+              title: 'FVG LOW',
+            });
+            priceLinesRef.current.push(lowerLine);
+          }
+        }
+      }
+
+      // 4.B Liquidity Sweep Price Line
+      if (latestSweep && latestSweep.sweepPrice && latestSweep.sweepPrice > 0) {
+        const isHigh = latestSweep.direction === 'SWEEP_HIGH' || (latestSweep as any).bias === 'BEARISH';
+        const sweepLine = candleSeries.createPriceLine({
+          price: latestSweep.sweepPrice,
+          color: isHigh ? '#f6465d' : '#0ecb81',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
+          axisLabelVisible: true,
+          title: isHigh ? 'SWEEP HIGH' : 'SWEEP LOW',
+        });
+        priceLinesRef.current.push(sweepLine);
+      }
+    }
+
+    // Set markers on candle series for Liquidity Sweeps
+    if (typeof (candleSeries as any).setMarkers === 'function') {
+      const markers: any[] = [];
+      if (showSmcOverlay && latestSweep && latestSweep.time) {
+        const timeSec = latestSweep.time > 1e11 ? Math.floor(latestSweep.time / 1000) : latestSweep.time;
+        const isHigh = latestSweep.direction === 'SWEEP_HIGH' || (latestSweep as any).bias === 'BEARISH';
+        markers.push({
+          time: timeSec as UTCTimestamp,
+          position: isHigh ? 'aboveBar' : 'belowBar',
+          color: isHigh ? '#f6465d' : '#0ecb81',
+          shape: isHigh ? 'arrowDown' : 'arrowUp',
+          text: isHigh ? 'SWEEP HIGH' : 'SWEEP LOW',
+        });
+      }
+      (candleSeries as any).setMarkers(markers);
+    }
+  }, [activePosition, orderDraft, markPrice, hidePineOverlay, pineSignals, showSmcOverlay, activeFvgs, latestSweep]);
 
   return (
     <div className={`relative flex flex-col w-full h-full bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden ${className}`}>
@@ -482,8 +552,25 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           <span className="text-xs text-[#7d8590] uppercase font-mono">Perpetual Futures</span>
         </div>
 
-        {/* Right Toolbar: Pine Overlay Toggle & Interval Selector */}
+        {/* Right Toolbar: SMC Overlay Toggle, Pine Overlay Toggle & Interval Selector */}
         <div className="flex items-center space-x-2">
+          {/* Native SMC Overlay Toggle */}
+          <button
+            onClick={toggleShowSmcOverlay}
+            data-testid="toggle-smc-overlay"
+            className={`flex items-center space-x-1 px-2.5 py-1 text-xs font-mono rounded border transition-colors ${
+              !showSmcOverlay
+                ? 'bg-[#151d2c] text-[#7d8590] border-[#151d2c] hover:text-[#e6edf3]'
+                : 'bg-[#0ecb81]/15 text-[#0ecb81] border-[#0ecb81]/40 font-bold'
+            }`}
+            title="Toggle Native SMC (FVG & Liquidity Sweeps) overlay"
+          >
+            {!showSmcOverlay ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">
+              {!showSmcOverlay ? 'SMC Overlay Off' : 'SMC Overlay On'}
+            </span>
+          </button>
+
           {/* Pine Overlay Toggle */}
           <button
             onClick={toggleHidePineOverlay}

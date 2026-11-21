@@ -6,6 +6,7 @@ import type {
   WsServerMessage,
   TradeSide,
 } from '@tradeos/shared';
+import { calculateLiquidationPrice } from '@tradeos/shared';
 import { TradesRepo, SettingsRepo } from '../db/sqlite.js';
 import { TradeManager } from './tradeManager.js';
 import type { BrokerAdapter } from '../exchange/broker.js';
@@ -226,7 +227,7 @@ export class AutoPilotManager {
 
     // Evaluate Confluence Consensus
     const snapshot = this.confluenceEngine.getSnapshot(sym);
-    if (!snapshot || !snapshot.consensusMet) {
+    if (!snapshot || !snapshot.consensusMet || snapshot.macroVetoActive) {
       return;
     }
 
@@ -282,17 +283,72 @@ export class AutoPilotManager {
     // Calculate ATR (fallback to 0.5% of mark price)
     const atr = this.getAtrFn ? this.getAtrFn(symbol) : markPrice * 0.005;
 
-    // Stop-Loss at 1.5x ATR
+    // Dead-SL Armor Clamping:
+    // Raw SL at 1.5x ATR, strictly clamped to safe side of isolated liquidation:
+    // stopLoss = side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)
+    const leverage = this.config.leverage || 10;
+    const estLiq = calculateLiquidationPrice(side, limitPrice, leverage, 0.005);
+    const rawSl = side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr;
     const stopLoss = Number(
-      (side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr).toFixed(2)
+      (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(2)
     );
 
-    // Take-Profit 1 at +2.5%, Take-Profit 2 at +5.0%
-    const tp1 = Number(
-      (side === 'BUY' ? markPrice * 1.025 : markPrice * 0.975).toFixed(2)
-    );
+    // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
+    const risk = Math.abs(limitPrice - stopLoss);
+    const snapshot = this.confluenceEngine.getSnapshot(symbol);
+    const clusters = this.confluenceEngine.liquidationEngine.projectClusters(limitPrice, 100_000_000);
+
+    let clusterTp1: number | null = null;
+    if (snapshot?.macroRegime) {
+      if (side === 'BUY') {
+        const shortClusters = clusters
+          .filter((c) => c.side === 'SHORT_LIQ' && c.price > limitPrice)
+          .sort((a, b) => a.price - b.price);
+
+        for (const sc of shortClusters) {
+          const reward = sc.price - limitPrice;
+          const distPct = reward / limitPrice;
+          const rr = risk > 0 ? reward / risk : 0;
+          if (distPct >= 0.005 && rr >= 1.5) {
+            clusterTp1 = sc.price;
+            break;
+          }
+        }
+      } else {
+        const longClusters = clusters
+          .filter((c) => c.side === 'LONG_LIQ' && c.price < limitPrice)
+          .sort((a, b) => b.price - a.price);
+
+        for (const lc of longClusters) {
+          const reward = limitPrice - lc.price;
+          const distPct = reward / limitPrice;
+          const rr = risk > 0 ? reward / risk : 0;
+          if (distPct >= 0.005 && rr >= 1.5) {
+            clusterTp1 = lc.price;
+            break;
+          }
+        }
+      }
+    }
+
+    let tp1: number;
+    if (clusterTp1 !== null) {
+      tp1 = Number(clusterTp1.toFixed(2));
+    } else {
+      const fallbackReward = snapshot?.macroRegime
+        ? Math.max(2.0 * atr, risk * 1.5)
+        : markPrice * 0.025;
+      tp1 = Number(
+        (side === 'BUY' ? markPrice + fallbackReward : markPrice - fallbackReward).toFixed(2)
+      );
+    }
+
+    // Dynamic TP2: +4.0x ATR or +5.0% baseline
+    const tp2Reward = snapshot?.macroRegime
+      ? Math.max(4.0 * atr, Math.abs(tp1 - markPrice) * 2)
+      : markPrice * 0.050;
     const tp2 = Number(
-      (side === 'BUY' ? markPrice * 1.050 : markPrice * 0.950).toFixed(2)
+      (side === 'BUY' ? markPrice + tp2Reward : markPrice - tp2Reward).toFixed(2)
     );
 
     const trade = await this.tradeManager.openPosition({

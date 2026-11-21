@@ -28,6 +28,8 @@ import { CvdEngine } from './quant/cvd.js';
 import { calculateIndicators } from './quant/indicators.js';
 import { generateMentorBrief } from './quant/sokratMentor.js';
 import { SentimentHarvester } from './quant/sentimentHarvester.js';
+import { HierarchicalMtfManager } from './quant/hierarchicalMtfManager.js';
+import { NativeSmcEngine } from './quant/nativeSmcEngine.js';
 import { ConfluenceEngine } from './quant/confluenceEngine.js';
 import { TradeManager } from './services/tradeManager.js';
 import { AutoPilotManager } from './services/autoPilotManager.js';
@@ -62,6 +64,8 @@ export async function bootstrapServer(): Promise<{
   confluenceEngine: ConfluenceEngine;
   autoPilotManager: AutoPilotManager;
   sentimentHarvester: SentimentHarvester;
+  mtfManager: HierarchicalMtfManager;
+  smcEngine: NativeSmcEngine;
   close: () => Promise<void>;
 }> {
   // 1. Initialize SQLite WAL Database Engine
@@ -165,7 +169,19 @@ export async function bootstrapServer(): Promise<{
     };
   };
 
-  // 7. Initialize WebSocket Hub on /ws
+  // 7a. Initialize Institutional Quantitative Engine Subsystems
+  const mtfManager = new HierarchicalMtfManager();
+  const smcEngine = new NativeSmcEngine();
+  const sentimentHarvester = new SentimentHarvester(CRYPTOPANIC_API_KEY);
+  sentimentHarvester.start();
+
+  const confluenceEngine = new ConfluenceEngine({
+    mtfManager,
+    smcEngine,
+    sentimentHarvester,
+  });
+
+  // 7b. Initialize WebSocket Hub on /ws
   const wsHub = new WsHub({
     server,
     path: '/ws',
@@ -174,8 +190,12 @@ export async function bootstrapServer(): Promise<{
     onSubscribeSymbol: (sym) => {
       activeSymbol = sym.toUpperCase();
       cvdEngine.reset(activeSymbol);
+      mtfManager.reset(activeSymbol);
+      smcEngine.reset(activeSymbol);
+      confluenceEngine.reset(activeSymbol);
       streamsManager.subscribeSymbol(activeSymbol);
-      // Pre-warm candle history for smooth tick updates
+
+      // Pre-warm 1m candle history for smooth tick updates
       client.getKlines(activeSymbol, '1m', 100).then((raw) => {
         if (Array.isArray(raw)) {
           const klines = raw.map((k: any) => ({
@@ -187,6 +207,38 @@ export async function bootstrapServer(): Promise<{
             volume: Number(k[5]),
           }));
           candleHistoryMap.set(activeSymbol, klines);
+          mtfManager.setInitialCandles(activeSymbol, '1m', klines);
+        }
+      }).catch(() => {});
+
+      // Pre-warm 15m candle history via REST (200 candles) for SMC and Intermediate Structure
+      client.getKlines(activeSymbol, '15m', 200).then((raw) => {
+        if (Array.isArray(raw)) {
+          const klines = raw.map((k: any) => ({
+            time: Math.floor(Number(k[0]) / 1000),
+            open: Number(k[1]),
+            high: Number(k[2]),
+            low: Number(k[3]),
+            close: Number(k[4]),
+            volume: Number(k[5]),
+          }));
+          mtfManager.setInitialCandles(activeSymbol, '15m', klines);
+          smcEngine.onCandleClosed(activeSymbol, '15m', klines);
+        }
+      }).catch(() => {});
+
+      // Pre-warm 1h candle history via REST (200 candles) for Macro Directional Regime
+      client.getKlines(activeSymbol, '1h', 200).then((raw) => {
+        if (Array.isArray(raw)) {
+          const klines = raw.map((k: any) => ({
+            time: Math.floor(Number(k[0]) / 1000),
+            open: Number(k[1]),
+            high: Number(k[2]),
+            low: Number(k[3]),
+            close: Number(k[4]),
+            volume: Number(k[5]),
+          }));
+          mtfManager.setInitialCandles(activeSymbol, '1h', klines);
         }
       }).catch(() => {});
     },
@@ -201,12 +253,7 @@ export async function bootstrapServer(): Promise<{
     broadcastWs: (msg) => wsHub.broadcast(msg),
   });
 
-  // 8b. Initialize 6+1 Confluence Decision Engine & Autonomous Auto-Pilot Manager
-  const sentimentHarvester = new SentimentHarvester(CRYPTOPANIC_API_KEY);
-  sentimentHarvester.start();
-
-  const confluenceEngine = new ConfluenceEngine(sentimentHarvester);
-
+  // 8b. Initialize Autonomous Auto-Pilot Manager
   const autoPilotManager = new AutoPilotManager({
     db,
     tradeManager,
@@ -294,10 +341,18 @@ export async function bootstrapServer(): Promise<{
   });
 
   streamsManager.onKline((event) => {
-    if (event.interval === '1m') {
-      const existing = candleHistoryMap.get(event.symbol) || [];
+    const sym = event.symbol.toUpperCase();
+    const interval = event.interval;
+
+    // Feed MTF Manager ring buffers for 1m, 15m, and 1h
+    if (interval === '1m' || interval === '15m' || interval === '1h') {
+      mtfManager.updateCandle(sym, interval as any, event.candle, event.isFinal);
+    }
+
+    if (interval === '1m') {
+      const existing = candleHistoryMap.get(sym) || [];
       if (existing.length === 0) {
-        candleHistoryMap.set(event.symbol, [event.candle]);
+        candleHistoryMap.set(sym, [event.candle]);
       } else {
         const lastIdx = existing.length - 1;
         if (existing[lastIdx]!.time === event.candle.time) {
@@ -307,6 +362,12 @@ export async function bootstrapServer(): Promise<{
           if (existing.length > 500) existing.shift();
         }
       }
+    }
+
+    // Trigger SMC closed-candle geometry updates on confirmed 15m/1h candle close
+    if (event.isFinal && (interval === '15m' || interval === '1h')) {
+      const closedCandles = mtfManager.getCandles(sym, interval as any);
+      smcEngine.onCandleClosed(sym, interval, closedCandles);
     }
   });
 
@@ -324,7 +385,7 @@ export async function bootstrapServer(): Promise<{
       s: event.symbol,
       T: event.time,
     });
-    confluenceEngine.orderFlowEngine.processTrade(event.qty, event.isBuyerMaker);
+    confluenceEngine.orderFlowEngine.processTrade(event.qty, event.isBuyerMaker, event.time, event.price);
   });
 
   streamsManager.onUserData((event) => {
@@ -504,6 +565,8 @@ export async function bootstrapServer(): Promise<{
     confluenceEngine,
     autoPilotManager,
     sentimentHarvester,
+    mtfManager,
+    smcEngine,
     close,
   };
 }

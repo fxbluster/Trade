@@ -2,11 +2,17 @@ import type {
   ConfluencePillarId,
   PillarEvaluation,
   ConfluenceSnapshot,
+  MacroRegime,
+  FairValueGap,
+  OrderBlock,
+  LiquiditySweep,
   WebhookAlertPayload,
   TechnicalSummary,
   CvdSnapshot,
 } from '@tradeos/shared';
 import { calculateCompositeConfluenceScore } from '@tradeos/shared';
+import { HierarchicalMtfManager } from './hierarchicalMtfManager.js';
+import { NativeSmcEngine } from './nativeSmcEngine.js';
 import { OrderFlowEngine, type DepthLevel } from './orderFlowEngine.js';
 import { SentimentHarvester } from './sentimentHarvester.js';
 import { LiquidationEngine } from './liquidationEngine.js';
@@ -25,19 +31,29 @@ interface StoredPineAlert {
   receivedAt: number;
 }
 
+export interface ConfluenceEngineOptions {
+  mtfManager?: HierarchicalMtfManager;
+  smcEngine?: NativeSmcEngine;
+  sentimentHarvester?: SentimentHarvester;
+  orderFlowEngine?: OrderFlowEngine;
+  liquidationEngine?: LiquidationEngine;
+}
+
 /**
- * ConfluenceEngine — 6+1 Confluence Matrix Aggregator.
+ * ConfluenceEngine — Institutional Quantitative Confluence Engine & Autonomous Market Intelligence.
  *
- * Evaluates the 7 quantitative pillars:
- * 1. MTF_TREND (20%): EMA 9/21/50/200 stack + ADX
- * 2. MOMENTUM (15%): RSI 14 + MACD Histogram
- * 3. ORDER_FLOW (20%): L2 Depth & Tick Imbalance (>= 3.0x)
- * 4. CVD (15%): Delta absorption & divergence
- * 5. LIQ_MAGNET (10%): Proximity to liquidation pools (within 1.0x ATR)
- * 6. NLP_NEWS (10%): Crypto VADER sentiment (-1.0 to +1.0)
- * 7. PINE_SMC (10%): TradingView Webhook SMC Signal (15m TTL)
+ * Evaluates the 7 institutional pillars with Bayesian probabilistic weighting:
+ * 1. MACRO_REGIME (25%): 1h EMA200, SuperTrend (10, 3.0), and ADX (14) with Hard Directional Veto
+ * 2. NATIVE_SMC (25%): Algorithmic Fair Value Gaps (FVG), Order Blocks (OB), and Liquidity Sweeps
+ * 3. CVD_ABSORPTION (20%): Signed Z-score absorption divergence over 15-minute sliding sample
+ * 4. ORDER_FLOW_L2 (15%): Top-20 order book depth pressure and 60s aggressive taker flow
+ * 5. LIQ_CLUSTERS (7.5%): Projected leverage liquidation clusters (10x-100x) from Open Interest
+ * 6. MOMENTUM_RVOL (5%): Volatility-adjusted momentum (RSI 14 + MACD histogram)
+ * 7. SENTIMENT_MACRO (2.5%): Crypto VADER sentiment and macro funding
  */
 export class ConfluenceEngine {
+  public readonly mtfManager: HierarchicalMtfManager;
+  public readonly smcEngine: NativeSmcEngine;
   public readonly orderFlowEngine: OrderFlowEngine;
   public readonly sentimentHarvester: SentimentHarvester;
   public readonly liquidationEngine: LiquidationEngine;
@@ -45,16 +61,28 @@ export class ConfluenceEngine {
   private latestPineAlert: StoredPineAlert | null = null;
   private readonly alertNonceCache: Map<string, number> = new Map(); // alert_id -> timestamp (60s LRU)
   private latestSnapshot: ConfluenceSnapshot | null = null;
-  private consensusThreshold: number = 4;
+  private consensusThreshold: number = 75; // Default score threshold >= 75
 
-  constructor(sentimentHarvester?: SentimentHarvester) {
-    this.orderFlowEngine = new OrderFlowEngine();
-    this.sentimentHarvester = sentimentHarvester || new SentimentHarvester();
-    this.liquidationEngine = new LiquidationEngine();
+  constructor(options?: ConfluenceEngineOptions | SentimentHarvester) {
+    if (options && 'evaluate' in options && typeof (options as any).evaluate === 'function') {
+      // Legacy argument signature: new ConfluenceEngine(sentimentHarvester)
+      this.sentimentHarvester = options as SentimentHarvester;
+      this.mtfManager = new HierarchicalMtfManager();
+      this.smcEngine = new NativeSmcEngine();
+      this.orderFlowEngine = new OrderFlowEngine();
+      this.liquidationEngine = new LiquidationEngine();
+    } else {
+      const opts = (options as ConfluenceEngineOptions) || {};
+      this.mtfManager = opts.mtfManager || new HierarchicalMtfManager();
+      this.smcEngine = opts.smcEngine || new NativeSmcEngine();
+      this.sentimentHarvester = opts.sentimentHarvester || new SentimentHarvester();
+      this.orderFlowEngine = opts.orderFlowEngine || new OrderFlowEngine();
+      this.liquidationEngine = opts.liquidationEngine || new LiquidationEngine();
+    }
   }
 
   public setConsensusThreshold(threshold: number): void {
-    this.consensusThreshold = Math.max(1, Math.min(7, threshold));
+    this.consensusThreshold = threshold;
   }
 
   public getConsensusThreshold(): number {
@@ -91,47 +119,64 @@ export class ConfluenceEngine {
   }
 
   /**
-   * Evaluates all 7 confluence pillars for the given market state.
+   * Evaluates all 7 institutional confluence pillars for the given market state.
    */
   public evaluate(data: ConfluenceMarketData): ConfluenceSnapshot {
     const { symbol, currentPrice, indicators, cvd, recentHigh, recentLow } = data;
     const now = Date.now();
 
-    // 1. Pillar: MTF_TREND (20%)
-    const p1Trend = this.evaluateMtfTrend(currentPrice, indicators, now);
+    // 1. Pillar: MACRO_REGIME (25% Bayesian weight, hard directional veto)
+    const p1Macro = this.mtfManager.evaluatePillar(symbol, currentPrice, now);
+    const macroBias = this.mtfManager.getMacroBias(symbol, currentPrice, now);
+    const macroVetoActive = macroBias.macroVetoActive;
+    const macroRegime: MacroRegime = macroBias.regime;
 
-    // 2. Pillar: MOMENTUM (15%)
-    const p2Momentum = this.evaluateMomentum(indicators, now);
+    // 2. Pillar: NATIVE_SMC (25% Bayesian weight: FVG, Order Blocks, Liquidity Sweeps)
+    const p2Smc = this.smcEngine.evaluatePillar(symbol, currentPrice, now);
+    const activeFvgs: FairValueGap[] = this.smcEngine.getActiveFvgs(symbol);
+    const activeOrderBlocks: OrderBlock[] = this.smcEngine.getActiveOrderBlocks(symbol);
+    const latestSweep: LiquiditySweep | null = this.smcEngine.getLatestSweep(symbol);
 
-    // 3. Pillar: ORDER_FLOW (20%)
-    const p3OrderFlow = this.orderFlowEngine.evaluate(currentPrice);
+    // 3. Pillar: CVD_ABSORPTION (20% Bayesian weight: Signed Z-score divergence)
+    const p3Cvd = this.orderFlowEngine.evaluateAbsorption(currentPrice, now);
 
-    // 4. Pillar: CVD (15%)
-    const p4Cvd = this.evaluateCvd(cvd, now);
+    // 4. Pillar: ORDER_FLOW_L2 (15% Bayesian weight: 60s taker flow & Top-20 book imbalance)
+    const p4OrderFlow = this.orderFlowEngine.evaluateL2(currentPrice, now);
 
-    // 5. Pillar: LIQ_MAGNET (10%)
+    // 5. Pillar: LIQ_CLUSTERS (7.5% Bayesian weight: Leverage pools 10x-100x from Open Interest)
     const p5Liq = this.liquidationEngine.evaluate({
       currentPrice,
       atr14: indicators?.atr14 ?? null,
       recentHigh,
       recentLow,
       openInterestUsd: cvd?.openInterestUsd ?? null,
+      pillarId: 'LIQ_CLUSTERS',
     });
 
-    // 6. Pillar: NLP_NEWS (10%)
-    const p6Nlp = this.sentimentHarvester.evaluate();
+    // 6. Pillar: MOMENTUM_RVOL (5% Bayesian weight: Volatility-adjusted RSI & MACD momentum)
+    const p6Momentum = this.evaluateMomentumRvol(indicators, now);
 
-    // 7. Pillar: PINE_SMC (10%)
-    const p7Pine = this.evaluatePineSmc(symbol, now);
+    // 7. Pillar: SENTIMENT_MACRO (2.5% Bayesian weight: Funding rate & news sentiment)
+    const rawNlp = this.sentimentHarvester.evaluate();
+    const p7Sentiment: PillarEvaluation = {
+      id: 'SENTIMENT_MACRO',
+      title: 'Macro & Funding Sentiment',
+      score: rawNlp.score,
+      bias: rawNlp.bias,
+      valueText: rawNlp.valueText,
+      subText: rawNlp.subText,
+      confirmed: rawNlp.confirmed,
+      updatedAt: rawNlp.updatedAt || now,
+    };
 
     const pillars: PillarEvaluation[] = [
-      p1Trend,
-      p2Momentum,
-      p3OrderFlow,
-      p4Cvd,
+      p1Macro,
+      p2Smc,
+      p3Cvd,
+      p4OrderFlow,
       p5Liq,
-      p6Nlp,
-      p7Pine,
+      p6Momentum,
+      p7Sentiment,
     ];
 
     // Compute consensus counts
@@ -149,19 +194,12 @@ export class ConfluenceEngine {
       }
     }
 
-    const { compositeScore, bias: mathBias, recommendedAction: rawAction } =
-      calculateCompositeConfluenceScore(pillars);
+    const { compositeScore, bias: mathBias, recommendedAction } =
+      calculateCompositeConfluenceScore(pillars, macroVetoActive);
 
-    const maxConfirming = Math.max(bullishCount, bearishCount);
-    const consensusMet = maxConfirming >= this.consensusThreshold;
-    const consensusBias = consensusMet
-      ? (bullishCount >= this.consensusThreshold ? 'BULLISH' : 'BEARISH')
-      : 'NEUTRAL';
-
-    let recommendedAction = rawAction;
-    if (consensusMet && recommendedAction === 'GÖZLƏ') {
-      recommendedAction = consensusBias === 'BULLISH' ? 'BUY' : 'SELL';
-    }
+    // Institutional rule: consensusMet = compositeScore >= 75 && !macroVetoActive
+    const consensusMet = compositeScore >= 75 && !macroVetoActive;
+    const consensusBias = consensusMet ? mathBias : 'NEUTRAL';
 
     const snapshot: ConfluenceSnapshot = {
       symbol: symbol.toUpperCase(),
@@ -174,6 +212,11 @@ export class ConfluenceEngine {
       threshold: this.consensusThreshold,
       compositeScore,
       recommendedAction,
+      macroVetoActive,
+      macroRegime,
+      activeFvgs,
+      activeOrderBlocks,
+      latestSweep,
     };
 
     this.latestSnapshot = snapshot;
@@ -194,80 +237,20 @@ export class ConfluenceEngine {
 
   public reset(symbol?: string): void {
     this.orderFlowEngine.reset();
+    this.mtfManager.reset(symbol);
+    this.smcEngine.reset(symbol);
     this.latestPineAlert = null;
     this.alertNonceCache.clear();
     this.latestSnapshot = null;
   }
 
-  // --- Private Pillar Evaluators ---
+  // --- Private Evaluators ---
 
-  private evaluateMtfTrend(
-    price: number,
-    ind: TechnicalSummary | null,
-    now: number
-  ): PillarEvaluation {
-    if (!ind || price <= 0 || !ind.ema200 || !ind.ema9 || !ind.ema21) {
-      return {
-        id: 'MTF_TREND',
-        title: 'MTF Trend Stack',
-        score: 50,
-        bias: 'NEUTRAL',
-        valueText: 'Neutral Stack',
-        subText: 'Awaiting 200-period candle history',
-        confirmed: false,
-        updatedAt: now,
-      };
-    }
-
-    const adx = ind.adx14?.adx ?? 0;
-    const isBullish = price > ind.ema200 && ind.ema9 > ind.ema21 && adx > 22;
-    const isBearish = price < ind.ema200 && ind.ema9 < ind.ema21 && adx > 22;
-
-    if (isBullish) {
-      const score = Math.min(100, Math.round(75 + Math.min(25, (adx - 22) * 2)));
-      return {
-        id: 'MTF_TREND',
-        title: 'MTF Trend Stack',
-        score,
-        bias: 'BULLISH',
-        valueText: `Bullish Stack (ADX ${adx.toFixed(1)})`,
-        subText: `Price > EMA200 ($${ind.ema200.toFixed(2)}) & EMA9 > 21`,
-        confirmed: true,
-        updatedAt: now,
-      };
-    }
-
-    if (isBearish) {
-      const score = Math.min(100, Math.round(75 + Math.min(25, (adx - 22) * 2)));
-      return {
-        id: 'MTF_TREND',
-        title: 'MTF Trend Stack',
-        score,
-        bias: 'BEARISH',
-        valueText: `Bearish Stack (ADX ${adx.toFixed(1)})`,
-        subText: `Price < EMA200 ($${ind.ema200.toFixed(2)}) & EMA9 < 21`,
-        confirmed: true,
-        updatedAt: now,
-      };
-    }
-
-    return {
-      id: 'MTF_TREND',
-      title: 'MTF Trend Stack',
-      score: 50,
-      bias: 'NEUTRAL',
-      valueText: `Neutral (${adx > 22 ? 'Trend Clashing' : 'Range Bound'})`,
-      subText: `ADX: ${adx.toFixed(1)} | EMA9: $${ind.ema9.toFixed(2)}`,
-      confirmed: false,
-      updatedAt: now,
-    };
-  }
-
-  private evaluateMomentum(ind: TechnicalSummary | null, now: number): PillarEvaluation {
+  private evaluateMomentumRvol(ind: TechnicalSummary | null, now: number): PillarEvaluation {
     if (!ind || ind.rsi14 === null || ind.macd === null) {
       return {
-        id: 'MOMENTUM',
-        title: 'Momentum & Volatility',
+        id: 'MOMENTUM_RVOL',
+        title: 'Momentum & RVOL',
         score: 50,
         bias: 'NEUTRAL',
         valueText: 'Neutral RSI/MACD',
@@ -280,18 +263,19 @@ export class ConfluenceEngine {
     const rsi = ind.rsi14;
     const hist = ind.macd.histogram;
 
-    const isBullish = rsi >= 45 && rsi <= 65 && hist > 0;
-    const isBearish = rsi >= 35 && rsi <= 55 && hist < 0;
+    // Institutional momentum trend continuation (RSI >= 50 or expansion above 65 with positive histogram)
+    const isBullish = (rsi >= 50 && hist > 0) || (rsi > 65 && hist > 0);
+    const isBearish = (rsi <= 50 && hist < 0) || (rsi < 35 && hist < 0);
 
     if (isBullish) {
       const score = Math.min(100, Math.round(75 + Math.min(25, Math.abs(hist) * 10)));
       return {
-        id: 'MOMENTUM',
-        title: 'Momentum & Volatility',
+        id: 'MOMENTUM_RVOL',
+        title: 'Momentum & RVOL',
         score,
         bias: 'BULLISH',
         valueText: `Bullish Impulse (RSI ${rsi.toFixed(1)})`,
-        subText: `RSI in sweet zone (45-65) & MACD Hist +${hist.toFixed(2)}`,
+        subText: `RSI >= 50 & MACD Hist +${hist.toFixed(2)}`,
         confirmed: true,
         updatedAt: now,
       };
@@ -300,144 +284,26 @@ export class ConfluenceEngine {
     if (isBearish) {
       const score = Math.min(100, Math.round(75 + Math.min(25, Math.abs(hist) * 10)));
       return {
-        id: 'MOMENTUM',
-        title: 'Momentum & Volatility',
+        id: 'MOMENTUM_RVOL',
+        title: 'Momentum & RVOL',
         score,
         bias: 'BEARISH',
         valueText: `Bearish Impulse (RSI ${rsi.toFixed(1)})`,
-        subText: `RSI in sweet zone (35-55) & MACD Hist ${hist.toFixed(2)}`,
+        subText: `RSI <= 50 & MACD Hist ${hist.toFixed(2)}`,
         confirmed: true,
         updatedAt: now,
       };
     }
 
     return {
-      id: 'MOMENTUM',
-      title: 'Momentum & Volatility',
+      id: 'MOMENTUM_RVOL',
+      title: 'Momentum & RVOL',
       score: 50,
       bias: 'NEUTRAL',
       valueText: `RSI ${rsi.toFixed(1)} / Hist ${hist >= 0 ? '+' : ''}${hist.toFixed(2)}`,
-      subText: rsi > 65 ? 'Overbought warning' : rsi < 35 ? 'Oversold warning' : 'Flat momentum',
+      subText: 'Equilibrium momentum',
       confirmed: false,
       updatedAt: now,
-    };
-  }
-
-  private evaluateCvd(cvd: CvdSnapshot | null, now: number): PillarEvaluation {
-    if (!cvd) {
-      return {
-        id: 'CVD',
-        title: 'CVD Volume Delta',
-        score: 50,
-        bias: 'NEUTRAL',
-        valueText: 'No CVD Stream',
-        subText: 'Awaiting aggTrade events',
-        confirmed: false,
-        updatedAt: now,
-      };
-    }
-
-    const { delta, cvd: cumDelta } = cvd;
-
-    // Positive delta accumulation -> Bullish absorption / buying
-    if (delta > 0 && cumDelta > 0) {
-      return {
-        id: 'CVD',
-        title: 'CVD Volume Delta',
-        score: 75,
-        bias: 'BULLISH',
-        valueText: `Bullish Delta (+${delta.toFixed(1)})`,
-        subText: `Cumulative CVD: +${cumDelta.toFixed(1)} (Aggressive Buyers)`,
-        confirmed: true,
-        updatedAt: cvd.timestamp || now,
-      };
-    }
-
-    // Negative delta accumulation -> Bearish fakeout / selling
-    if (delta < 0 && cumDelta < 0) {
-      return {
-        id: 'CVD',
-        title: 'CVD Volume Delta',
-        score: 75,
-        bias: 'BEARISH',
-        valueText: `Bearish Delta (${delta.toFixed(1)})`,
-        subText: `Cumulative CVD: ${cumDelta.toFixed(1)} (Aggressive Sellers)`,
-        confirmed: true,
-        updatedAt: cvd.timestamp || now,
-      };
-    }
-
-    return {
-      id: 'CVD',
-      title: 'CVD Volume Delta',
-      score: 50,
-      bias: 'NEUTRAL',
-      valueText: `Convergent (Delta ${delta >= 0 ? '+' : ''}${delta.toFixed(1)})`,
-      subText: `Total CVD: ${cumDelta.toFixed(1)}`,
-      confirmed: false,
-      updatedAt: cvd.timestamp || now,
-    };
-  }
-
-  private evaluatePineSmc(symbol: string, now: number): PillarEvaluation {
-    if (!this.latestPineAlert) {
-      return {
-        id: 'PINE_SMC',
-        title: 'TradingView Pine SMC',
-        score: 50,
-        bias: 'NEUTRAL',
-        valueText: 'No Active Signal',
-        subText: 'Awaiting TradingView webhook alert',
-        confirmed: false,
-        updatedAt: now,
-      };
-    }
-
-    const { payload, receivedAt } = this.latestPineAlert;
-    const ageMs = now - receivedAt;
-    const ttlMs = 15 * 60 * 1000; // 15-minute TTL
-
-    // Signal expired after 15m
-    if (ageMs > ttlMs) {
-      this.latestPineAlert = null;
-      return {
-        id: 'PINE_SMC',
-        title: 'TradingView Pine SMC',
-        score: 50,
-        bias: 'NEUTRAL',
-        valueText: 'Signal Expired',
-        subText: 'Prior signal decayed after 15 minutes',
-        confirmed: false,
-        updatedAt: now,
-      };
-    }
-
-    // Check symbol match if applicable
-    if (payload.symbol && payload.symbol.toUpperCase() !== symbol.toUpperCase()) {
-      return {
-        id: 'PINE_SMC',
-        title: 'TradingView Pine SMC',
-        score: 50,
-        bias: 'NEUTRAL',
-        valueText: 'Other Symbol Alert',
-        subText: `Alert was for ${payload.symbol.toUpperCase()}`,
-        confirmed: false,
-        updatedAt: receivedAt,
-      };
-    }
-
-    const isBuy = payload.side === 'BUY';
-    const ageMinutes = Math.max(0, Math.floor(ageMs / 60000));
-
-    return {
-      id: 'PINE_SMC',
-      title: 'TradingView Pine SMC',
-      score: 85,
-      bias: isBuy ? 'BULLISH' : 'BEARISH',
-      valueText: `SMC ${payload.side} @ $${payload.entryPrice.toFixed(2)}`,
-      subText: `TP: $${payload.tp1} | SL: $${payload.stopLoss} (${ageMinutes}m ago)`,
-      confirmed: true,
-      updatedAt: receivedAt,
     };
   }
 

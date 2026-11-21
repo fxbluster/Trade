@@ -291,6 +291,116 @@ export function calculateVolumeSMA(candles: KlineCandle[], period: number = 20):
 }
 
 /**
+ * SuperTrend Indicator (period, multiplier)
+ * Uses Wilder's smoothed ATR and trailing upper/lower bands.
+ */
+export function calculateSuperTrend(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period: number = 10,
+  multiplier: number = 3.0
+): { supertrend: number[]; direction: ('BULLISH' | 'BEARISH')[] } {
+  if (
+    !highs ||
+    !lows ||
+    !closes ||
+    highs.length === 0 ||
+    highs.length !== lows.length ||
+    highs.length !== closes.length ||
+    period <= 0
+  ) {
+    return { supertrend: [], direction: [] };
+  }
+
+  const n = closes.length;
+  const trArr: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const hl = highs[i]! - lows[i]!;
+    if (i === 0) {
+      trArr[0] = hl;
+    } else {
+      const hc = Math.abs(highs[i]! - closes[i - 1]!);
+      const lc = Math.abs(lows[i]! - closes[i - 1]!);
+      trArr[i] = Math.max(hl, hc, lc);
+    }
+  }
+
+  // Calculate ATR series with Wilder's Smoothing
+  const atrArr: number[] = new Array(n);
+  let trSum = 0;
+  for (let i = 0; i < n; i++) {
+    if (i < period) {
+      trSum += trArr[i]!;
+      atrArr[i] = trSum / (i + 1);
+    } else {
+      atrArr[i] = (atrArr[i - 1]! * (period - 1) + trArr[i]!) / period;
+    }
+  }
+
+  const supertrend: number[] = new Array(n);
+  const direction: ('BULLISH' | 'BEARISH')[] = new Array(n);
+
+  let prevUpper = 0;
+  let prevLower = 0;
+
+  for (let i = 0; i < n; i++) {
+    const hl2 = (highs[i]! + lows[i]!) / 2;
+    const basicUpper = hl2 + multiplier * atrArr[i]!;
+    const basicLower = hl2 - multiplier * atrArr[i]!;
+
+    let finalUpper = basicUpper;
+    let finalLower = basicLower;
+
+    if (i > 0) {
+      finalUpper =
+        basicUpper < prevUpper || closes[i - 1]! > prevUpper
+          ? basicUpper
+          : prevUpper;
+
+      finalLower =
+        basicLower > prevLower || closes[i - 1]! < prevLower
+          ? basicLower
+          : prevLower;
+    }
+
+    let dir: 'BULLISH' | 'BEARISH';
+    let st: number;
+
+    if (i === 0) {
+      dir = closes[0]! >= basicLower ? 'BULLISH' : 'BEARISH';
+      st = dir === 'BULLISH' ? finalLower : finalUpper;
+    } else {
+      const prevDir = direction[i - 1]!;
+      if (prevDir === 'BULLISH') {
+        if (closes[i]! < finalLower) {
+          dir = 'BEARISH';
+          st = finalUpper;
+        } else {
+          dir = 'BULLISH';
+          st = finalLower;
+        }
+      } else {
+        if (closes[i]! > finalUpper) {
+          dir = 'BULLISH';
+          st = finalLower;
+        } else {
+          dir = 'BEARISH';
+          st = finalUpper;
+        }
+      }
+    }
+
+    supertrend[i] = st;
+    direction[i] = dir;
+    prevUpper = finalUpper;
+    prevLower = finalLower;
+  }
+
+  return { supertrend, direction };
+}
+
+/**
  * Master Technical Indicators Suite
  * Evaluates all indicators from the candle history with tickSize precision formatting.
  * Missing or insufficient data safely returns null per indicator (Zero Mock Policy).

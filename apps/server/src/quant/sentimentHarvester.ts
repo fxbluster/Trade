@@ -171,8 +171,8 @@ export class SentimentHarvester {
   constructor(cryptoPanicApiKey: string = '') {
     this.cryptoPanicApiKey = cryptoPanicApiKey;
     this.cachedEvaluation = {
-      id: 'NLP_NEWS',
-      title: 'NLP News Sentiment',
+      id: 'SENTIMENT_MACRO',
+      title: 'Sentiment & Funding Rate',
       score: 50,
       bias: 'NEUTRAL',
       valueText: 'Neutral (0.00)',
@@ -195,8 +195,8 @@ export class SentimentHarvester {
   public setHeadlines(headlines: string[]): void {
     if (!headlines || headlines.length === 0) {
       this.cachedEvaluation = {
-        id: 'NLP_NEWS',
-        title: 'NLP News Sentiment',
+        id: 'SENTIMENT_MACRO',
+        title: 'Sentiment & Funding Rate',
         score: 50,
         bias: 'NEUTRAL',
         valueText: 'Neutral (0.00)',
@@ -228,8 +228,8 @@ export class SentimentHarvester {
     const sampleHeadline = headlines[0].length > 40 ? `${headlines[0].slice(0, 37)}...` : headlines[0];
 
     this.cachedEvaluation = {
-      id: 'NLP_NEWS',
-      title: 'NLP News Sentiment',
+      id: 'SENTIMENT_MACRO',
+      title: 'Sentiment & Funding Rate',
       score,
       bias,
       valueText: `${bias === 'BULLISH' ? 'Bullish' : bias === 'BEARISH' ? 'Bearish' : 'Neutral'} (${polarity}${result.compound.toFixed(2)})`,

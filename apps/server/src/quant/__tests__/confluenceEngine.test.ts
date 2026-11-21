@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { LiquidationEngine } from '../liquidationEngine.js';
 import { ConfluenceEngine } from '../confluenceEngine.js';
-import type { TechnicalSummary, CvdSnapshot } from '@tradeos/shared';
+import type { TechnicalSummary, CvdSnapshot, KlineCandle } from '@tradeos/shared';
 
 describe('LiquidationEngine', () => {
   let engine: LiquidationEngine;
@@ -59,7 +59,7 @@ describe('LiquidationEngine', () => {
   });
 });
 
-describe('ConfluenceEngine (6+1 Confluence Matrix Aggregator)', () => {
+describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
   let engine: ConfluenceEngine;
 
   beforeEach(() => {
@@ -93,38 +93,47 @@ describe('ConfluenceEngine (6+1 Confluence Matrix Aggregator)', () => {
     ...overrides,
   });
 
-  it('evaluates MTF_TREND correctly based on EMA stack and ADX', () => {
-    // Bullish stack: Price > EMA200 & EMA9 > EMA21 & ADX > 22
-    const bullData = {
+  it('evaluates MACRO_REGIME correctly based on MTF Manager state and timeout fail-closed', () => {
+    // When no 1h candle stream exists, fail-closes to DEGRADED and macroVetoActive = true
+    const snapNoData = engine.evaluate({
       symbol: 'SOLUSDT',
       currentPrice: 108,
       indicators: createMockIndicators(),
       cvd: null,
-    };
-    const snapBull = engine.evaluate(bullData);
-    const p1 = snapBull.pillars.find(p => p.id === 'MTF_TREND')!;
-    expect(p1.bias).toBe('BULLISH');
-    expect(p1.confirmed).toBe(true);
+    });
+    const p1NoData = snapNoData.pillars.find((p) => p.id === 'MACRO_REGIME')!;
+    expect(p1NoData.bias).toBe('NEUTRAL');
+    expect(snapNoData.macroRegime).toBe('DEGRADED');
+    expect(snapNoData.macroVetoActive).toBe(true);
 
-    // Bearish stack: Price < EMA200 & EMA9 < EMA21 & ADX > 22
-    const bearData = {
+    // Feed 1h candles into mtfManager (Price > EMA200 with strong ADX)
+    const candles1h: KlineCandle[] = [];
+    for (let i = 0; i < 200; i++) {
+      candles1h.push({
+        time: 1000 + i * 3600,
+        open: 80 + i * 0.1,
+        high: 82 + i * 0.1,
+        low: 79 + i * 0.1,
+        close: 81 + i * 0.1,
+        volume: 1000,
+      });
+    }
+    engine.mtfManager.setInitialCandles('SOLUSDT', '1h', candles1h);
+
+    const snapBull = engine.evaluate({
       symbol: 'SOLUSDT',
-      currentPrice: 85,
-      indicators: createMockIndicators({
-        ema9: 86,
-        ema21: 89,
-        ema200: 100,
-        adx14: { adx: 30, pdi: 10, mdi: 28 },
-      }),
+      currentPrice: 108,
+      indicators: createMockIndicators(),
       cvd: null,
-    };
-    const snapBear = engine.evaluate(bearData);
-    const p1Bear = snapBear.pillars.find(p => p.id === 'MTF_TREND')!;
-    expect(p1Bear.bias).toBe('BEARISH');
-    expect(p1Bear.confirmed).toBe(true);
+    });
+    const p1Bull = snapBull.pillars.find((p) => p.id === 'MACRO_REGIME')!;
+    expect(snapBull.macroRegime).toBe('MACRO_BULLISH');
+    expect(snapBull.macroVetoActive).toBe(false);
+    expect(p1Bull.bias).toBe('BULLISH');
+    expect(p1Bull.confirmed).toBe(true);
   });
 
-  it('evaluates MOMENTUM correctly based on RSI and MACD Histogram', () => {
+  it('evaluates MOMENTUM_RVOL correctly based on RSI and MACD Histogram', () => {
     // Sweet spot RSI 55 + positive MACD hist -> Bullish
     const bullData = {
       symbol: 'SOLUSDT',
@@ -133,7 +142,7 @@ describe('ConfluenceEngine (6+1 Confluence Matrix Aggregator)', () => {
       cvd: null,
     };
     const snapBull = engine.evaluate(bullData);
-    const p2 = snapBull.pillars.find(p => p.id === 'MOMENTUM')!;
+    const p2 = snapBull.pillars.find((p) => p.id === 'MOMENTUM_RVOL')!;
     expect(p2.bias).toBe('BULLISH');
     expect(p2.confirmed).toBe(true);
 
@@ -145,13 +154,13 @@ describe('ConfluenceEngine (6+1 Confluence Matrix Aggregator)', () => {
       cvd: null,
     };
     const snapBear = engine.evaluate(bearData);
-    const p2Bear = snapBear.pillars.find(p => p.id === 'MOMENTUM')!;
+    const p2Bear = snapBear.pillars.find((p) => p.id === 'MOMENTUM_RVOL')!;
     expect(p2Bear.bias).toBe('BEARISH');
     expect(p2Bear.confirmed).toBe(true);
   });
 
-  describe('TradingView Webhook SMC Signal Ingestion (Pillar 7)', () => {
-    it('ingests valid webhook alert and activates Pillar 7 (PINE_SMC)', () => {
+  describe('TradingView Webhook Alert Ingestion Compatibility', () => {
+    it('ingests valid webhook alert and accepts payload', () => {
       const res = engine.ingestWebhookAlert({
         secret: 'test-secret',
         alert_id: 'alert-001',
@@ -165,19 +174,6 @@ describe('ConfluenceEngine (6+1 Confluence Matrix Aggregator)', () => {
       });
 
       expect(res.accepted).toBe(true);
-
-      const snap = engine.evaluate({
-        symbol: 'SOLUSDT',
-        currentPrice: 141.0,
-        indicators: null,
-        cvd: null,
-      });
-
-      const p7 = snap.pillars.find(p => p.id === 'PINE_SMC')!;
-      expect(p7.bias).toBe('BULLISH');
-      expect(p7.confirmed).toBe(true);
-      expect(p7.score).toBe(85);
-      expect(p7.valueText).toContain('SMC BUY @ $140.50');
     });
 
     it('enforces 60-second LRU nonce deduplication rejecting duplicate alert_id', () => {
@@ -203,53 +199,67 @@ describe('ConfluenceEngine (6+1 Confluence Matrix Aggregator)', () => {
     });
   });
 
-  describe('Consensus Evaluation (Threshold >= 4 of 7)', () => {
-    it('triggers consensusMet=true when 4 pillars confirm BULLISH simultaneously', () => {
-      // 1. MTF_TREND: Bullish
+  describe('Consensus Evaluation (Institutional Threshold >= 75% & !macroVetoActive)', () => {
+    it('triggers consensusMet=true when compositeScore >= 75 and !macroVetoActive', () => {
+      // 1. MACRO_REGIME: Bullish (1h candles)
+      const candles1h: KlineCandle[] = [];
+      for (let i = 0; i < 200; i++) {
+        candles1h.push({
+          time: 1000 + i * 3600,
+          open: 80 + i * 0.1,
+          high: 82 + i * 0.1,
+          low: 79 + i * 0.1,
+          close: 81 + i * 0.1,
+          volume: 1000,
+        });
+      }
+      engine.mtfManager.setInitialCandles('SOLUSDT', '1h', candles1h);
+
+      // 2. NATIVE_SMC: Bullish FVG
+      engine.smcEngine.onCandleClosed('SOLUSDT', '15m', [
+        { time: 1000, open: 100, high: 104, low: 99, close: 103, volume: 100 },
+        { time: 1900, open: 103, high: 112, low: 103, close: 111, volume: 500 },
+        { time: 2800, open: 111, high: 116, low: 106, close: 115, volume: 300 },
+      ]);
+
+      // 3. CVD_ABSORPTION & ORDER_FLOW_L2: Strong Bullish
+      const now = Date.now();
+      // Provide varying 15-minute delta sample so stdDev > 0
+      for (let m = 15; m >= 1; m--) {
+        engine.orderFlowEngine.processTrade(m * 10, false, now - m * 60_000, 105);
+      }
+      // Aggressive seller absorption: large market sells fail to push price down (price rises 105 -> 105.5)
+      engine.orderFlowEngine.processTrade(600, true, now - 2000, 105);
+      engine.orderFlowEngine.processTrade(600, true, now - 1000, 105.5);
+      // Heavy Level 2 bid depth pressure
+      engine.orderFlowEngine.updateDepth([[105.5, 5000]], [[106, 50]]);
+
+      // 4. SENTIMENT_MACRO: Bullish headlines
+      engine.sentimentHarvester.setHeadlines([
+        'Massive institutional inflows accelerate across all major crypto spot and futures markets',
+      ]);
+
       const indicators = createMockIndicators({
-        ema9: 105,
-        ema21: 102,
-        ema200: 90,
-        adx14: { adx: 30, pdi: 25, mdi: 10 },
-      });
-
-      // 2. MOMENTUM: Bullish
-      // (rsi14=55, hist=0.5 already inside createMockIndicators)
-
-      // 3. ORDER_FLOW: Bullish (3.5x bid imbalance)
-      engine.orderFlowEngine.updateDepth([[108, 350]], [[109, 100]]);
-
-      // 4. CVD: Bullish
-      const cvd = createMockCvd({ cvd: 10000, delta: 5000 });
-
-      // 5. PineScript Webhook: Bullish SMC Long (Spec CUJ 1)
-      engine.ingestWebhookAlert({
-        secret: 'test-secret',
-        symbol: 'SOLUSDT',
-        side: 'BUY',
-        entryPrice: 108,
-        stopLoss: 104,
-        tp1: 112,
-        tp2: 116,
-        time: Date.now(),
+        rsi14: 58,
+        macd: { macd: 1.5, signal: 1.0, histogram: 0.8 },
       });
 
       const snap = engine.evaluate({
         symbol: 'SOLUSDT',
-        currentPrice: 108,
+        currentPrice: 105.5,
         indicators,
-        cvd,
+        cvd: createMockCvd({ cvd: 10000, delta: 5000 }),
       });
 
-      expect(snap.bullishCount).toBeGreaterThanOrEqual(4);
+      expect(snap.macroVetoActive).toBe(false);
+      expect(snap.compositeScore).toBeGreaterThanOrEqual(75);
       expect(snap.consensusMet).toBe(true);
       expect(snap.consensusBias).toBe('BULLISH');
       expect(['BUY', 'STRONG_BUY']).toContain(snap.recommendedAction);
-      expect(snap.compositeScore).toBeGreaterThanOrEqual(65);
     });
 
-    it('remains consensusMet=false when only 2-3 pillars confirm', () => {
-      // Only Trend & Momentum Bullish, Order Flow balanced, CVD null, Liq null, News neutral, Pine neutral
+    it('remains consensusMet=false and recommendedAction=WAIT when Macro Veto is active', () => {
+      // No 1h candles -> DEGRADED -> macroVetoActive = true
       const snap = engine.evaluate({
         symbol: 'SOLUSDT',
         currentPrice: 108,
@@ -257,40 +267,56 @@ describe('ConfluenceEngine (6+1 Confluence Matrix Aggregator)', () => {
         cvd: null,
       });
 
-      expect(snap.bullishCount).toBeLessThan(4);
+      expect(snap.macroVetoActive).toBe(true);
       expect(snap.consensusMet).toBe(false);
       expect(snap.consensusBias).toBe('NEUTRAL');
-      expect(snap.recommendedAction).toBe('GÖZLƏ');
+      expect(snap.recommendedAction).toBe('WAIT');
     });
 
-    it('triggers consensusMet=true when 4 pillars confirm BEARISH', () => {
-      // 1. MTF_TREND: Bearish
+    it('evaluates directional bias for BEARISH setups while respecting Macro Veto', () => {
+      // 1. MACRO_REGIME: Bearish (1h candles trending down)
+      const candles1h: KlineCandle[] = [];
+      for (let i = 0; i < 200; i++) {
+        candles1h.push({
+          time: 1000 + i * 3600,
+          open: 120 - i * 0.1,
+          high: 121 - i * 0.1,
+          low: 118 - i * 0.1,
+          close: 119 - i * 0.1,
+          volume: 1000,
+        });
+      }
+      engine.mtfManager.setInitialCandles('SOLUSDT', '1h', candles1h);
+
+      // 2. NATIVE_SMC: Bearish FVG
+      engine.smcEngine.onCandleClosed('SOLUSDT', '15m', [
+        { time: 1000, open: 85, high: 86, low: 80, close: 81, volume: 100 },
+        { time: 1900, open: 81, high: 81, low: 70, close: 71, volume: 500 },
+        { time: 2800, open: 71, high: 75, low: 68, close: 69, volume: 300 },
+      ]);
+
+      // 3. ORDER_FLOW_L2: 10.0x ask dominance
+      engine.orderFlowEngine.updateDepth([[72, 50]], [[73, 500]]);
+
       const indicators = createMockIndicators({
-        ema9: 80,
-        ema21: 85,
+        ema9: 70,
+        ema21: 75,
         ema200: 100,
-        adx14: { adx: 28, pdi: 10, mdi: 25 },
-        rsi14: 40, // 2. MOMENTUM: Bearish
-        macd: { macd: -1.0, signal: -0.5, histogram: -0.5 },
+        adx14: { adx: 30, pdi: 10, mdi: 28 },
+        rsi14: 35,
+        macd: { macd: -1.5, signal: -1.0, histogram: -0.8 },
       });
-
-      // 3. ORDER_FLOW: Bearish (4.0x ask dominance)
-      engine.orderFlowEngine.updateDepth([[75, 100]], [[76, 400]]);
-
-      // 4. CVD: Bearish
-      const cvd = createMockCvd({ cvd: -10000, delta: -5000 });
 
       const snap = engine.evaluate({
         symbol: 'SOLUSDT',
-        currentPrice: 75,
+        currentPrice: 72,
         indicators,
-        cvd,
+        cvd: createMockCvd({ cvd: -10000, delta: -5000 }),
       });
 
-      expect(snap.bearishCount).toBeGreaterThanOrEqual(4);
-      expect(snap.consensusMet).toBe(true);
-      expect(snap.consensusBias).toBe('BEARISH');
-      expect(['SELL', 'STRONG_SELL']).toContain(snap.recommendedAction);
+      expect(snap.macroRegime).toBe('MACRO_BEARISH');
+      expect(snap.macroVetoActive).toBe(true);
+      expect(snap.recommendedAction).toBe('WAIT'); // Blocked by Macro Veto
     });
   });
 });

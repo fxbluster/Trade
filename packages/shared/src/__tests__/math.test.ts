@@ -5,8 +5,10 @@ import {
   formatByTickSize,
   calculateLiquidationPrice,
   computeOrderPreview,
+  calculateCompositeConfluenceScore,
+  CONFLUENCE_WEIGHTS,
 } from '../math.js';
-import type { OpenOrderRequest } from '../contracts.js';
+import type { ConfluencePillarId, OpenOrderRequest, PillarEvaluation } from '../contracts.js';
 
 describe('TradeOS v2 — Math Engine (@tradeos/shared/math)', () => {
   describe('getPrecision', () => {
@@ -396,6 +398,149 @@ describe('TradeOS v2 — Math Engine (@tradeos/shared/math)', () => {
         const zeroPrice = computeOrderPreview(baseLongReq, 0, 0.01, 0.01);
         expect(zeroPrice.quantity).toBe(0);
         expect(zeroPrice.notionalUsd).toBe(0);
+      });
+    });
+  });
+
+  describe('calculateCompositeConfluenceScore (Bayesian 7-Pillar Confluence & Macro Veto)', () => {
+    function makePillar(
+      id: ConfluencePillarId,
+      bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL',
+      score: number = 100
+    ): PillarEvaluation {
+      return {
+        id,
+        title: id,
+        score,
+        bias,
+        valueText: `${id}:${score}`,
+        subText: 'test',
+        confirmed: score >= 60,
+        updatedAt: Date.now(),
+      };
+    }
+
+    const allPillars: ConfluencePillarId[] = [
+      'MACRO_REGIME',
+      'NATIVE_SMC',
+      'CVD_ABSORPTION',
+      'ORDER_FLOW_L2',
+      'LIQ_CLUSTERS',
+      'MOMENTUM_RVOL',
+      'SENTIMENT_MACRO',
+    ];
+
+    it('verifies 100% total weight normalization across all 7 pillars', () => {
+      const sum = Object.values(CONFLUENCE_WEIGHTS).reduce((a, b) => a + b, 0);
+      expect(sum).toBeCloseTo(1.0, 5);
+
+      // Verify exact individual weights
+      expect(CONFLUENCE_WEIGHTS.MACRO_REGIME).toBe(0.25);
+      expect(CONFLUENCE_WEIGHTS.NATIVE_SMC).toBe(0.25);
+      expect(CONFLUENCE_WEIGHTS.CVD_ABSORPTION).toBe(0.20);
+      expect(CONFLUENCE_WEIGHTS.ORDER_FLOW_L2).toBe(0.15);
+      expect(CONFLUENCE_WEIGHTS.LIQ_CLUSTERS).toBe(0.075);
+      expect(CONFLUENCE_WEIGHTS.MOMENTUM_RVOL).toBe(0.05);
+      expect(CONFLUENCE_WEIGHTS.SENTIMENT_MACRO).toBe(0.025);
+    });
+
+    it('verifies neutral 50 baseline score preventing consensus starvation', () => {
+      // 1. When all pillars are neutral, score is baseline 50, bias is NEUTRAL, action is WAIT
+      const allNeutral = allPillars.map((id) => makePillar(id, 'NEUTRAL', 0));
+      const neutralRes = calculateCompositeConfluenceScore(allNeutral);
+      expect(neutralRes.compositeScore).toBe(50);
+      expect(neutralRes.bias).toBe('NEUTRAL');
+      expect(neutralRes.recommendedAction).toBe('WAIT');
+
+      // 2. Consensus starvation prevention:
+      // 4 Tier 1/2 pillars Bullish at 80 (sum = 20 + 20 + 16 + 12 = 68)
+      // 3 Tier 3 tactical pillars Neutral (0.15 weight * 50 = 7.5 baseline)
+      // Total = 68 + 7.5 = 75.5 -> 76 (STRONG_BUY)
+      const mixedPillars: PillarEvaluation[] = [
+        makePillar('MACRO_REGIME', 'BULLISH', 80),
+        makePillar('NATIVE_SMC', 'BULLISH', 80),
+        makePillar('CVD_ABSORPTION', 'BULLISH', 80),
+        makePillar('ORDER_FLOW_L2', 'BULLISH', 80),
+        makePillar('LIQ_CLUSTERS', 'NEUTRAL', 0),
+        makePillar('MOMENTUM_RVOL', 'NEUTRAL', 0),
+        makePillar('SENTIMENT_MACRO', 'NEUTRAL', 0),
+      ];
+      const mixedRes = calculateCompositeConfluenceScore(mixedPillars);
+      expect(mixedRes.compositeScore).toBe(76);
+      expect(mixedRes.bias).toBe('BULLISH');
+      expect(mixedRes.recommendedAction).toBe('STRONG_BUY');
+    });
+
+    it('verifies macroVetoActive latch sets recommendedAction = WAIT while preserving compositeScore', () => {
+      const strongBuyPillars = allPillars.map((id) => makePillar(id, 'BULLISH', 90));
+
+      // Without veto: STRONG_BUY with natural score 90
+      const noVeto = calculateCompositeConfluenceScore(strongBuyPillars, false);
+      expect(noVeto.compositeScore).toBe(90);
+      expect(noVeto.bias).toBe('BULLISH');
+      expect(noVeto.recommendedAction).toBe('STRONG_BUY');
+
+      // With veto: latch to WAIT, natural compositeScore 90 strictly preserved
+      const vetoed = calculateCompositeConfluenceScore(strongBuyPillars, true);
+      expect(vetoed.compositeScore).toBe(90);
+      expect(vetoed.bias).toBe('BULLISH');
+      expect(vetoed.recommendedAction).toBe('WAIT');
+    });
+
+    it('verifies score thresholds: >= 75% STRONG_BUY / STRONG_SELL, 60-74% BUY / SELL, < 60% WAIT', () => {
+      // Exactly 75 Bullish -> STRONG_BUY
+      const p75Bull = allPillars.map((id) => makePillar(id, 'BULLISH', 75));
+      const res75Bull = calculateCompositeConfluenceScore(p75Bull);
+      expect(res75Bull.compositeScore).toBe(75);
+      expect(res75Bull.recommendedAction).toBe('STRONG_BUY');
+
+      // Exactly 74 Bullish -> BUY
+      const p74Bull = allPillars.map((id) => makePillar(id, 'BULLISH', 74));
+      const res74Bull = calculateCompositeConfluenceScore(p74Bull);
+      expect(res74Bull.compositeScore).toBe(74);
+      expect(res74Bull.recommendedAction).toBe('BUY');
+
+      // Exactly 60 Bullish -> BUY
+      const p60Bull = allPillars.map((id) => makePillar(id, 'BULLISH', 60));
+      const res60Bull = calculateCompositeConfluenceScore(p60Bull);
+      expect(res60Bull.compositeScore).toBe(60);
+      expect(res60Bull.recommendedAction).toBe('BUY');
+
+      // 59 Bullish (< 60) -> WAIT
+      const p59Bull = allPillars.map((id) => makePillar(id, 'BULLISH', 59));
+      const res59Bull = calculateCompositeConfluenceScore(p59Bull);
+      expect(res59Bull.compositeScore).toBe(59);
+      expect(res59Bull.recommendedAction).toBe('WAIT');
+
+      // Exactly 75 Bearish -> STRONG_SELL
+      const p75Bear = allPillars.map((id) => makePillar(id, 'BEARISH', 75));
+      const res75Bear = calculateCompositeConfluenceScore(p75Bear);
+      expect(res75Bear.compositeScore).toBe(75);
+      expect(res75Bear.recommendedAction).toBe('STRONG_SELL');
+
+      // Exactly 65 Bearish -> SELL
+      const p65Bear = allPillars.map((id) => makePillar(id, 'BEARISH', 65));
+      const res65Bear = calculateCompositeConfluenceScore(p65Bear);
+      expect(res65Bear.compositeScore).toBe(65);
+      expect(res65Bear.recommendedAction).toBe('SELL');
+
+      // 55 Bearish (< 60) -> WAIT
+      const p55Bear = allPillars.map((id) => makePillar(id, 'BEARISH', 55));
+      const res55Bear = calculateCompositeConfluenceScore(p55Bear);
+      expect(res55Bear.compositeScore).toBe(55);
+      expect(res55Bear.recommendedAction).toBe('WAIT');
+    });
+
+    it('safely handles empty or null input', () => {
+      expect(calculateCompositeConfluenceScore([])).toEqual({
+        compositeScore: 0,
+        bias: 'NEUTRAL',
+        recommendedAction: 'WAIT',
+      });
+      expect(calculateCompositeConfluenceScore(null as any)).toEqual({
+        compositeScore: 0,
+        bias: 'NEUTRAL',
+        recommendedAction: 'WAIT',
       });
     });
   });

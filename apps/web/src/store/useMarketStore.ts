@@ -15,6 +15,9 @@ import type {
   AutoPilotConfig,
   WebhookAlertPayload,
   ScannerItem,
+  FairValueGap,
+  OrderBlock,
+  LiquiditySweep,
 } from '@tradeos/shared';
 import type { WsStatus, TickData, AnalysisData, PositionEventData, AutoPilotStatusData } from '../lib/wsClient';
 import { apiClient } from '../lib/apiClient';
@@ -47,6 +50,12 @@ export interface MarketStoreState {
   pineSignals: WebhookAlertPayload[];
   cachedScannerItems: ScannerItem[];
 
+  // Native SMC & Institutional Slices
+  activeFvgs: FairValueGap[];
+  activeOrderBlocks: OrderBlock[];
+  latestSweep: LiquiditySweep | null;
+  showSmcOverlay: boolean;
+
   // Actions
   setSymbol: (symbol: string) => Promise<void>;
   setCandleInterval: (interval: '1m' | '5m' | '15m' | '1h') => Promise<void>;
@@ -68,6 +77,8 @@ export interface MarketStoreState {
   addPineSignal: (signal: WebhookAlertPayload) => void;
   refreshConfluence: () => Promise<void>;
   setCachedScannerItems: (items: ScannerItem[]) => void;
+  setShowSmcOverlay: (show: boolean) => void;
+  toggleShowSmcOverlay: () => void;
 }
 
 const defaultAccount: AccountInfo = {
@@ -130,10 +141,23 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   pineSignals: [],
   cachedScannerItems: [],
 
+  // Native SMC & Institutional Slices
+  activeFvgs: [],
+  activeOrderBlocks: [],
+  latestSweep: null,
+  showSmcOverlay: true,
+
   setSymbol: async (symbol: string) => {
     const sym = symbol.toUpperCase();
     if (get().symbol === sym) return;
-    set({ symbol: sym, klines: [], isLoadingKlines: true });
+    set({
+      symbol: sym,
+      klines: [],
+      activeFvgs: [],
+      activeOrderBlocks: [],
+      latestSweep: null,
+      isLoadingKlines: true,
+    });
     try {
       await apiClient.setSymbol(sym);
       await get().refreshKlines();
@@ -274,7 +298,12 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
   // Confluence & AutoPilot actions
   setConfluence: (confluence: ConfluenceSnapshot) => {
-    set({ confluence });
+    set({
+      confluence,
+      activeFvgs: confluence.activeFvgs ?? [],
+      activeOrderBlocks: confluence.activeOrderBlocks ?? [],
+      latestSweep: confluence.latestSweep ?? null,
+    });
   },
 
   setAutoPilotStatus: (data: AutoPilotStatusData) => {
@@ -287,6 +316,14 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
   toggleHidePineOverlay: () => {
     set((state) => ({ hidePineOverlay: !state.hidePineOverlay }));
+  },
+
+  setShowSmcOverlay: (show: boolean) => {
+    set({ showSmcOverlay: show });
+  },
+
+  toggleShowSmcOverlay: () => {
+    set((state) => ({ showSmcOverlay: !state.showSmcOverlay }));
   },
 
   addPineSignal: (signal: WebhookAlertPayload) => {

@@ -210,44 +210,52 @@ export function computeOrderPreview(
 }
 
 /**
- * Exact institutional weighting table for the 7 confluence pillars:
- * - MTF_TREND: 20%
- * - MOMENTUM: 15%
- * - ORDER_FLOW: 20%
- * - CVD: 15%
- * - LIQ_MAGNET: 10%
- * - NLP_NEWS: 10%
- * - PINE_SMC: 10%
+ * Exact 7-pillar Bayesian weighting matrix (sums to 1.0 / 100%):
+ * - MACRO_REGIME: 25% (Tier 1 - Structural, directional veto)
+ * - NATIVE_SMC: 25% (Tier 1 - Structural, FVG / OB / Sweeps)
+ * - CVD_ABSORPTION: 20% (Tier 2 - Flow, signed Z-score divergence)
+ * - ORDER_FLOW_L2: 15% (Tier 2 - Flow, 60s aggressive taker & top-20 book imbalance)
+ * - LIQ_CLUSTERS: 7.5% (Tier 3 - Tactical, OI delta & liquidation magnet)
+ * - MOMENTUM_RVOL: 5% (Tier 3 - Tactical, volatility-adjusted RVOL & momentum)
+ * - SENTIMENT_MACRO: 2.5% (Tier 3 - Tactical, funding rate & news sentiment)
  */
 export const CONFLUENCE_WEIGHTS: Record<ConfluencePillarId, number> = {
-  MTF_TREND: 0.20,
-  MOMENTUM: 0.15,
-  ORDER_FLOW: 0.20,
-  CVD: 0.15,
-  LIQ_MAGNET: 0.10,
-  NLP_NEWS: 0.10,
-  PINE_SMC: 0.10,
+  MACRO_REGIME: 0.25,
+  NATIVE_SMC: 0.25,
+  CVD_ABSORPTION: 0.20,
+  ORDER_FLOW_L2: 0.15,
+  LIQ_CLUSTERS: 0.075,
+  MOMENTUM_RVOL: 0.05,
+  SENTIMENT_MACRO: 0.025,
 };
 
 /**
- * Calculates 7-pillar composite confluence score, directional consensus bias,
- * and actionable recommendation according to the institutional weighting matrix.
+ * Calculates 7-pillar Bayesian composite confluence score, directional consensus bias,
+ * and actionable recommendation according to institutional quantitative desk standards.
  *
- * Threshold matrix:
- * - compositeScore >= 85: STRONG_BUY / STRONG_SELL
- * - compositeScore >= 65: BUY / SELL
- * - compositeScore < 65: GÖZLƏ
+ * Requirements:
+ * - 7-pillar Bayesian weighting: MACRO_REGIME: 0.25, NATIVE_SMC: 0.25, CVD_ABSORPTION: 0.20,
+ *   ORDER_FLOW_L2: 0.15, LIQ_CLUSTERS: 0.075, MOMENTUM_RVOL: 0.05, SENTIMENT_MACRO: 0.025.
+ * - Neutral pillars (bias === 'NEUTRAL') contribute baseline score of 50 to prevent consensus starvation.
+ * - Macro Veto logic: if macroVetoActive === true, recommendedAction = 'WAIT', preserving natural compositeScore.
+ * - Threshold matrix:
+ *   - compositeScore >= 75: STRONG_BUY / STRONG_SELL
+ *   - 60 <= compositeScore < 75: BUY / SELL
+ *   - compositeScore < 60: WAIT
  */
-export function calculateCompositeConfluenceScore(pillars: PillarEvaluation[]): {
+export function calculateCompositeConfluenceScore(
+  pillars: PillarEvaluation[],
+  macroVetoActive: boolean = false
+): {
   compositeScore: number;
   bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
-  recommendedAction: 'STRONG_BUY' | 'BUY' | 'GÖZLƏ' | 'SELL' | 'STRONG_SELL';
+  recommendedAction: 'STRONG_BUY' | 'BUY' | 'WAIT' | 'SELL' | 'STRONG_SELL';
 } {
   if (!pillars || pillars.length === 0) {
     return {
       compositeScore: 0,
       bias: 'NEUTRAL',
-      recommendedAction: 'GÖZLƏ',
+      recommendedAction: 'WAIT',
     };
   }
 
@@ -262,11 +270,15 @@ export function calculateCompositeConfluenceScore(pillars: PillarEvaluation[]): 
       bullishWeighted += weight * score;
     } else if (pillar.bias === 'BEARISH') {
       bearishWeighted += weight * score;
+    } else {
+      // Neutral pillars (bias === 'NEUTRAL') contribute baseline score of 50
+      bullishWeighted += weight * 50;
+      bearishWeighted += weight * 50;
     }
   }
 
-  const roundedBullish = Number(bullishWeighted.toFixed(2));
-  const roundedBearish = Number(bearishWeighted.toFixed(2));
+  const roundedBullish = Number(bullishWeighted.toFixed(4));
+  const roundedBearish = Number(bearishWeighted.toFixed(4));
 
   let bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = 'NEUTRAL';
   let compositeScore = 0;
@@ -282,26 +294,28 @@ export function calculateCompositeConfluenceScore(pillars: PillarEvaluation[]): 
     compositeScore = Math.round(roundedBullish);
   }
 
-  let recommendedAction: 'STRONG_BUY' | 'BUY' | 'GÖZLƏ' | 'SELL' | 'STRONG_SELL' = 'GÖZLƏ';
+  let recommendedAction: 'STRONG_BUY' | 'BUY' | 'WAIT' | 'SELL' | 'STRONG_SELL' = 'WAIT';
 
-  if (bias === 'BULLISH') {
-    if (compositeScore >= 85) {
+  if (macroVetoActive) {
+    recommendedAction = 'WAIT';
+  } else if (bias === 'BULLISH') {
+    if (compositeScore >= 75) {
       recommendedAction = 'STRONG_BUY';
-    } else if (compositeScore >= 65) {
+    } else if (compositeScore >= 60) {
       recommendedAction = 'BUY';
     } else {
-      recommendedAction = 'GÖZLƏ';
+      recommendedAction = 'WAIT';
     }
   } else if (bias === 'BEARISH') {
-    if (compositeScore >= 85) {
+    if (compositeScore >= 75) {
       recommendedAction = 'STRONG_SELL';
-    } else if (compositeScore >= 65) {
+    } else if (compositeScore >= 60) {
       recommendedAction = 'SELL';
     } else {
-      recommendedAction = 'GÖZLƏ';
+      recommendedAction = 'WAIT';
     }
   } else {
-    recommendedAction = 'GÖZLƏ';
+    recommendedAction = 'WAIT';
   }
 
   return {

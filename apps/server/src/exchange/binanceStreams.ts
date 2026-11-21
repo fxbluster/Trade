@@ -188,6 +188,8 @@ export class BinanceStreamsManager {
         `${symLower}@markPrice@1s`,
         `${symLower}@kline_1m`,
         `${symLower}@kline_5m`,
+        `${symLower}@kline_15m`,
+        `${symLower}@kline_1h`,
         `${symLower}@aggTrade`,
         `${symLower}@depth20@100ms`,
       ];
@@ -215,6 +217,8 @@ export class BinanceStreamsManager {
         `${symLower}@markPrice@1s`,
         `${symLower}@kline_1m`,
         `${symLower}@kline_5m`,
+        `${symLower}@kline_15m`,
+        `${symLower}@kline_1h`,
         `${symLower}@aggTrade`,
         `${symLower}@depth20@100ms`,
       ];
@@ -247,7 +251,10 @@ export class BinanceStreamsManager {
               `${symLower}@markPrice@1s`,
               `${symLower}@kline_1m`,
               `${symLower}@kline_5m`,
-              `${symLower}@aggTrade`
+              `${symLower}@kline_15m`,
+              `${symLower}@kline_1h`,
+              `${symLower}@aggTrade`,
+              `${symLower}@depth20@100ms`
             );
           }
           this.publicWs?.send(

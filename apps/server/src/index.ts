@@ -3,7 +3,6 @@ import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import polka, { type Request, type Response, type NextHandler } from 'polka';
-import sirv from 'sirv';
 import type {
   CockpitState,
   KlineCandle,
@@ -442,7 +441,7 @@ export async function bootstrapServer(): Promise<{
     },
   });
 
-  // 11. Static SPA Hosting via Sirv for apps/web/dist
+  // 11. Static SPA Hosting with Native Fast File Serving
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   const webDistCandidates = [
@@ -453,35 +452,66 @@ export async function bootstrapServer(): Promise<{
   ];
   const webDistPath = webDistCandidates.find((c) => fs.existsSync(c)) || webDistCandidates[0];
 
+  const MIME_TYPES: Record<string, string> = {
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'application/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.svg': 'image/svg+xml',
+    '.ico': 'image/x-icon',
+    '.woff2': 'font/woff2',
+  };
+
   if (fs.existsSync(webDistPath)) {
-    const serveStatic = sirv(webDistPath, {
-      dev: false,
-      setHeaders(res, pathname) {
-        if (pathname === '/' || pathname.endsWith('.html')) {
-          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-          res.setHeader('Pragma', 'no-cache');
-          res.setHeader('Expires', '0');
-        }
-      },
-    });
     app.use((req: Request, res: Response, next: NextHandler) => {
       if (req.url && (req.url.startsWith('/api') || req.url.startsWith('/ws'))) {
         return next();
       }
-      serveStatic(req, res, () => {
-        if (req.method === 'GET' && !req.url?.startsWith('/api') && !req.url?.startsWith('/ws')) {
-          const indexPath = path.join(webDistPath, 'index.html');
-          if (fs.existsSync(indexPath)) {
-            res.setHeader('Content-Type', 'text/html; charset=utf-8');
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-            res.setHeader('Pragma', 'no-cache');
-            res.setHeader('Expires', '0');
-            fs.createReadStream(indexPath).pipe(res);
-            return;
-          }
+
+      const cleanUrl = (req.url || '/').split('?')[0]!;
+      let relativePath = cleanUrl === '/' ? '/index.html' : cleanUrl;
+      let targetFile = path.normalize(path.join(webDistPath, relativePath));
+
+      // Security check: ensure path is within webDistPath
+      if (!targetFile.startsWith(path.normalize(webDistPath))) {
+        res.writeHead(403);
+        res.end('Forbidden');
+        return;
+      }
+
+      // SPA fallback to index.html if file doesn't exist
+      if (!fs.existsSync(targetFile) || fs.statSync(targetFile).isDirectory()) {
+        targetFile = path.join(webDistPath, 'index.html');
+      }
+
+      if (!fs.existsSync(targetFile)) {
+        return next();
+      }
+
+      try {
+        const ext = path.extname(targetFile).toLowerCase();
+        const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+        const fileContent = fs.readFileSync(targetFile);
+
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Content-Length', fileContent.length);
+
+        if (ext === '.html') {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.setHeader('Pragma', 'no-cache');
+          res.setHeader('Expires', '0');
+        } else {
+          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
         }
+
+        res.writeHead(200);
+        res.end(fileContent);
+      } catch (err) {
+        console.error('[STATIC] Error serving file:', err);
         next();
-      });
+      }
     });
   }
 

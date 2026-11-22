@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { initializeDatabase, DecisionLogsRepo, TradesRepo } from '../../db/sqlite.js';
+import { initializeDatabase, DecisionLogsRepo, TradesRepo, PillarTelemetryRepo } from '../../db/sqlite.js';
 import { DecisionAuditService } from '../decisionAuditService.js';
 import type { ConfluenceSnapshot, KlineCandle, TradeRecord } from '@tradeos/shared';
 
@@ -633,5 +633,51 @@ describe('DecisionAuditService', () => {
     const settled = repo.listSessionDecisions(0)[0];
     expect(settled.shadow_status).toBe('MISSED_PROFIT');
     expect(settled.shadow_pnl_usd).toBe(13.50);
+  });
+
+  it('15. integrates PillarTelemetryRepo to include sub_threshold_impulses in session summary and markdown', () => {
+    const pillarRepo = new PillarTelemetryRepo(db);
+    const serviceWithPillars = new DecisionAuditService(repo, pillarRepo);
+
+    // Insert sub-threshold impulses (composite score < 60)
+    pillarRepo.insertBatch([
+      {
+        timestamp: Date.now() - 5000,
+        symbol: 'SOLUSDT',
+        trigger_type: 'PILLAR_DIVERGENCE',
+        mark_price: 145.0,
+        atr_14: 1.5,
+        composite_score: 52.0,
+        consensus_side: 'SELL',
+        active_pillars_count: 2,
+        p1_vote: 'WAIT',
+        p2_vote: 'WAIT',
+        p3_vote: 'WAIT',
+        p4_vote: 'WAIT',
+        p5_vote: 'WAIT',
+        p6_vote: 'SELL',
+        p7_vote: 'SELL',
+        p1_macro_regime: '{}',
+        p2_native_smc: '{}',
+        p3_cvd_absorption: '{}',
+        p4_order_flow_l2: '{}',
+        p5_liq_clusters: '{}',
+        p6_momentum_rvol: '{}',
+        p7_sentiment_macro: '{}',
+        status: 'EVALUATING',
+      },
+    ]);
+
+    const summaryRes = serviceWithPillars.generateSessionSummary();
+    expect(summaryRes.summary.sub_threshold_impulses).toBe(1);
+    expect(summaryRes.sub_threshold_impulses).toHaveLength(1);
+    expect(summaryRes.sub_threshold_impulses![0].symbol).toBe('SOLUSDT');
+    expect(summaryRes.sub_threshold_impulses![0].composite_score).toBe(52.0);
+
+    const md = serviceWithPillars.formatMarkdownReport(summaryRes);
+    expect(md).toContain('**Sub-Threshold Impulses (<60%):** 1');
+    expect(md).toContain('## Sub-Threshold Market Impulses (<60% Consensus)');
+    expect(md).toContain('PILLAR_DIVERGENCE');
+    expect(md).toContain('52%');
   });
 });

@@ -296,6 +296,7 @@ export interface DailyAuditSummary {
   total_setups: number;
   executed_trades: number;
   blocked_setups: number;
+  sub_threshold_impulses?: number;
   capital_saved_usd: number;
   missed_profit_usd: number;
   expired_pnl_usd: number;
@@ -306,6 +307,7 @@ export interface DailyAuditSummary {
 export interface DailyAuditResponse {
   summary: DailyAuditSummary;
   records: DecisionLogRecord[];
+  sub_threshold_impulses?: PillarTelemetryRecord[];
   generated_at: number;
 }
 

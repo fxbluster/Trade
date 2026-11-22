@@ -644,6 +644,41 @@ export class PillarTelemetryRepo {
   }
 
   /**
+   * Updates coalesced votes and snapshots for an existing telemetry event.
+   */
+  updateEventDetails(event: PillarTelemetryRecord): void {
+    if (!event.id) return;
+    const stmt = this.db.prepare(`
+      UPDATE pillar_telemetry_events SET
+        composite_score = ?,
+        active_pillars_count = ?,
+        p1_vote = ?, p2_vote = ?, p3_vote = ?, p4_vote = ?, p5_vote = ?, p6_vote = ?, p7_vote = ?,
+        p1_macro_regime = ?, p2_native_smc = ?, p3_cvd_absorption = ?, p4_order_flow_l2 = ?,
+        p5_liq_clusters = ?, p6_momentum_rvol = ?, p7_sentiment_macro = ?
+      WHERE id = ?
+    `);
+    stmt.run(
+      event.composite_score,
+      event.active_pillars_count,
+      event.p1_vote,
+      event.p2_vote,
+      event.p3_vote,
+      event.p4_vote,
+      event.p5_vote,
+      event.p6_vote,
+      event.p7_vote,
+      event.p1_macro_regime,
+      event.p2_native_smc,
+      event.p3_cvd_absorption,
+      event.p4_order_flow_l2,
+      event.p5_liq_clusters,
+      event.p6_momentum_rvol,
+      event.p7_sentiment_macro,
+      event.id
+    );
+  }
+
+  /**
    * Lists events since a given timestamp ms.
    */
   listEventsSince(sinceMs: number, symbol?: string): PillarTelemetryRecord[] {

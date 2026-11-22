@@ -10,8 +10,9 @@ import type {
   DailyAuditSummary,
   DailyAuditResponse,
   MacroRegime,
+  PillarTelemetryRecord,
 } from '@tradeos/shared';
-import { DecisionLogsRepo } from '../db/sqlite.js';
+import { DecisionLogsRepo, PillarTelemetryRepo } from '../db/sqlite.js';
 import type { BinanceClient } from '../exchange/binanceClient.js';
 
 export interface LatchState {
@@ -38,17 +39,28 @@ export interface RecordExecutionParams {
 
 export class DecisionAuditService {
   private repo: DecisionLogsRepo;
+  private pillarRepo?: PillarTelemetryRepo;
   private latches: Map<string, LatchState> = new Map();
   private readonly COOLDOWN_MS = 180_000; // 3-minute hysteresis cooldown
   private readonly EXPIRY_HORIZON_MS = 3_600_000; // 60 minutes
   private readonly FRICTION_RATE = 0.0015; // 0.15% notional friction
 
-  constructor(repoOrDb: DecisionLogsRepo | DatabaseSync) {
+  constructor(repoOrDb: DecisionLogsRepo | DatabaseSync, pillarRepo?: PillarTelemetryRepo) {
     if (repoOrDb instanceof DecisionLogsRepo) {
       this.repo = repoOrDb;
+      this.pillarRepo = pillarRepo;
     } else {
       this.repo = new DecisionLogsRepo(repoOrDb);
+      this.pillarRepo = pillarRepo ?? new PillarTelemetryRepo(repoOrDb);
     }
+  }
+
+  public setPillarRepo(pillarRepo: PillarTelemetryRepo): void {
+    this.pillarRepo = pillarRepo;
+  }
+
+  public getPillarRepo(): PillarTelemetryRepo | undefined {
+    return this.pillarRepo;
   }
 
   private getLatchKey(symbol: string, side: TradeSide): string {
@@ -398,10 +410,15 @@ export class DecisionAuditService {
     expired_pnl_usd = Number(expired_pnl_usd.toFixed(2));
     const net_risk_value_usd = Number((capital_saved_usd - missed_profit_usd).toFixed(2));
 
+    const subThresholdEvents = this.pillarRepo
+      ? this.pillarRepo.listEventsSince(sinceMs ?? 0).filter((e) => e.composite_score < 60)
+      : [];
+
     const summary: DailyAuditSummary = {
       total_setups: records.length,
       executed_trades,
       blocked_setups,
+      sub_threshold_impulses: subThresholdEvents.length,
       capital_saved_usd,
       missed_profit_usd,
       expired_pnl_usd,
@@ -412,6 +429,7 @@ export class DecisionAuditService {
     return {
       summary,
       records,
+      sub_threshold_impulses: subThresholdEvents,
       generated_at: Date.now(),
     };
   }
@@ -420,14 +438,15 @@ export class DecisionAuditService {
    * Formats DailyAuditResponse into a human-readable Markdown report for download and operator review.
    */
   public formatMarkdownReport(response: DailyAuditResponse): string {
-    const { summary, records, generated_at } = response;
+    const { summary, records, sub_threshold_impulses, generated_at } = response;
     const dateStr = new Date(generated_at).toISOString();
 
     let md = `# TradeOS Daily Decision Audit & Shadow Report\n\n`;
     md += `**Generated:** ${dateStr}  \n`;
     md += `**Total Setups Evaluated:** ${summary.total_setups}  \n`;
     md += `**Executed Trades:** ${summary.executed_trades}  \n`;
-    md += `**Blocked Setups:** ${summary.blocked_setups}  \n\n`;
+    md += `**Blocked Setups (>=60%):** ${summary.blocked_setups}  \n`;
+    md += `**Sub-Threshold Impulses (<60%):** ${summary.sub_threshold_impulses ?? 0}  \n\n`;
 
     md += `## Risk & Counterfactual Valuation Summary\n\n`;
     md += `| Metric | Value (USD) |\n`;
@@ -446,6 +465,22 @@ export class DecisionAuditService {
       md += `| :--- | :--- |\n`;
       for (const key of vetoKeys) {
         md += `| ${key} | ${summary.veto_breakdown[key]} |\n`;
+      }
+      md += `\n`;
+    }
+
+    md += `## Sub-Threshold Market Impulses (<60% Consensus)\n\n`;
+    const impulses = sub_threshold_impulses ?? [];
+    if (impulses.length === 0) {
+      md += `*No sub-threshold market impulses recorded in this session.*\n\n`;
+    } else {
+      md += `| ID | Time | Symbol | Trigger | Side | Score | Active Pillars | Entry Price | Status |\n`;
+      md += `| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n`;
+      for (const imp of impulses) {
+        const timeStr = new Date(imp.timestamp).toISOString().slice(11, 19);
+        const scoreStr = `${imp.composite_score}%`;
+        const priceStr = imp.mark_price.toFixed(2);
+        md += `| ${imp.id ?? '-'} | ${timeStr} | ${imp.symbol} | ${imp.trigger_type} | ${imp.consensus_side} | ${scoreStr} | ${imp.active_pillars_count}/7 | ${priceStr} | ${imp.status} |\n`;
       }
       md += `\n`;
     }

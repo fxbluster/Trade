@@ -9,7 +9,9 @@ import {
   type CockpitState,
   type TechnicalSummary,
   type KlineCandle,
-  type JournalSummary
+  type JournalSummary,
+  type TrajectoryHorizon,
+  type PillarAttributionResponse
 } from '@tradeos/shared';
 import {
   TradesRepo,
@@ -47,6 +49,7 @@ import { SESSION_TOKEN, WEBHOOK_SECRET } from '../config.js';
 import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
 import type { AutoPilotManager } from '../services/autoPilotManager.js';
 import type { DecisionAuditService } from '../services/decisionAuditService.js';
+import type { PillarAttributionService } from '../services/pillarAttributionService.js';
 
 export interface AppContext {
   tradeManager: TradeManager;
@@ -57,6 +60,7 @@ export interface AppContext {
   confluenceEngine?: ConfluenceEngine;
   autoPilotManager?: AutoPilotManager;
   decisionAuditService?: DecisionAuditService;
+  pillarAttributionService?: PillarAttributionService;
   activeSymbol?: string;
   getMarkPrice?: (symbol: string) => number;
   setActiveSymbol?: (symbol: string) => void;
@@ -590,6 +594,35 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     res.statusCode = 200;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.end(JSON.stringify(summary));
+  });
+
+  // 22. GET /api/audit/pillars — Pillar attribution & empirical matrix calibration scorecard
+  app.get('/api/audit/pillars', (req: Request, res: Response) => {
+    if (!ctx.pillarAttributionService) {
+      return sendJson(res, 503, { error: 'PillarAttributionService not initialized' });
+    }
+
+    const query = (req.query || {}) as Record<string, string>;
+    const symbol = (query.symbol || ctx.activeSymbol || 'SOLUSDT').toUpperCase().trim();
+    const horizon = (query.horizon || '15m') as TrajectoryHorizon;
+
+    const validHorizons: TrajectoryHorizon[] = ['1m', '5m', '15m', '60m'];
+    if (!validHorizons.includes(horizon)) {
+      return sendJson(res, 400, {
+        error: `Invalid horizon '${horizon}'. Must be one of: 1m, 5m, 15m, 60m`,
+      });
+    }
+
+    try {
+      const scorecard = typeof (ctx.pillarAttributionService as any).getScorecard === 'function'
+        ? (ctx.pillarAttributionService as any).getScorecard(symbol, horizon)
+        : ctx.pillarAttributionService.generateScorecard(symbol, horizon);
+
+      sendJson(res, 200, scorecard);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: `Failed to generate pillar scorecard: ${msg}` });
+    }
   });
 
   return app;

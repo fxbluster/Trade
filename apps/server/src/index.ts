@@ -19,8 +19,9 @@ import {
   BINANCE_DEMO_API_SECRET,
   CRYPTOPANIC_API_KEY,
 } from './config.js';
-import { initializeDatabase, TradesRepo, RiskStateRepo, DecisionLogsRepo } from './db/sqlite.js';
+import { initializeDatabase, TradesRepo, RiskStateRepo, DecisionLogsRepo, PillarTelemetryRepo } from './db/sqlite.js';
 import { DecisionAuditService } from './services/decisionAuditService.js';
+import { PillarAttributionService } from './services/pillarAttributionService.js';
 import { BinanceClient } from './exchange/binanceClient.js';
 import { BinanceStreamsManager } from './exchange/binanceStreams.js';
 import { BrokerFactory } from './exchange/broker.js';
@@ -67,6 +68,7 @@ export async function bootstrapServer(): Promise<{
   mtfManager: HierarchicalMtfManager;
   smcEngine: NativeSmcEngine;
   decisionAuditService: DecisionAuditService;
+  pillarAttributionService: PillarAttributionService;
   close: () => Promise<void>;
 }> {
   // 1. Initialize SQLite WAL Database Engine
@@ -74,7 +76,9 @@ export async function bootstrapServer(): Promise<{
   const tradesRepo = new TradesRepo(db);
   const riskRepo = new RiskStateRepo(db);
   const decisionLogsRepo = new DecisionLogsRepo(db);
-  const decisionAuditService = new DecisionAuditService(decisionLogsRepo);
+  const pillarRepo = new PillarTelemetryRepo(db);
+  const decisionAuditService = new DecisionAuditService(decisionLogsRepo, pillarRepo);
+  const pillarAttributionService = new PillarAttributionService(pillarRepo);
 
   // 2. Initialize Binance REST Client & Adapters
   const client = new BinanceClient({
@@ -90,6 +94,10 @@ export async function bootstrapServer(): Promise<{
 
   decisionAuditService.recoverDowntimeGaps(client).catch((err) => {
     logger.error({ err }, 'Failed to recover downtime shadow gaps');
+  });
+
+  await pillarAttributionService.recoverDowntimeGaps(client).catch((err) => {
+    logger.error({ err }, 'Failed to recover downtime pillar gaps');
   });
 
   const broker = BrokerFactory.getAdapter('BINANCE_DEMO', { client, db });
@@ -352,6 +360,13 @@ export async function bootstrapServer(): Promise<{
 
     const atr = ind?.atr14 || (markPriceMap.get(event.symbol) || event.markPrice || 100) * 0.005;
     decisionAuditService.evaluateSnapshot(confluenceSnapshot, atr, event.markPrice);
+    pillarAttributionService.evaluateTick(
+      event.symbol,
+      event.markPrice,
+      atr,
+      confluenceSnapshot,
+      latestCandle
+    );
 
     // Autonomous Auto-Pilot Tick Evaluation
     autoPilotManager.onTick(event.symbol, event.markPrice).catch(() => {});
@@ -390,6 +405,7 @@ export async function bootstrapServer(): Promise<{
     // Trigger Decision Audit shadow tracking on confirmed 1m candle close
     if (event.isFinal && interval === '1m') {
       decisionAuditService.onCandleClose(sym, event.candle);
+      pillarAttributionService.onClosedCandle(sym, event.candle);
     }
   });
 
@@ -422,6 +438,7 @@ export async function bootstrapServer(): Promise<{
   registerRoutes(app, {
     tradeManager,
     decisionAuditService,
+    pillarAttributionService,
     get broker() {
       return activeBroker;
     },
@@ -594,6 +611,9 @@ export async function bootstrapServer(): Promise<{
   // Graceful shutdown helper
   const close = async () => {
     try {
+      pillarAttributionService.destroy();
+    } catch {}
+    try {
       sentimentHarvester.stop();
     } catch {}
     try {
@@ -622,6 +642,7 @@ export async function bootstrapServer(): Promise<{
     mtfManager,
     smcEngine,
     decisionAuditService,
+    pillarAttributionService,
     close,
   };
 }

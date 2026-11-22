@@ -202,8 +202,8 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       brokerMode: snapshot.brokerMode,
     }));
 
-    // If server snapshot reports a different symbol, sync klines and confluence immediately
-    if (snapshot.symbol && snapshot.symbol !== prevSymbol) {
+    // If server snapshot reports a different symbol or klines are empty, sync klines and confluence immediately
+    if ((snapshot.symbol && snapshot.symbol !== prevSymbol) || get().klines.length === 0) {
       get().refreshKlines();
       get().refreshConfluence();
     }

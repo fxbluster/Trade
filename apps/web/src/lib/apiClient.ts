@@ -57,6 +57,14 @@ export function setExplicitSessionToken(token: string) {
   sessionToken = token;
 }
 
+export function invalidateSessionToken(): void {
+  sessionToken = null;
+  sessionPromise = null;
+  if (typeof sessionStorage !== 'undefined') {
+    sessionStorage.removeItem('tradeos_session_token');
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}, isRetry = false): Promise<T> {
   const token = await getSessionToken();
   const headers = new Headers(options.headers || {});
@@ -73,8 +81,7 @@ async function request<T>(path: string, options: RequestInit = {}, isRetry = fal
   });
 
   if (res.status === 401 && !isRetry) {
-    sessionToken = null;
-    sessionPromise = null;
+    invalidateSessionToken();
     return request<T>(path, options, true);
   }
 

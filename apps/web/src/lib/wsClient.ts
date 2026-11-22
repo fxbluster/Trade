@@ -12,7 +12,7 @@ import type {
   ConfluenceSnapshot,
   AutoPilotConfig,
 } from '@tradeos/shared';
-import { getSessionToken } from './apiClient';
+import { getSessionToken, invalidateSessionToken } from './apiClient';
 
 export type WsStatus = 'CONNECTED' | 'DISCONNECTED' | 'CONNECTING';
 
@@ -71,6 +71,7 @@ class WsClient {
   private reconnectDelay = 1000;
   private maxReconnectDelay = 8000;
   private currentSubscribedSymbol: string | null = null;
+  private hasReceivedSnapshot = false;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -135,6 +136,7 @@ class WsClient {
       this.ws = new WebSocket(wsUrl, ['tradeos-auth', token]);
 
       this.ws.onopen = () => {
+        this.hasReceivedSnapshot = false;
         this.setStatus('CONNECTED');
         this.reconnectDelay = 1000;
         this.startHeartbeat();
@@ -150,6 +152,7 @@ class WsClient {
           const msg = JSON.parse(event.data) as WsServerMessage;
           switch (msg.type) {
             case 'SNAPSHOT':
+              this.hasReceivedSnapshot = true;
               this.handlers.onSnapshot?.(msg.data);
               break;
             case 'TICK':
@@ -190,12 +193,16 @@ class WsClient {
       this.ws.onclose = () => {
         this.cleanup();
         this.setStatus('DISCONNECTED');
+        if (!this.hasReceivedSnapshot) {
+          invalidateSessionToken();
+        }
         if (!this.isExplicitlyClosed) {
           this.scheduleReconnect();
         }
       };
     } catch (err) {
       console.error('[WS] Connect initiation error:', err);
+      invalidateSessionToken();
       this.setStatus('DISCONNECTED');
       if (!this.isExplicitlyClosed) {
         this.scheduleReconnect();

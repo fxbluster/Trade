@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // Attempt to load .env from current directory or root workspace
 try {
@@ -22,8 +24,25 @@ export const GEMINI_API_KEY: string = process.env.GEMINI_API_KEY || '';
 export const WEBHOOK_SECRET: string = process.env.WEBHOOK_SECRET || 'tradeos-webhook-secret-passphrase';
 export const CRYPTOPANIC_API_KEY: string = process.env.CRYPTOPANIC_API_KEY || '';
 
-// 256-bit cryptographic session token generated on server startup
-export const SESSION_TOKEN: string = process.env.TEST_SESSION_TOKEN || crypto.randomBytes(32).toString('hex');
+// 256-bit cryptographic session token persisted across daemon auto-restarts
+function getOrGenerateSessionToken(): string {
+  if (process.env.TEST_SESSION_TOKEN) return process.env.TEST_SESSION_TOKEN;
+  const tokenFile = path.resolve('data/session_token.secret');
+  try {
+    if (fs.existsSync(tokenFile)) {
+      const stored = fs.readFileSync(tokenFile, 'utf-8').trim();
+      if (stored.length === 64) return stored;
+    }
+  } catch {}
+  const newToken = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+    fs.writeFileSync(tokenFile, newToken, 'utf-8');
+  } catch {}
+  return newToken;
+}
+
+export const SESSION_TOKEN: string = getOrGenerateSessionToken();
 
 export const ALLOWED_HOSTS = new Set<string>([
   '127.0.0.1:3400',

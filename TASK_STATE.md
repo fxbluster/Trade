@@ -1,53 +1,37 @@
 # 📌 Cari İcraat Vəziyyəti (TASK_STATE.md)
-- **Son Yenilənmə:** 2026-11-22 02:20 (Baku UTC+4)
+- **Son Yenilənmə:** 2026-11-22 22:12 (Baku UTC+4)
 - **Aktiv Rejim:** Single-Agent
-- **Aktiv Məqsəd:** TradeOS v2 24/7 Avtonom İşləmə, Saytın Yüklənməsi və Decision Audit Trail İnteqrasiyası
+- **Aktiv Məqsəd:** TradeOS Bulldog Engine (Pillar Analytics, Sub-Threshold Impulse Tracking, Bayesian Shrinkage Calibration, Cockpit HUD)
 
 ## 1. Tamamlananlar (Faktiki Sübutlu)
-- [x] Decision Audit Trail & Counterfactual Shadow Mühərriki yazıldı və commit edildi (`commit 2eb77bb`).
-- [x] Bütün 29 test paketi və 315 test 100% PASS nəticəsi verdi (`Exit code: 0`).
-- [x] Monorepo production build (`npm run build`) uğurla tamamlandı.
-- [x] Serverin donmasının kök səbəbi tapıldı: fon prosesində stdout PIPE buferinin dolması (`proc.wait()` ilə) aradan qaldırıldı, qəzalı proses təmizləndi.
-- [x] `run-supervisor.js` faylı `fs.openSync('server-daemon.log', 'a')` birbaşa disk fayl deskriptoruna yönləndirildi (artıq heç vaxt bufer dolub donmayacaq).
-- [x] Server və arxa plan sistemi aktivdir (`http://127.0.0.1:3400/api/health` 59ms içində 200 OK qaytarır).
-- [x] Cloudflare Tunnel yeniləndi və aktivdir (`https://episode-someone-lectures-air.trycloudflare.com`).
-- [x] Masaüstündəki `TradeOS.bat` və `TradeOS-Online.url` faylları yeniləndi.
+- [x] **Dizayn və EGM Rəyləri:** `docs/designs/pillar-analytics-bulldog-engine.md` sənədi 15 Goldfish düzəlişi ilə tamamlandı (`commit 571d251`).
+- [x] **Data Müqavilələri və Verilənlər Bazası (`bd-contracts`, `commit 6d310b9`):**
+  - `packages/shared/src/contracts.ts`: `TrajectoryHorizon`, `ImpulseTriggerType`, `PillarTelemetryRecord`, `PillarHorizonEvaluation`, `PillarScorecardItem`, `PillarAttributionResponse`.
+  - `apps/server/src/db/schema.sql`: `pillar_telemetry_events`, `pillar_horizon_evaluations`, `pillar_daily_scorecards` cədvəlləri və kompozit indekslər.
+  - `apps/server/src/db/sqlite.ts`: `PillarTelemetryRepo` (Bayesian shrinkage, $N \ge 30$ gating, $[2.5\%, 35.0\%]$ bounds, $\pm 5\%$ delta caps).
+  - 23/23 DB testi 100% PASS.
+- [x] **İstifadəçi İnterfeysi (`bd-ui`, `commit 2fca1f1`):**
+  - `apps/web/src/lib/apiClient.ts`: `getPillarScorecard(symbol, horizon)` inteqrasiyası.
+  - `apps/web/src/components/TopBar.tsx`: "Pillar Matrix" HUD düyməsi.
+  - `apps/web/src/components/PillarScorecardModal.tsx`: 7 matrix sütununun analitik cədvəli, win-rate %, MFE/MAE %, mövcud və tövsiyə olunan çəkilər, Bayesian shrinkage metodologiyası.
+  - `apps/web/src/App.tsx`: `<PillarScorecardModal />` quraşdırıldı.
+  - 25/25 web testi və Vite build 100% PASS.
+- [x] **Kvant Mühərriki (`bd-engine`, `commit a5749cb`):**
+  - `apps/server/src/services/pillarAttributionService.ts`: In-memory ring-buffer queue, 1000ms asinxron batch flusher (4Hz loop-da sıfır SQLite bloklanması), 10s coalescing window, xronoloji multi-horizon (1m, 5m, 15m, 60m) path-dependent stopout və MFE/MAE qiymətləndirməsi.
+  - `apps/server/src/services/decisionAuditService.ts`: `PillarTelemetryRepo` inteqrasiyası, `sub_threshold_impulses` xülasəsi və Markdown hesabatı.
+  - 46/46 xidmət testi 100% PASS.
+- [x] **API və Server İnteqrasiyası (`bd-api`, `commit ec2e770`):**
+  - `apps/server/src/api/routes.ts`: `GET /api/audit/pillars` marşrutu (`symbol`, `horizon` parametrləri, 400 validation, Bearer auth).
+  - `apps/server/src/index.ts`: `recoverDowntimeGaps(client)` startup hook-u, 4Hz tick hook-u və 1m closed candle hook-u.
+  - 5/5 API testi 100% PASS.
+- [x] **Tam Sistem Yoxlanışı (`bd-verifier`):**
+  - Vitest: 34 test faylı, 343 test (100% PASS, 0 failure).
+  - Monorepo Build: `@tradeos/shared` (tsc clean), `@tradeos/server` (tsc clean), `@tradeos/web` (vite build 1621 modulyar clean).
+- [x] **Canlı Sistem və Port 3400 Təsdiqi:**
+  - `http://127.0.0.1:3400/api/health`: 200 OK (`exchangeHealth: HEALTHY`, `wsConnected: true`).
+  - `http://127.0.0.1:3400/api/audit/pillars?symbol=SOLUSDT&horizon=15m`: 200 OK (bütün 7 sütun üzrə scorecard qaytarır).
+  - `http://127.0.0.1:3400/api/audit/daily`: 200 OK (artıq sub-threshold impulsları canlı qeydə alır).
+  - `http://127.0.0.1:3400/api/audit/daily?format=markdown`: 200 OK (Markdown cədvəl formatında ixrac olunur).
 
-## 2. Cari Addım (Canlı Yoxlama Nəticəsi)
-- [/] Server: `http://127.0.0.1:3400` aktiv və canlıdır.
-- [/] Onlayn Link: `https://episode-someone-lectures-air.trycloudflare.com` aktiv və canlıdır.
-
-## 3. Növbəti Addımlar
-- [ ] İstifadəçiyə birbaşa və sabit keçid linklərini təqdim etmək.
-
-
-### Update 2026-11-22T19:04:
-- Fixed `downloadDailyAudit` in `apps/web/src/lib/apiClient.ts`: switched from missing `sessionStorage` token fallback to `await getSessionToken()`, eliminating 401 Unauthorized export failure.
-- Rebuilt `@tradeos/web` production bundle (`apps/web/dist`).
-- Replaced visible console execution in `TradeOS.bat` with hidden background `wscript` runners (`start-daemon.vbs` & `start-tunnel.vbs`) to prevent accidental user termination via taskbar console windows.
-- Verified live server health: `ok: true`, `exchangeHealth: HEALTHY`, `wsConnected: true`.
-- Verified live daily audit download via API: HTTP 200 with Markdown attachment.
-
-
-### Update 2026-11-22T19:13:
-- Added live Continuous Background Engine Uptime Timer to `TopBar.tsx`.
-- Backend exposes `bootTimeMs` via `GET /api/health` and contract in `packages/shared/src/contracts.ts`.
-- Frontend synchronizes every 10s and ticks locally every 1s, preserving millisecond accuracy across background tab sleep and wakeups (`HH:MM:SS` format with emerald pulse ping).
-- Displays `OFFLINE` badge if WebSocket connection is lost.
-- Verified live: server up, `bootTimeMs` matches elapsed runtime, bundle built and committed.
-
-
-### Update 2026-11-22T21:43:
-- Completed EGM Review Loop (Round 1) on `docs/designs/pillar-analytics-bulldog-engine.md`.
-- Applied all 15 Goldfish review fixes (8 Blockers, 6 Majors, 1 Nit) in batch:
-  1. Asynchronous in-memory ring-buffer queue with 1000ms batch flush to eliminate event loop blocking in 4Hz market loop.
-  2. Per-pillar debounce state tracking + 10-second coalescing window for cascade market moves.
-  3. Bayesian shrinkage regularization in weight calibration formula eliminating NaN/division-by-zero, enforcing [2.5%, 35%] bounds and +/-5% delta clamps.
-  4. Embedded complete TypeScript contract interfaces in `packages/shared/src/contracts.ts`.
-  5. Normalized SQLite schema storing discrete votes (`p1_vote`..`p7_vote`) and explicit attribution status (`p1_status`..`p7_status`).
-  6. Added `pillar_daily_scorecards` table for permanent historical rollup storage prior to 30-day raw event pruning.
-  7. Formally defined MAE, normalized ATR%, and sequential chronological path evaluation.
-  8. Integrated downtime gap recovery hook `recoverDowntimeGaps(client)` into `index.ts`.
-  9. Expanded target files list to 13 files (added `decisionAuditService.ts`, `useUiStore.ts`, `App.tsx`).
-  10. Added dedicated `Risks & Mitigations`, `Rollout & Rollback Strategy`, and `Security & Access Boundaries` sections.
-- Design document committed: `commit 571d251`.
+## 2. Cari Addım
+- Bütün Swarm işçiləri təqaüdə çıxarıldı, sistem tam istehsala hazırdır və canlı rejimdə işləyir.

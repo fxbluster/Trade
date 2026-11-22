@@ -174,6 +174,7 @@ export interface SetBrokerModeRequest {
 export interface HealthResponse {
   ok: boolean;
   uptimeSec: number;
+  bootTimeMs?: number;
   exchangeHealth: ExchangeHealth;
   wsConnected: boolean;
   brokerMode: BrokerMode;

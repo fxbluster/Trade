@@ -91,6 +91,8 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   app.use(requireSessionToken);
   app.use(jsonBodyParser);
 
+  const bootTimeMs = Date.now() - Math.floor(process.uptime() * 1000);
+
   // 1. GET /api/health — Public liveliness & exchange status check
   app.get('/api/health', (req: Request, res: Response) => {
     const exchangeHealth = (ctx.broker as unknown as { getHealth?: () => string })?.getHealth?.() || 'HEALTHY';
@@ -101,6 +103,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     sendJson(res, 200, {
       ok: true,
       uptimeSec: Math.floor(process.uptime()),
+      bootTimeMs,
       exchangeHealth,
       wsConnected,
       brokerMode: ctx.broker.mode

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useMarketStore } from '../store/useMarketStore';
 import { useUiStore } from '../store/useUiStore';
 import { apiClient } from '../lib/apiClient';
@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   ChevronDown,
   FileText,
+  Timer,
 } from 'lucide-react';
 import type { BrokerMode } from '@tradeos/shared';
 
@@ -50,6 +51,47 @@ export const TopBar: React.FC = () => {
       : 'text-[#e6edf3]';
 
   const isCooldownActive = risk?.cooldown_until ? risk.cooldown_until > Date.now() : false;
+
+  // Background engine continuous uptime tracker
+  const [bootTimeMs, setBootTimeMs] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState<number>(Date.now());
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const syncHealth = async () => {
+      try {
+        const data = await apiClient.getHealth();
+        if (!isMounted) return;
+        if (data.bootTimeMs) {
+          setBootTimeMs(data.bootTimeMs);
+        } else if (typeof data.uptimeSec === 'number') {
+          setBootTimeMs(Date.now() - data.uptimeSec * 1000);
+        }
+      } catch {
+        // network error / server offline
+      }
+    };
+
+    syncHealth();
+    const syncInterval = setInterval(syncHealth, 10000);
+    const tickInterval = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(syncInterval);
+      clearInterval(tickInterval);
+    };
+  }, []);
+
+  const totalUptimeSec = bootTimeMs ? Math.max(0, Math.floor((nowMs - bootTimeMs) / 1000)) : 0;
+  const hours = Math.floor(totalUptimeSec / 3600);
+  const minutes = Math.floor((totalUptimeSec % 3600) / 60);
+  const seconds = totalUptimeSec % 60;
+  const formattedUptime = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  const startTimeStr = bootTimeMs ? new Date(bootTimeMs).toLocaleTimeString() : 'N/A';
 
   const handleExportAudit = async () => {
     if (auditExportStatus === 'exporting') return;
@@ -216,6 +258,30 @@ export const TopBar: React.FC = () => {
               : 'Daily Audit'}
           </span>
         </button>
+
+        {/* Background Engine Uptime / Session Live Timer */}
+        {wsStatus === 'CONNECTED' ? (
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1 rounded border border-[#0ecb81]/30 bg-[#0ecb81]/10 text-[#0ecb81] font-mono text-xs shadow-sm cursor-help"
+            title={`TradeOS 24/7 Arxa Fon İzləmə Müddəti: ${formattedUptime}. Server başlama vaxtı: ${startTimeStr}`}
+          >
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#0ecb81] opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-[#0ecb81]"></span>
+            </span>
+            <Timer className="w-3.5 h-3.5 text-[#0ecb81]" />
+            <span className="font-semibold tracking-wider">{formattedUptime}</span>
+          </div>
+        ) : (
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1 rounded border border-[#f6465d]/30 bg-[#f6465d]/10 text-[#f6465d] font-mono text-xs shadow-sm cursor-help"
+            title="Arxa fon serveri ilə əlaqə kəsilib. Engine dayanıb."
+          >
+            <span className="w-2 h-2 rounded-full bg-[#f6465d]" />
+            <Timer className="w-3.5 h-3.5 text-[#f6465d]" />
+            <span className="font-semibold tracking-wider">OFFLINE</span>
+          </div>
+        )}
 
         {/* Cooldown Status Badge / Modal Trigger */}
         <button

@@ -30,6 +30,9 @@ export async function getSessionToken(): Promise<string> {
         }
         const data = await res.json();
         sessionToken = data.token;
+        if (typeof sessionStorage !== 'undefined') {
+          sessionStorage.setItem('tradeos_session_token', sessionToken!);
+        }
         return sessionToken!;
       } catch (err) {
         sessionPromise = null;
@@ -219,9 +222,7 @@ export async function downloadDailyAudit(
   format: 'json' | 'markdown' = 'markdown',
   session: 'current' | 'all' = 'current'
 ): Promise<void> {
-  const token =
-    (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('tradeos_session_token') : null) ||
-    'local-dev-token';
+  const token = await getSessionToken();
 
   const res = await fetch(`/api/audit/daily?format=${encodeURIComponent(format)}&session=${encodeURIComponent(session)}`, {
     method: 'GET',

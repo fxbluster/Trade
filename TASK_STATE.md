@@ -19,3 +19,11 @@
 
 ## 3. Növbəti Addımlar
 - [ ] İstifadəçiyə birbaşa və sabit keçid linklərini təqdim etmək.
+
+
+### Update 2026-11-22T19:04:
+- Fixed `downloadDailyAudit` in `apps/web/src/lib/apiClient.ts`: switched from missing `sessionStorage` token fallback to `await getSessionToken()`, eliminating 401 Unauthorized export failure.
+- Rebuilt `@tradeos/web` production bundle (`apps/web/dist`).
+- Replaced visible console execution in `TradeOS.bat` with hidden background `wscript` runners (`start-daemon.vbs` & `start-tunnel.vbs`) to prevent accidental user termination via taskbar console windows.
+- Verified live server health: `ok: true`, `exchangeHealth: HEALTHY`, `wsConnected: true`.
+- Verified live daily audit download via API: HTTP 200 with Markdown attachment.

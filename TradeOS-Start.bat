@@ -24,8 +24,8 @@ if %ERRORLEVEL% equ 0 (
     timeout /t 1 /nobreak >nul
 )
 
-echo [1/3] Starting TradeOS Server Supervisor (Continuous Background Engine)...
-start "TradeOS-Engine" /min node run-supervisor.js
+echo [1/3] Starting TradeOS Server Supervisor (Hidden Background Process)...
+wscript //nologo start-daemon.vbs
 
 :: 2. Wait until server responds healthy
 echo [2/3] Initializing market connections and indicators...
@@ -49,7 +49,7 @@ echo [OK] TradeOS Server is UP and healthy on http://127.0.0.1:3400!
 tasklist | findstr /i "cloudflared.exe" >nul
 if %ERRORLEVEL% neq 0 (
     echo [INFO] Starting Cloudflare Public Tunnel...
-    start "TradeOS-Tunnel" /min cmd /c ""C:\Users\HP\TradeOS-v2\bin\cloudflared.exe" tunnel --url http://127.0.0.1:3400 > tunnel.log 2>&1"
+    wscript //nologo start-tunnel.vbs
 )
 
 :open_cockpit

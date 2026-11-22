@@ -118,3 +118,70 @@ CREATE INDEX IF NOT EXISTS idx_decision_logs_ts ON decision_logs(timestamp);
 CREATE INDEX IF NOT EXISTS idx_decision_logs_sym_ts ON decision_logs(symbol, timestamp);
 CREATE INDEX IF NOT EXISTS idx_decision_logs_shadow ON decision_logs(shadow_status, expires_at);
 
+-- Table 1: Initial Impulse & Pillar Telemetry Snapshot
+CREATE TABLE IF NOT EXISTS pillar_telemetry_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  trigger_type TEXT NOT NULL, -- 'PILLAR_DIVERGENCE', 'VOLATILITY_EXPANSION', 'CONSENSUS_ATTEMPT'
+  mark_price REAL NOT NULL,
+  atr_14 REAL NOT NULL,
+  composite_score REAL NOT NULL,
+  consensus_side TEXT NOT NULL, -- 'BUY', 'SELL', 'NEUTRAL'
+  active_pillars_count INTEGER NOT NULL,
+  p1_vote TEXT NOT NULL DEFAULT 'WAIT',
+  p2_vote TEXT NOT NULL DEFAULT 'WAIT',
+  p3_vote TEXT NOT NULL DEFAULT 'WAIT',
+  p4_vote TEXT NOT NULL DEFAULT 'WAIT',
+  p5_vote TEXT NOT NULL DEFAULT 'WAIT',
+  p6_vote TEXT NOT NULL DEFAULT 'WAIT',
+  p7_vote TEXT NOT NULL DEFAULT 'WAIT',
+  p1_macro_regime TEXT NOT NULL,    -- JSON: {state, score, raw}
+  p2_native_smc TEXT NOT NULL,       -- JSON: {state, score, raw}
+  p3_cvd_absorption TEXT NOT NULL,   -- JSON: {state, score, raw}
+  p4_order_flow_l2 TEXT NOT NULL,    -- JSON: {state, score, raw}
+  p5_liq_clusters TEXT NOT NULL,     -- JSON: {state, score, raw}
+  p6_momentum_rvol TEXT NOT NULL,    -- JSON: {state, score, raw}
+  p7_sentiment_macro TEXT NOT NULL,  -- JSON: {state, score, raw}
+  status TEXT NOT NULL DEFAULT 'EVALUATING' -- 'EVALUATING', 'SETTLED', 'EXPIRED'
+);
+
+CREATE INDEX IF NOT EXISTS idx_pillar_events_ts ON pillar_telemetry_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_pillar_events_sym_status ON pillar_telemetry_events(symbol, status);
+
+-- Table 2: Multi-Horizon Outcome Settlement
+CREATE TABLE IF NOT EXISTS pillar_horizon_evaluations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id INTEGER NOT NULL REFERENCES pillar_telemetry_events(id) ON DELETE CASCADE,
+  horizon TEXT NOT NULL, -- '1m', '5m', '15m', '60m'
+  settle_timestamp INTEGER NOT NULL,
+  settle_price REAL NOT NULL,
+  price_change_abs REAL NOT NULL,
+  price_change_pct REAL NOT NULL,
+  mfe_pct REAL NOT NULL, -- Maximum Favorable Excursion
+  mae_pct REAL NOT NULL, -- Maximum Adverse Excursion
+  directional_outcome TEXT NOT NULL, -- 'BULLISH_EXPANSION', 'BEARISH_EXPANSION', 'ADVERSE_STOPOUT', 'CHOP'
+  p1_status TEXT NOT NULL DEFAULT 'NEUTRAL' CHECK(p1_status IN ('TRUE_POSITIVE','FALSE_POSITIVE','FALSE_NEGATIVE','TRUE_NEGATIVE','NEUTRAL')),
+  p2_status TEXT NOT NULL DEFAULT 'NEUTRAL' CHECK(p2_status IN ('TRUE_POSITIVE','FALSE_POSITIVE','FALSE_NEGATIVE','TRUE_NEGATIVE','NEUTRAL')),
+  p3_status TEXT NOT NULL DEFAULT 'NEUTRAL' CHECK(p3_status IN ('TRUE_POSITIVE','FALSE_POSITIVE','FALSE_NEGATIVE','TRUE_NEGATIVE','NEUTRAL')),
+  p4_status TEXT NOT NULL DEFAULT 'NEUTRAL' CHECK(p4_status IN ('TRUE_POSITIVE','FALSE_POSITIVE','FALSE_NEGATIVE','TRUE_NEGATIVE','NEUTRAL')),
+  p5_status TEXT NOT NULL DEFAULT 'NEUTRAL' CHECK(p5_status IN ('TRUE_POSITIVE','FALSE_POSITIVE','FALSE_NEGATIVE','TRUE_NEGATIVE','NEUTRAL')),
+  p6_status TEXT NOT NULL DEFAULT 'NEUTRAL' CHECK(p6_status IN ('TRUE_POSITIVE','FALSE_POSITIVE','FALSE_NEGATIVE','TRUE_NEGATIVE','NEUTRAL')),
+  p7_status TEXT NOT NULL DEFAULT 'NEUTRAL' CHECK(p7_status IN ('TRUE_POSITIVE','FALSE_POSITIVE','FALSE_NEGATIVE','TRUE_NEGATIVE','NEUTRAL'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_horizon_event_horizon ON pillar_horizon_evaluations(event_id, horizon);
+CREATE INDEX IF NOT EXISTS idx_horizon_eval_horizon_settle ON pillar_horizon_evaluations(horizon, settle_timestamp);
+
+-- Table 3: Permanent Daily Pillar Scorecards (Archived Rollup)
+CREATE TABLE IF NOT EXISTS pillar_daily_scorecards (
+  date TEXT NOT NULL, -- 'YYYY-MM-DD'
+  symbol TEXT NOT NULL,
+  horizon TEXT NOT NULL,
+  scorecards_json TEXT NOT NULL,
+  sample_size INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (date, symbol, horizon)
+);
+
+

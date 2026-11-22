@@ -477,3 +477,117 @@ export type WsServerMessage =
         openTradeId: string | null;
       };
     };
+
+// ----------------------------------------------------------------------------
+// Bulldog Engine: Granular Pillar Attribution & Trajectory Contracts
+// ----------------------------------------------------------------------------
+
+export type TrajectoryHorizon = '1m' | '5m' | '15m' | '60m';
+
+export type ImpulseTriggerType =
+  | 'PILLAR_DIVERGENCE'
+  | 'VOLATILITY_EXPANSION'
+  | 'CONSENSUS_ATTEMPT';
+
+export type TelemetryStatus = 'EVALUATING' | 'SETTLED' | 'EXPIRED';
+
+export type TrajectoryOutcome =
+  | 'BULLISH_EXPANSION'
+  | 'BEARISH_EXPANSION'
+  | 'ADVERSE_STOPOUT'
+  | 'CHOP';
+
+export type PillarAttributionStatus =
+  | 'TRUE_POSITIVE'
+  | 'FALSE_POSITIVE'
+  | 'FALSE_NEGATIVE'
+  | 'TRUE_NEGATIVE'
+  | 'NEUTRAL';
+
+export interface PillarSnapshotJson {
+  state: string;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  score: number;
+  confirmed: boolean;
+  rawText: string;
+}
+
+export interface PillarTelemetryRecord {
+  id?: number;
+  timestamp: number;
+  symbol: string;
+  trigger_type: ImpulseTriggerType;
+  mark_price: number;
+  atr_14: number;
+  composite_score: number;
+  consensus_side: 'BUY' | 'SELL' | 'NEUTRAL';
+  active_pillars_count: number;
+  p1_vote: string;
+  p2_vote: string;
+  p3_vote: string;
+  p4_vote: string;
+  p5_vote: string;
+  p6_vote: string;
+  p7_vote: string;
+  p1_macro_regime: string;
+  p2_native_smc: string;
+  p3_cvd_absorption: string;
+  p4_order_flow_l2: string;
+  p5_liq_clusters: string;
+  p6_momentum_rvol: string;
+  p7_sentiment_macro: string;
+  status: TelemetryStatus;
+}
+
+export interface PillarHorizonEvaluation {
+  id?: number;
+  event_id: number;
+  horizon: TrajectoryHorizon;
+  settle_timestamp: number;
+  settle_price: number;
+  price_change_abs: number;
+  price_change_pct: number;
+  mfe_pct: number;
+  mae_pct: number;
+  directional_outcome: TrajectoryOutcome;
+  p1_status: PillarAttributionStatus;
+  p2_status: PillarAttributionStatus;
+  p3_status: PillarAttributionStatus;
+  p4_status: PillarAttributionStatus;
+  p5_status: PillarAttributionStatus;
+  p6_status: PillarAttributionStatus;
+  p7_status: PillarAttributionStatus;
+}
+
+export interface PillarScorecardItem {
+  pillarId: ConfluencePillarId;
+  title: string;
+  currentWeightPct: number;
+  recommendedWeightPct: number;
+  weightDeltaPct: number;
+  totalActiveVotes: number;
+  truePositives: number;
+  falsePositives: number;
+  falseNegatives: number;
+  hitRatePct: number;
+  avgMfePct: number;
+  avgMaePct: number;
+}
+
+export interface PillarAttributionResponse {
+  symbol: string;
+  horizon: TrajectoryHorizon;
+  sampleSize: number;
+  generatedAt: number;
+  scorecards: PillarScorecardItem[];
+}
+
+export interface PillarDailyScorecardRecord {
+  date: string;
+  symbol: string;
+  horizon: TrajectoryHorizon;
+  scorecards_json: string;
+  sample_size: number;
+  created_at: number;
+}
+

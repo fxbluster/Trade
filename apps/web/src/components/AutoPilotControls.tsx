@@ -130,7 +130,7 @@ export const AutoPilotControls: React.FC = () => {
             <span>Consensus Threshold:</span>
           </span>
           <div className="flex items-center space-x-1">
-            {[4, 5, 6].map((th) => (
+            {[3, 4, 5, 6].map((th) => (
               <button
                 key={th}
                 onClick={() => handleUpdateConfig({ consensusThreshold: th })}

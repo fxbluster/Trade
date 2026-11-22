@@ -21,13 +21,13 @@ export const PILLAR_METADATA: Record<
   ConfluencePillarId,
   { name: string; weight: string; icon: React.ComponentType<{ className?: string }> }
 > = {
-  MACRO_REGIME: { name: 'Macro Regime', weight: '25%', icon: TrendingUp },
-  NATIVE_SMC: { name: 'Native SMC', weight: '25%', icon: Layers },
+  MACRO_REGIME: { name: 'Macro Regime', weight: '15%', icon: TrendingUp },
+  NATIVE_SMC: { name: 'Native SMC', weight: '20%', icon: Layers },
   CVD_ABSORPTION: { name: 'CVD Absorption', weight: '20%', icon: Waves },
-  ORDER_FLOW_L2: { name: 'Order Flow L2', weight: '15%', icon: BarChart3 },
+  ORDER_FLOW_L2: { name: 'Order Flow L2', weight: '12.5%', icon: BarChart3 },
   LIQ_CLUSTERS: { name: 'Liq Clusters', weight: '7.5%', icon: Magnet },
-  MOMENTUM_RVOL: { name: 'Momentum & rVol', weight: '5%', icon: Activity },
-  SENTIMENT_MACRO: { name: 'Macro Sentiment', weight: '2.5%', icon: Newspaper },
+  MOMENTUM_RVOL: { name: 'Momentum & rVol', weight: '10%', icon: Activity },
+  SENTIMENT_MACRO: { name: 'Macro Sentiment', weight: '15%', icon: Newspaper },
 };
 
 export const ConfluenceHUD: React.FC = () => {

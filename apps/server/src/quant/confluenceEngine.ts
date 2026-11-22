@@ -10,7 +10,7 @@ import type {
   TechnicalSummary,
   CvdSnapshot,
 } from '@tradeos/shared';
-import { calculateCompositeConfluenceScore } from '@tradeos/shared';
+import { calculateCompositeConfluenceScore, EMPIRICAL_CONFLUENCE_WEIGHTS } from '@tradeos/shared';
 import { HierarchicalMtfManager } from './hierarchicalMtfManager.js';
 import { NativeSmcEngine } from './nativeSmcEngine.js';
 import { OrderFlowEngine, type DepthLevel } from './orderFlowEngine.js';
@@ -195,10 +195,23 @@ export class ConfluenceEngine {
     }
 
     const { compositeScore, bias: mathBias, recommendedAction } =
-      calculateCompositeConfluenceScore(pillars, macroVetoActive);
+      calculateCompositeConfluenceScore(pillars, macroVetoActive, EMPIRICAL_CONFLUENCE_WEIGHTS);
 
-    // Institutional rule: consensusMet = compositeScore >= 75 && !macroVetoActive
-    const consensusMet = compositeScore >= 75 && !macroVetoActive;
+    // Institutional consensus rule:
+    // 1. Either compositeScore >= 75 (STRONG signal)
+    // 2. OR compositeScore >= 60 AND active directional pillars >= this.consensusThreshold (standard institutional consensus)
+    // 3. No macro veto is active
+    const directionalCount = mathBias === 'BULLISH' ? bullishCount : mathBias === 'BEARISH' ? bearishCount : 0;
+    const thresholdMet = directionalCount >= this.consensusThreshold;
+    const isActionable =
+      recommendedAction === 'BUY' ||
+      recommendedAction === 'STRONG_BUY' ||
+      recommendedAction === 'SELL' ||
+      recommendedAction === 'STRONG_SELL';
+
+    const consensusMet =
+      !macroVetoActive &&
+      (compositeScore >= 75 || (compositeScore >= 60 && thresholdMet && isActionable));
     const consensusBias = consensusMet ? mathBias : 'NEUTRAL';
 
     const snapshot: ConfluenceSnapshot = {

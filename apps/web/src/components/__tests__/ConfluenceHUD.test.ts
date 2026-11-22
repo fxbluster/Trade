@@ -29,13 +29,13 @@ describe('ConfluenceHUD & Institutional SMC State Slices', () => {
   });
 
   it('contains exact institutional metadata weights for all 7 pillars', () => {
-    expect(PILLAR_METADATA.MACRO_REGIME.weight).toBe('25%');
-    expect(PILLAR_METADATA.NATIVE_SMC.weight).toBe('25%');
+    expect(PILLAR_METADATA.MACRO_REGIME.weight).toBe('15%');
+    expect(PILLAR_METADATA.NATIVE_SMC.weight).toBe('20%');
     expect(PILLAR_METADATA.CVD_ABSORPTION.weight).toBe('20%');
-    expect(PILLAR_METADATA.ORDER_FLOW_L2.weight).toBe('15%');
+    expect(PILLAR_METADATA.ORDER_FLOW_L2.weight).toBe('12.5%');
     expect(PILLAR_METADATA.LIQ_CLUSTERS.weight).toBe('7.5%');
-    expect(PILLAR_METADATA.MOMENTUM_RVOL.weight).toBe('5%');
-    expect(PILLAR_METADATA.SENTIMENT_MACRO.weight).toBe('2.5%');
+    expect(PILLAR_METADATA.MOMENTUM_RVOL.weight).toBe('10%');
+    expect(PILLAR_METADATA.SENTIMENT_MACRO.weight).toBe('15%');
   });
 
   it('updates confluence snapshot and institutional SMC slices in store correctly', () => {

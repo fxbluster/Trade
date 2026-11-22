@@ -15,6 +15,7 @@ import {
   ChevronDown,
   FileText,
   Timer,
+  Layers,
 } from 'lucide-react';
 import type { BrokerMode } from '@tradeos/shared';
 
@@ -36,6 +37,7 @@ export const TopBar: React.FC = () => {
   const toggleAudioMute = useUiStore((s) => s.toggleAudioMute);
   const setIsScannerModalOpen = useUiStore((s) => s.setIsScannerModalOpen);
   const setIsTimeMachineModalOpen = useUiStore((s) => s.setIsTimeMachineModalOpen);
+  const setIsPillarScorecardModalOpen = useUiStore((s) => s.setIsPillarScorecardModalOpen);
   const setIsCooldownModalOpen = useUiStore((s) => s.setIsCooldownModalOpen);
 
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
@@ -219,6 +221,17 @@ export const TopBar: React.FC = () => {
         >
           <Cpu className="w-3.5 h-3.5 text-[#8b5cf6]" />
           <span className="hidden sm:inline">10k Sim</span>
+        </button>
+
+        {/* Pillar Matrix Trigger */}
+        <button
+          onClick={() => setIsPillarScorecardModalOpen(true)}
+          data-testid="pillar-matrix-btn"
+          className="flex items-center space-x-1 px-2 py-1 rounded bg-[#020305] border border-[#151d2c] text-[#7d8590] hover:text-[#e6edf3] hover:border-[#7d8590] transition-colors"
+          title="Pillar Attribution & Weight Calibration Matrix"
+        >
+          <Layers className="w-3.5 h-3.5 text-[#00f2fe]" />
+          <span className="hidden sm:inline">Pillar Matrix</span>
         </button>
 
         {/* Daily Decision Audit Export */}

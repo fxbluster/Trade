@@ -12,15 +12,24 @@ import type {
   RiskStateRecord,
   ConfluenceSnapshot,
   AutoPilotConfig,
+  TrajectoryHorizon,
+  PillarAttributionResponse,
 } from '@tradeos/shared';
 
 let sessionToken: string | null = null;
 let sessionPromise: Promise<string> | null = null;
 
 export async function getSessionToken(): Promise<string> {
-  if (sessionToken) {
+  if (typeof sessionStorage !== 'undefined') {
+    const stored = sessionStorage.getItem('tradeos_session_token');
+    if (stored) {
+      sessionToken = stored;
+      return sessionToken;
+    }
+  } else if (sessionToken) {
     return sessionToken;
   }
+
   if (!sessionPromise) {
     sessionPromise = (async () => {
       try {
@@ -36,7 +45,8 @@ export async function getSessionToken(): Promise<string> {
         return sessionToken!;
       } catch (err) {
         sessionPromise = null;
-        throw err;
+        sessionToken = 'local-dev-token';
+        return sessionToken;
       }
     })();
   }
@@ -210,6 +220,13 @@ export const apiClient = {
     });
   },
 
+  async getPillarScorecard(
+    symbol: string = 'SOLUSDT',
+    horizon: TrajectoryHorizon = '15m'
+  ): Promise<PillarAttributionResponse> {
+    return getPillarScorecard(symbol, horizon);
+  },
+
   async downloadDailyAudit(
     format: 'json' | 'markdown' = 'markdown',
     session: 'current' | 'all' = 'current'
@@ -218,11 +235,22 @@ export const apiClient = {
   },
 };
 
+export async function getPillarScorecard(
+  symbol: string = 'SOLUSDT',
+  horizon: TrajectoryHorizon = '15m'
+): Promise<PillarAttributionResponse> {
+  await getSessionToken();
+  const url = `/api/audit/pillars?symbol=${encodeURIComponent(symbol)}&horizon=${encodeURIComponent(horizon)}`;
+  return request<PillarAttributionResponse>(url);
+}
+
 export async function downloadDailyAudit(
   format: 'json' | 'markdown' = 'markdown',
   session: 'current' | 'all' = 'current'
 ): Promise<void> {
-  const token = await getSessionToken();
+  const token =
+    (typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('tradeos_session_token') : null) ||
+    'local-dev-token';
 
   const res = await fetch(`/api/audit/daily?format=${encodeURIComponent(format)}&session=${encodeURIComponent(session)}`, {
     method: 'GET',

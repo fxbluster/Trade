@@ -410,6 +410,14 @@ export class DecisionAuditService {
     expired_pnl_usd = Number(expired_pnl_usd.toFixed(2));
     const net_risk_value_usd = Number((capital_saved_usd - missed_profit_usd).toFixed(2));
 
+    if (this.pillarRepo) {
+      try {
+        this.pillarRepo.archiveDailyScorecards();
+      } catch {
+        // Non-blocking archival
+      }
+    }
+
     const subThresholdEvents = this.pillarRepo
       ? this.pillarRepo.listEventsSince(sinceMs ?? 0).filter((e) => e.composite_score < 60)
       : [];
@@ -469,18 +477,59 @@ export class DecisionAuditService {
       md += `\n`;
     }
 
+    if (this.pillarRepo) {
+      try {
+        const attribution = this.pillarRepo.getAttributionResponse('SOLUSDT', '15m');
+        if (attribution && attribution.scorecards.length > 0) {
+          md += `## Institutional 7-Pillar Attribution & Bayesian Accuracy (Horizon: 15m)\n\n`;
+          md += `| Pillar | Total Signals | Hit Rate | Static Weight | Recommended Weight |\n`;
+          md += `| :--- | :--- | :--- | :--- | :--- |\n`;
+          for (const sc of attribution.scorecards) {
+            const hitRateStr = `${sc.hitRatePct.toFixed(1)}%`;
+            const staticWeightStr = `${sc.currentWeightPct.toFixed(1)}%`;
+            const recWeightStr = `${sc.recommendedWeightPct.toFixed(1)}%`;
+            md += `| ${sc.title} | ${sc.totalActiveVotes} | ${hitRateStr} | ${staticWeightStr} | **${recWeightStr}** |\n`;
+          }
+          md += `\n`;
+        }
+      } catch {
+        // Safe fallback
+      }
+    }
+
     md += `## Sub-Threshold Market Impulses (<60% Consensus)\n\n`;
     const impulses = sub_threshold_impulses ?? [];
     if (impulses.length === 0) {
       md += `*No sub-threshold market impulses recorded in this session.*\n\n`;
     } else {
-      md += `| ID | Time | Symbol | Trigger | Side | Score | Active Pillars | Entry Price | Status |\n`;
+      md += `| ID | Time | Symbol | Trigger | Side | Score | Active Pillar Votes | Entry Price | Directional Outcome |\n`;
       md += `| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n`;
       for (const imp of impulses) {
         const timeStr = new Date(imp.timestamp).toISOString().slice(11, 19);
         const scoreStr = `${imp.composite_score}%`;
         const priceStr = imp.mark_price.toFixed(2);
-        md += `| ${imp.id ?? '-'} | ${timeStr} | ${imp.symbol} | ${imp.trigger_type} | ${imp.consensus_side} | ${scoreStr} | ${imp.active_pillars_count}/7 | ${priceStr} | ${imp.status} |\n`;
+
+        const activeVotes: string[] = [];
+        if (imp.p1_vote && imp.p1_vote !== 'NEUTRAL' && imp.p1_vote !== 'WAIT') activeVotes.push(`P1:${imp.p1_vote}`);
+        if (imp.p2_vote && imp.p2_vote !== 'NEUTRAL' && imp.p2_vote !== 'WAIT') activeVotes.push(`P2:${imp.p2_vote}`);
+        if (imp.p3_vote && imp.p3_vote !== 'NEUTRAL' && imp.p3_vote !== 'WAIT') activeVotes.push(`P3:${imp.p3_vote}`);
+        if (imp.p4_vote && imp.p4_vote !== 'NEUTRAL' && imp.p4_vote !== 'WAIT') activeVotes.push(`P4:${imp.p4_vote}`);
+        if (imp.p5_vote && imp.p5_vote !== 'NEUTRAL' && imp.p5_vote !== 'WAIT') activeVotes.push(`P5:${imp.p5_vote}`);
+        if (imp.p6_vote && imp.p6_vote !== 'NEUTRAL' && imp.p6_vote !== 'WAIT') activeVotes.push(`P6:${imp.p6_vote}`);
+        if (imp.p7_vote && imp.p7_vote !== 'NEUTRAL' && imp.p7_vote !== 'WAIT') activeVotes.push(`P7:${imp.p7_vote}`);
+        const votesStr = activeVotes.length > 0 ? activeVotes.join(' ') : `${imp.active_pillars_count}/7`;
+
+        let outcomeStr: string = String(imp.status);
+        if (this.pillarRepo && imp.id) {
+          const evals = this.pillarRepo.getEvaluationsForEvent(imp.id);
+          const ev15 = evals.find((e) => e.horizon === '15m') || evals[0];
+          if (ev15 && ev15.directional_outcome) {
+            const mfeStr = ev15.mfe_pct ? ` (+${ev15.mfe_pct.toFixed(2)}%)` : '';
+            outcomeStr = `${ev15.directional_outcome}${mfeStr}`;
+          }
+        }
+
+        md += `| ${imp.id ?? '-'} | ${timeStr} | ${imp.symbol} | ${imp.trigger_type} | ${imp.consensus_side} | ${scoreStr} | ${votesStr} | ${priceStr} | ${outcomeStr} |\n`;
       }
       md += `\n`;
     }

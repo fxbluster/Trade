@@ -14,6 +14,7 @@ import type {
   AutoPilotConfig,
   TrajectoryHorizon,
   PillarAttributionResponse,
+  DailyAuditResponse,
 } from '@tradeos/shared';
 
 let sessionToken: string | null = null;
@@ -240,7 +241,17 @@ export const apiClient = {
   ): Promise<void> {
     return downloadDailyAudit(format, session);
   },
+
+  async getDailyAudit(session: 'current' | 'all' = 'current'): Promise<DailyAuditResponse> {
+    return getDailyAudit(session);
+  },
 };
+
+export async function getDailyAudit(session: 'current' | 'all' = 'current'): Promise<DailyAuditResponse> {
+  await getSessionToken();
+  const url = `/api/audit/daily?format=json&session=${encodeURIComponent(session)}`;
+  return request<DailyAuditResponse>(url);
+}
 
 export async function getPillarScorecard(
   symbol: string = 'SOLUSDT',

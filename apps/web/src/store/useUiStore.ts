@@ -13,7 +13,7 @@ export interface OrderDraft {
   preview: OrderPreviewResponse | null;
 }
 
-export type BottomTabType = 'POSITION' | 'ORDERS' | 'JOURNAL';
+export type BottomTabType = 'POSITION' | 'ORDERS' | 'JOURNAL' | 'TELEMETRY';
 
 export interface UiStoreState {
   orderDraft: OrderDraft;

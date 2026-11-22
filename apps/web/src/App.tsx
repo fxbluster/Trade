@@ -7,6 +7,7 @@ import { OrderTicket } from './components/OrderTicket';
 import { ActivePositionPanel } from './components/ActivePositionPanel';
 import { OpenOrdersPanel } from './components/OpenOrdersPanel';
 import { TradeJournalPanel } from './components/TradeJournalPanel';
+import { AgentTelemetryPanel } from './components/AgentTelemetryPanel';
 import { SokratMentorPanel } from './components/SokratMentorPanel';
 import { CooldownModal } from './components/CooldownModal';
 import { ScannerModal } from './components/ScannerModal';
@@ -17,7 +18,7 @@ import { useUiStore } from './store/useUiStore';
 import { wsClient } from './lib/wsClient';
 import { apiClient } from './lib/apiClient';
 import { soundEffects } from './lib/audio';
-import { ShieldCheck, ListOrdered, BookOpen } from 'lucide-react';
+import { ShieldCheck, ListOrdered, BookOpen, Activity } from 'lucide-react';
 
 export const App: React.FC = () => {
   const activePosition = useMarketStore((s) => s.activePosition);
@@ -157,6 +158,18 @@ export const App: React.FC = () => {
                 <BookOpen className="w-3.5 h-3.5" />
                 <span>Trade Journal</span>
               </button>
+
+              <button
+                onClick={() => setActiveBottomTab('TELEMETRY')}
+                className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
+                  activeBottomTab === 'TELEMETRY'
+                    ? 'bg-[#151d2c] text-[#00bcd4] font-bold'
+                    : 'text-[#7d8590] hover:text-[#e6edf3]'
+                }`}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>Agent Loqları</span>
+              </button>
             </div>
 
             {/* Tab Body */}
@@ -164,6 +177,7 @@ export const App: React.FC = () => {
               {activeBottomTab === 'POSITION' && <ActivePositionPanel />}
               {activeBottomTab === 'ORDERS' && <OpenOrdersPanel />}
               {activeBottomTab === 'JOURNAL' && <TradeJournalPanel />}
+              {activeBottomTab === 'TELEMETRY' && <AgentTelemetryPanel />}
             </div>
           </div>
         </section>

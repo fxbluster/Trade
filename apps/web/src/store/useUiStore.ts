@@ -14,6 +14,7 @@ export interface OrderDraft {
 }
 
 export type BottomTabType = 'POSITION' | 'ORDERS' | 'JOURNAL' | 'TELEMETRY';
+export type RightRailTabType = 'ORDER_TICKET' | 'TELEMETRY';
 
 export interface UiStoreState {
   orderDraft: OrderDraft;
@@ -23,6 +24,8 @@ export interface UiStoreState {
   isPillarScorecardModalOpen: boolean;
   isAudioMuted: boolean;
   activeBottomTab: BottomTabType;
+  rightRailTab: RightRailTabType;
+  isBottomExpanded: boolean;
 
   // Actions
   setOrderDraft: (draft: Partial<OrderDraft>) => void;
@@ -34,6 +37,9 @@ export interface UiStoreState {
   setIsPillarScorecardModalOpen: (open: boolean) => void;
   toggleAudioMute: () => void;
   setActiveBottomTab: (tab: BottomTabType) => void;
+  setRightRailTab: (tab: RightRailTabType) => void;
+  toggleBottomExpanded: () => void;
+  setIsBottomExpanded: (expanded: boolean) => void;
 }
 
 const defaultOrderDraft: OrderDraft = {
@@ -56,6 +62,8 @@ export const useUiStore = create<UiStoreState>((set) => ({
   isPillarScorecardModalOpen: false,
   isAudioMuted: false,
   activeBottomTab: 'POSITION',
+  rightRailTab: 'ORDER_TICKET',
+  isBottomExpanded: false,
 
   setOrderDraft: (partial) => {
     set((state) => ({
@@ -85,4 +93,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setIsPillarScorecardModalOpen: (open) => set({ isPillarScorecardModalOpen: open }),
   toggleAudioMute: () => set((state) => ({ isAudioMuted: !state.isAudioMuted })),
   setActiveBottomTab: (tab) => set({ activeBottomTab: tab }),
+  setRightRailTab: (tab) => set({ rightRailTab: tab }),
+  toggleBottomExpanded: () => set((state) => ({ isBottomExpanded: !state.isBottomExpanded })),
+  setIsBottomExpanded: (expanded) => set({ isBottomExpanded: expanded }),
 }));

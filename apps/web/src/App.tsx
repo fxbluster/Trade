@@ -25,6 +25,9 @@ export const App: React.FC = () => {
   const openOrders = useMarketStore((s) => s.openOrders);
   const activeBottomTab = useUiStore((s) => s.activeBottomTab);
   const setActiveBottomTab = useUiStore((s) => s.setActiveBottomTab);
+  const isBottomExpanded = useUiStore((s) => s.isBottomExpanded);
+  const rightRailTab = useUiStore((s) => s.rightRailTab);
+  const setRightRailTab = useUiStore((s) => s.setRightRailTab);
 
   // Initialize REST and WebSocket Connections
   useEffect(() => {
@@ -107,12 +110,12 @@ export const App: React.FC = () => {
           </div>
 
           {/* Chart Canvas Area */}
-          <div className="flex-[6] min-h-[300px] relative">
+          <div className={`${isBottomExpanded ? 'flex-[3] min-h-[160px]' : 'flex-[6] min-h-[280px]'} relative transition-all duration-200`}>
             <ChartCanvas className="h-full" />
           </div>
 
           {/* Bottom Cockpit Panel with Tab Switcher */}
-          <div className="flex-[4] flex flex-col min-h-[200px] bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden">
+          <div className={`${isBottomExpanded ? 'flex-[7] min-h-[420px]' : 'flex-[4] min-h-[200px]'} flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden transition-all duration-200`}>
             {/* Tab Header */}
             <div className="flex items-center space-x-1 px-3 py-1.5 border-b border-[#151d2c] bg-[#020305] font-mono text-xs">
               <button
@@ -182,18 +185,55 @@ export const App: React.FC = () => {
           </div>
         </section>
 
-        {/* Right Rail (30%): Pinned Flight Deck Header, Scrollable Order Form and Mentor Rail */}
-        <aside className="flex-[3] flex flex-col min-w-[340px] max-w-[420px] h-full gap-2 overflow-hidden">
+        {/* Right Rail: Pinned Flight Deck Header, Switcher between Order Form and Telemetry */}
+        <aside
+          className={`${
+            rightRailTab === 'TELEMETRY'
+              ? 'flex-[4] min-w-[380px] max-w-[500px]'
+              : 'flex-[3] min-w-[340px] max-w-[420px]'
+          } flex flex-col h-full gap-2 overflow-hidden transition-all duration-200`}
+        >
           {/* Pinned Executive Flight Deck (Static, Never Scrolls) */}
           <div className="flex-shrink-0">
             <AutoPilotControls />
           </div>
 
-          {/* Scrollable Order Form and Mentor Rail */}
-          <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
-            <OrderTicket />
-            <SokratMentorPanel />
+          {/* Right Rail View Switcher Tab Header */}
+          <div className="flex items-center space-x-1 p-1 bg-[#020305] border border-[#151d2c] rounded font-mono text-[11px] flex-shrink-0">
+            <button
+              onClick={() => setRightRailTab('ORDER_TICKET')}
+              className={`flex-1 py-1 px-2 rounded text-center transition-colors ${
+                rightRailTab === 'ORDER_TICKET'
+                  ? 'bg-[#151d2c] text-[#e6edf3] font-bold'
+                  : 'text-[#7d8590] hover:text-[#e6edf3]'
+              }`}
+            >
+              ⚡ Əmr & Mentor
+            </button>
+            <button
+              onClick={() => setRightRailTab('TELEMETRY')}
+              className={`flex-1 py-1 px-2 rounded text-center transition-colors flex items-center justify-center space-x-1 ${
+                rightRailTab === 'TELEMETRY'
+                  ? 'bg-[#00bcd4]/20 text-[#00bcd4] font-bold border border-[#00bcd4]/40'
+                  : 'text-[#7d8590] hover:text-[#e6edf3]'
+              }`}
+            >
+              <Activity className="w-3.5 h-3.5 mr-1" />
+              <span>Agent Loqları</span>
+            </button>
           </div>
+
+          {/* Content View */}
+          {rightRailTab === 'TELEMETRY' ? (
+            <div className="flex-1 overflow-hidden">
+              <AgentTelemetryPanel isDockedRight={true} />
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+              <OrderTicket />
+              <SokratMentorPanel />
+            </div>
+          )}
         </aside>
       </main>
 

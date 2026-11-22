@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { apiClient } from '../lib/apiClient';
 import type { PillarTelemetryRecord, DailyAuditResponse } from '@tradeos/shared';
+import { useUiStore } from '../store/useUiStore';
 import {
   Activity,
   RefreshCw,
@@ -14,6 +15,10 @@ import {
   Radio,
   Clock,
   Layers,
+  Maximize2,
+  Minimize2,
+  ArrowRightCircle,
+  ArrowDownCircle,
 } from 'lucide-react';
 
 interface PillarJsonDetail {
@@ -33,7 +38,16 @@ function parsePillarDetail(jsonStr?: string): PillarJsonDetail | null {
   }
 }
 
-export const AgentTelemetryPanel: React.FC = () => {
+export interface AgentTelemetryPanelProps {
+  isDockedRight?: boolean;
+}
+
+export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDockedRight = false }) => {
+  const isBottomExpanded = useUiStore((s) => s.isBottomExpanded);
+  const toggleBottomExpanded = useUiStore((s) => s.toggleBottomExpanded);
+  const setRightRailTab = useUiStore((s) => s.setRightRailTab);
+  const setActiveBottomTab = useUiStore((s) => s.setActiveBottomTab);
+
   const [data, setData] = useState<DailyAuditResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -146,6 +160,48 @@ export const AgentTelemetryPanel: React.FC = () => {
             <RefreshCw className={`w-3 h-3 ${isLoading ? 'animate-spin' : ''}`} />
             <span>Yenilə</span>
           </button>
+
+          {/* Docking & Expand Controls */}
+          {isDockedRight ? (
+            <button
+              onClick={() => {
+                setRightRailTab('ORDER_TICKET');
+                setActiveBottomTab('TELEMETRY');
+              }}
+              className="flex items-center space-x-1 px-2.5 py-1 rounded bg-[#2962ff]/20 text-[#2962ff] border border-[#2962ff]/30 hover:bg-[#2962ff]/30 transition-colors"
+              title="Aşağı panelə keçir"
+            >
+              <ArrowDownCircle className="w-3.5 h-3.5" />
+              <span>Aşağı Keçir</span>
+            </button>
+          ) : (
+            <div className="flex items-center space-x-1 pl-1 border-l border-[#151d2c]">
+              <button
+                onClick={toggleBottomExpanded}
+                className={`flex items-center space-x-1 px-2 py-1 rounded transition-colors border ${
+                  isBottomExpanded
+                    ? 'bg-[#f0b90b]/20 text-[#f0b90b] border-[#f0b90b]/40'
+                    : 'bg-[#151d2c] text-[#7d8590] border-[#151d2c] hover:text-[#e6edf3]'
+                }`}
+                title={isBottomExpanded ? 'Normal ölçüyə qaytar' : 'Qrafiki kiçildib pəncərəni böyüt'}
+              >
+                {isBottomExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                <span>{isBottomExpanded ? 'Kiçilt' : 'Böyüt'}</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  setRightRailTab('TELEMETRY');
+                  setActiveBottomTab('POSITION');
+                }}
+                className="flex items-center space-x-1 px-2 py-1 rounded bg-[#00bcd4]/10 text-[#00bcd4] border border-[#00bcd4]/30 hover:bg-[#00bcd4]/20 transition-colors"
+                title="Sağ sütuna keçir (bütöv hündürlükdə bax)"
+              >
+                <ArrowRightCircle className="w-3.5 h-3.5" />
+                <span>Sağa Keçir</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

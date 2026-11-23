@@ -141,7 +141,16 @@ export async function bootstrapServer(): Promise<{
       currency: 'USDT',
     }));
 
-    const activePosition = tradesRepo.getActivePosition(activeBroker.mode, sym);
+    let activePosition = tradesRepo.getActivePosition(activeBroker.mode, sym);
+    if (activePosition) {
+      try {
+        const livePos = await activeBroker.getPosition(sym);
+        if (livePos && livePos.entryPrice > 0 && Math.abs(livePos.entryPrice - activePosition.entry_price) > 0.0001) {
+          tradesRepo.update(activePosition.id, { entry_price: Number(livePos.entryPrice.toFixed(4)) });
+          activePosition = tradesRepo.getById(activePosition.id)!;
+        }
+      } catch {}
+    }
     const openOrders = await activeBroker.getOpenOrders(sym).catch(() => []);
 
     const candles = candleHistoryMap.get(sym) || [];

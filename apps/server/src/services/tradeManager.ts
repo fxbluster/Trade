@@ -978,12 +978,19 @@ export class TradeManager {
         return;
       }
 
-      // Case 2: Position still exists on exchange -> sync remaining_qty without modifying SL/TP metadata
+      // Case 2: Position still exists on exchange -> sync remaining_qty and actual exchange entry_price
       const currentQty = Math.abs(pos.positionAmt);
+      const updates: any = {};
       if (currentQty !== trade.remaining_qty) {
-        this.tradesRepo.update(trade.id, {
-          remaining_qty: currentQty,
-        });
+        updates.remaining_qty = currentQty;
+      }
+      if (pos.entryPrice && pos.entryPrice > 0 && Math.abs(pos.entryPrice - trade.entry_price) > 0.0001) {
+        updates.entry_price = Number(pos.entryPrice.toFixed(4));
+      }
+      if (Object.keys(updates).length > 0) {
+        this.tradesRepo.update(trade.id, updates);
+        const updatedTrade = this.tradesRepo.getById(trade.id)!;
+        this.broadcastPositionEvent('UPDATED', updatedTrade, 'EXCHANGE_SYNC');
       }
     });
   }

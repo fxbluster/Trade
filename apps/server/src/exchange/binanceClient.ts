@@ -480,6 +480,20 @@ export class BinanceClient {
   }
 
   /**
+   * Fetch open algo/conditional orders (SL, TP, conditional market) for symbol(s).
+   */
+  async getOpenAlgoOrders(symbol?: string): Promise<any[]> {
+    const params: Record<string, unknown> = {};
+    if (symbol) params.symbol = symbol.toUpperCase();
+    return this.request<any[]>('/fapi/v1/openAlgoOrders', {
+      method: 'GET',
+      signed: true,
+      priority: 'P1',
+      params,
+    }).catch(() => []);
+  }
+
+  /**
    * Set leverage for a contract symbol.
    */
   async setLeverage(symbol: string, leverage: number): Promise<any> {

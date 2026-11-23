@@ -402,25 +402,51 @@ export class BinanceDemoAdapter implements BrokerAdapter {
   }
 
   /**
-   * Retrieves all currently open orders on Binance Demo.
+   * Retrieves all currently open orders (both regular and conditional/algo) on Binance Demo.
    */
   async getOpenOrders(symbol?: string): Promise<OpenOrderInfo[]> {
     const symUpper = symbol?.toUpperCase();
     try {
-      const orders = await this.client.getOpenOrders(symUpper);
-      if (!Array.isArray(orders)) return [];
+      const [regularOrders, algoOrders] = await Promise.all([
+        this.client.getOpenOrders(symUpper).catch(() => []),
+        this.client.getOpenAlgoOrders(symUpper).catch(() => []),
+      ]);
 
-      return orders.map((o: any) => ({
-        orderId: String(o.orderId),
-        symbol: o.symbol,
-        side: o.side,
-        price: parseFloat(o.price ?? '0'),
-        origQty: parseFloat(o.origQty ?? '0'),
-        executedQty: parseFloat(o.executedQty ?? '0'),
-        type: o.type,
-        isAlgo: false,
-        clientOrderId: o.clientOrderId,
-      }));
+      const result: OpenOrderInfo[] = [];
+
+      if (Array.isArray(regularOrders)) {
+        for (const o of regularOrders) {
+          result.push({
+            orderId: String(o.orderId),
+            symbol: o.symbol,
+            side: o.side,
+            price: parseFloat(o.price ?? '0'),
+            origQty: parseFloat(o.origQty ?? '0'),
+            executedQty: parseFloat(o.executedQty ?? '0'),
+            type: o.type,
+            isAlgo: false,
+            clientOrderId: o.clientOrderId,
+          });
+        }
+      }
+
+      if (Array.isArray(algoOrders)) {
+        for (const o of algoOrders) {
+          result.push({
+            orderId: String(o.algoId ?? o.orderId),
+            symbol: o.symbol,
+            side: o.side,
+            price: parseFloat(o.triggerPrice ?? o.price ?? '0'),
+            origQty: parseFloat(o.totalQty ?? o.origQty ?? '0'),
+            executedQty: parseFloat(o.executedQty ?? '0'),
+            type: o.orderType || o.type || 'ALGO',
+            isAlgo: true,
+            clientOrderId: o.clientAlgoId || o.clientOrderId,
+          });
+        }
+      }
+
+      return result;
     } catch (err: any) {
       throw new ExchangeDegradedError(
         `Failed to fetch open orders from Binance Demo: ${err.message}`,

@@ -272,9 +272,27 @@ export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDock
 
                   <div className="flex items-center space-x-2 text-[10px] flex-shrink-0">
                     {/* Active Pillar Badges */}
-                    <span className="px-1.5 py-0.5 rounded bg-[#151d2c] text-[#7d8590]">
-                      {imp.active_pillars_count}/7 Aktiv
-                    </span>
+                    {(() => {
+                      const allVotes = [imp.p1_vote, imp.p2_vote, imp.p3_vote, imp.p4_vote, imp.p5_vote, imp.p6_vote, imp.p7_vote];
+                      const bCount = allVotes.filter((v) => v === 'BUY').length;
+                      const sCount = allVotes.filter((v) => v === 'SELL').length;
+                      const dirCount = imp.consensus_side === 'BUY' ? bCount : imp.consensus_side === 'SELL' ? sCount : 0;
+                      const hasSplit = bCount > 0 && sCount > 0;
+                      return (
+                        <span
+                          className={`px-1.5 py-0.5 rounded border text-[10px] ${
+                            hasSplit
+                              ? 'bg-[#f0b90b]/10 border-[#f0b90b]/30 text-[#f0b90b]'
+                              : 'bg-[#151d2c] border-[#151d2c] text-[#7d8590]'
+                          }`}
+                          title={hasSplit ? `Bölünmə: ${bCount} BUY vs ${sCount} SELL` : undefined}
+                        >
+                          {hasSplit
+                            ? `${dirCount}/7 ${imp.consensus_side} (${imp.active_pillars_count} aktiv)`
+                            : `${imp.active_pillars_count}/7 Aktiv`}
+                        </span>
+                      );
+                    })()}
 
                     <span
                       className={`px-1.5 py-0.5 rounded font-bold ${

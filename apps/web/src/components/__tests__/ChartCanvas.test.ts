@@ -283,14 +283,14 @@ describe('ChartCanvas & Price Line Logic', () => {
     expect(highFvgLine).toBeDefined();
     expect(highFvgLine.price).toBe(92000);
     expect(highFvgLine.color).toBe('rgba(14, 203, 129, 0.6)');
-    expect(highFvgLine.axisLabelVisible).toBe(true);
+    expect(highFvgLine.axisLabelVisible).toBe(false);
 
     // FVG LOW line
     const lowFvgLine = calls.find((c: any) => c.title === 'FVG LOW');
     expect(lowFvgLine).toBeDefined();
     expect(lowFvgLine.price).toBe(91500);
     expect(lowFvgLine.color).toBe('rgba(14, 203, 129, 0.3)');
-    expect(lowFvgLine.axisLabelVisible).toBe(true);
+    expect(lowFvgLine.axisLabelVisible).toBe(false);
 
     // Mitigated FVG lines should NOT be created
     const mitigatedHigh = calls.find((c: any) => c.price === 90000);

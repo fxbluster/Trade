@@ -30,7 +30,6 @@ export function formatLocalTime(timestampSec: number): string {
     timeZone: 'Asia/Baku',
     hour: '2-digit',
     minute: '2-digit',
-    second: '2-digit',
     hour12: false,
   });
 }
@@ -513,7 +512,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
               color: 'rgba(14, 203, 129, 0.6)',
               lineWidth: 1,
               lineStyle: LineStyle.Dashed,
-              axisLabelVisible: true,
+              axisLabelVisible: false,
               title: 'FVG HIGH',
             });
             priceLinesRef.current.push(upperLine);
@@ -523,7 +522,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
               color: 'rgba(14, 203, 129, 0.3)',
               lineWidth: 1,
               lineStyle: LineStyle.Dashed,
-              axisLabelVisible: true,
+              axisLabelVisible: false,
               title: 'FVG LOW',
             });
             priceLinesRef.current.push(lowerLine);
@@ -544,7 +543,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
               color,
               lineWidth: 1,
               lineStyle: LineStyle.Dotted,
-              axisLabelVisible: true,
+              axisLabelVisible: false,
               title: `OB HIGH [${ob.type}]`,
             });
             priceLinesRef.current.push(obHigh);
@@ -554,7 +553,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
               color,
               lineWidth: 1,
               lineStyle: LineStyle.Dotted,
-              axisLabelVisible: true,
+              axisLabelVisible: false,
               title: `OB LOW [${ob.type}]`,
             });
             priceLinesRef.current.push(obLow);
@@ -570,7 +569,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           color: isHigh ? '#f6465d' : '#0ecb81',
           lineWidth: 1,
           lineStyle: LineStyle.Dashed,
-          axisLabelVisible: true,
+          axisLabelVisible: false,
           title: isHigh ? 'SWEEP HIGH' : 'SWEEP LOW',
         });
         priceLinesRef.current.push(sweepLine);

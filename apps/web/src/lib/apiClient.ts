@@ -15,6 +15,7 @@ import type {
   TrajectoryHorizon,
   PillarAttributionResponse,
   DailyAuditResponse,
+  PnlSummaryResponse,
 } from '@tradeos/shared';
 
 let sessionToken: string | null = null;
@@ -244,6 +245,11 @@ export const apiClient = {
 
   async getDailyAudit(session: 'current' | 'all' = 'current'): Promise<DailyAuditResponse> {
     return getDailyAudit(session);
+  },
+
+  async getPnlSummary(symbol?: string): Promise<PnlSummaryResponse> {
+    const sym = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
+    return request<PnlSummaryResponse>(`/api/pnl/summary${sym}`);
   },
 };
 

@@ -593,3 +593,46 @@ export interface PillarDailyScorecardRecord {
   created_at: number;
 }
 
+export interface PnlHorizonStats {
+  realizedPnl: number;
+  unrealizedPnl: number;
+  netPnl: number;
+  commission: number;
+  funding: number;
+  tradeCount: number;
+  winCount: number;
+  lossCount: number;
+  winRate: number;
+}
+
+export interface LivePositionStats {
+  hasPosition: boolean;
+  symbol?: string;
+  side?: TradeSide;
+  entryPrice?: number;
+  markPrice?: number;
+  unrealizedPnl?: number;
+  roePercent?: number;
+  marginUsd?: number;
+  leverage?: number;
+  isRiskFree?: boolean;
+  stopLoss?: number;
+  bePrice?: number;
+}
+
+export interface PnlSummaryResponse {
+  live: LivePositionStats;
+  today: PnlHorizonStats;
+  threeDays: PnlHorizonStats;
+  weekly: PnlHorizonStats;
+  account: {
+    equity: number;
+    walletBalance: number;
+    availableBalance: number;
+    currency: string;
+  };
+  humanExplanation: string;
+  timestamp: number;
+}
+
+

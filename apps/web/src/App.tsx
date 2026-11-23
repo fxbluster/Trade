@@ -13,6 +13,7 @@ import { CooldownModal } from './components/CooldownModal';
 import { ScannerModal } from './components/ScannerModal';
 import { TimeMachineModal } from './components/TimeMachineModal';
 import { PillarScorecardModal } from './components/PillarScorecardModal';
+import { PnLSummaryModal } from './components/PnLSummaryModal';
 import { useMarketStore } from './store/useMarketStore';
 import { useUiStore } from './store/useUiStore';
 import { wsClient } from './lib/wsClient';
@@ -242,6 +243,7 @@ export const App: React.FC = () => {
       <ScannerModal />
       <TimeMachineModal />
       <PillarScorecardModal />
+      <PnLSummaryModal />
     </div>
   );
 };

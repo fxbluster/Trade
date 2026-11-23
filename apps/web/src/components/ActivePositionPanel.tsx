@@ -4,12 +4,13 @@ import { useUiStore } from '../store/useUiStore';
 import { apiClient } from '../lib/apiClient';
 import { soundEffects } from '../lib/audio';
 import { calculateLiquidationPrice } from '@tradeos/shared';
-import { ShieldCheck, XCircle, ArrowUpRight, ArrowDownRight, AlertCircle } from 'lucide-react';
+import { ShieldCheck, XCircle, ArrowUpRight, ArrowDownRight, AlertCircle, DollarSign } from 'lucide-react';
 
 export const ActivePositionPanel: React.FC = () => {
   const activePosition = useMarketStore((s) => s.activePosition);
   const markPrice = useMarketStore((s) => s.markPrice);
   const isAudioMuted = useUiStore((s) => s.isAudioMuted);
+  const setIsPnlModalOpen = useUiStore((s) => s.setIsPnlModalOpen);
 
   const [isBreakevenLoading, setIsBreakevenLoading] = useState(false);
   const [isCloseLoading, setIsCloseLoading] = useState(false);
@@ -17,10 +18,17 @@ export const ActivePositionPanel: React.FC = () => {
 
   if (!activePosition || activePosition.status === 'CLOSED') {
     return (
-      <div className="flex flex-col items-center justify-center h-48 text-[#7d8590] select-none">
+      <div className="flex flex-col items-center justify-center h-48 text-[#7d8590] select-none p-4">
         <ShieldCheck className="w-8 h-8 mb-2 opacity-30 text-[#0ecb81]" />
         <span className="font-mono text-xs">No Active Leveraged Position</span>
         <span className="text-[11px] text-[#484f58] mt-1">Capital is safely hedged in cash wallet</span>
+        <button
+          onClick={() => setIsPnlModalOpen(true)}
+          className="mt-3 px-3 py-1.5 rounded bg-[#151d2c] hover:bg-[#1f2937] text-[#0ecb81] text-xs font-mono transition-colors flex items-center space-x-1.5 border border-[#151d2c] hover:border-[#0ecb81]/40"
+        >
+          <DollarSign className="w-3.5 h-3.5" />
+          <span>Qazanc & Performans İcmalına Bax</span>
+        </button>
       </div>
     );
   }
@@ -167,6 +175,26 @@ export const ActivePositionPanel: React.FC = () => {
             }`}
           >
             {liqPrice.toFixed(2)} ({liqDistPercent.toFixed(1)}% dist)
+          </span>
+        </div>
+      </div>
+
+      {/* Quick PnL Horizon Multi-Period Bar */}
+      <div
+        onClick={() => setIsPnlModalOpen(true)}
+        className="flex items-center justify-between p-2 bg-[#020305] rounded border border-[#151d2c] hover:border-[#0ecb81]/40 transition-colors cursor-pointer group"
+        title="Bütün dövrlər üzrə tam qazanc/ziyan hesabatını aç (Sadə Dildə)"
+      >
+        <span className="text-[11px] text-[#7d8590] flex items-center space-x-1 group-hover:text-[#e6edf3]">
+          <DollarSign className="w-3.5 h-3.5 text-[#0ecb81]" />
+          <span>Performans & Qazanc İcmalı:</span>
+        </span>
+        <div className="flex items-center space-x-2 text-[11px]">
+          <span className="px-1.5 py-0.5 rounded bg-[#0ecb81]/15 text-[#0ecb81] font-bold">
+            Canlı: {unrealizedPnlUsd >= 0 ? '+' : ''}${unrealizedPnlUsd.toFixed(2)}
+          </span>
+          <span className="text-[#3b82f6] group-hover:underline text-[10px] font-semibold">
+            Ətraflı Bax ➔
           </span>
         </div>
       </div>

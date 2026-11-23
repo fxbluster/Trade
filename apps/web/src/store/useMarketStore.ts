@@ -264,6 +264,10 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
   setWsStatus: (status: WsStatus) => {
     set({ wsStatus: status });
+    if (status === 'CONNECTED') {
+      get().refreshKlines();
+      get().refreshConfluence();
+    }
   },
 
   setBrokerMode: async (mode: BrokerMode) => {
@@ -280,7 +284,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   refreshKlines: async () => {
     const { symbol, candleInterval } = get();
     try {
-      const candles = await apiClient.getKlines(symbol, candleInterval, 400);
+      const candles = await apiClient.getKlines(symbol, candleInterval, 500);
       set({ klines: candles });
     } catch (err) {
       console.error('Failed to fetch klines:', err);

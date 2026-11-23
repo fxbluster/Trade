@@ -22,6 +22,7 @@ export interface UiStoreState {
   isScannerModalOpen: boolean;
   isTimeMachineModalOpen: boolean;
   isPillarScorecardModalOpen: boolean;
+  isPnlModalOpen: boolean;
   isAudioMuted: boolean;
   activeBottomTab: BottomTabType;
   rightRailTab: RightRailTabType;
@@ -35,6 +36,7 @@ export interface UiStoreState {
   setIsScannerModalOpen: (open: boolean) => void;
   setIsTimeMachineModalOpen: (open: boolean) => void;
   setIsPillarScorecardModalOpen: (open: boolean) => void;
+  setIsPnlModalOpen: (open: boolean) => void;
   toggleAudioMute: () => void;
   setActiveBottomTab: (tab: BottomTabType) => void;
   setRightRailTab: (tab: RightRailTabType) => void;
@@ -60,6 +62,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   isScannerModalOpen: false,
   isTimeMachineModalOpen: false,
   isPillarScorecardModalOpen: false,
+  isPnlModalOpen: false,
   isAudioMuted: false,
   activeBottomTab: 'POSITION',
   rightRailTab: 'ORDER_TICKET',
@@ -91,6 +94,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setIsScannerModalOpen: (open) => set({ isScannerModalOpen: open }),
   setIsTimeMachineModalOpen: (open) => set({ isTimeMachineModalOpen: open }),
   setIsPillarScorecardModalOpen: (open) => set({ isPillarScorecardModalOpen: open }),
+  setIsPnlModalOpen: (open) => set({ isPnlModalOpen: open }),
   toggleAudioMute: () => set((state) => ({ isAudioMuted: !state.isAudioMuted })),
   setActiveBottomTab: (tab) => set({ activeBottomTab: tab }),
   setRightRailTab: (tab) => set({ rightRailTab: tab }),

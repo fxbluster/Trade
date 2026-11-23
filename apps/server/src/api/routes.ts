@@ -50,6 +50,7 @@ import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
 import type { AutoPilotManager } from '../services/autoPilotManager.js';
 import type { DecisionAuditService } from '../services/decisionAuditService.js';
 import type { PillarAttributionService } from '../services/pillarAttributionService.js';
+import type { PnlService } from '../services/pnlService.js';
 
 export interface AppContext {
   tradeManager: TradeManager;
@@ -61,6 +62,7 @@ export interface AppContext {
   autoPilotManager?: AutoPilotManager;
   decisionAuditService?: DecisionAuditService;
   pillarAttributionService?: PillarAttributionService;
+  pnlService?: PnlService;
   activeSymbol?: string;
   getMarkPrice?: (symbol: string) => number;
   setActiveSymbol?: (symbol: string) => void;
@@ -623,6 +625,22 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { error: `Failed to generate pillar scorecard: ${msg}` });
+    }
+  });
+
+  // 23. GET /api/pnl/summary — Multi-period PnL performance scorecard (Live, Today, 3D, Weekly)
+  app.get('/api/pnl/summary', async (req: Request, res: Response) => {
+    try {
+      if (!ctx.pnlService) {
+        return sendJson(res, 503, { error: 'PnlService not initialized' });
+      }
+      const query = (req.query || {}) as Record<string, string>;
+      const symbol = (query.symbol || activeSymbol).toUpperCase().trim();
+      const summary = await ctx.pnlService.getPnlSummary(symbol);
+      sendJson(res, 200, summary);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: `Failed to generate PnL summary: ${msg}` });
     }
   });
 

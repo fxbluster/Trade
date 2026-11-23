@@ -34,6 +34,7 @@ import { NativeSmcEngine } from './quant/nativeSmcEngine.js';
 import { ConfluenceEngine } from './quant/confluenceEngine.js';
 import { TradeManager } from './services/tradeManager.js';
 import { AutoPilotManager } from './services/autoPilotManager.js';
+import { PnlService } from './services/pnlService.js';
 import { WsHub } from './api/wsHub.js';
 import { registerRoutes } from './api/routes.js';
 
@@ -225,9 +226,9 @@ export async function bootstrapServer(): Promise<{
       confluenceEngine.reset(activeSymbol);
       streamsManager.subscribeSymbol(activeSymbol);
 
-      // Pre-warm 1m candle history for smooth tick updates
-      client.getKlines(activeSymbol, '1m', 100).then((raw) => {
-        if (Array.isArray(raw)) {
+      // Pre-warm 1m candle history (500 candles) for smooth chart & indicator feeds
+      client.getKlines(activeSymbol, '1m', 500).then((raw) => {
+        if (Array.isArray(raw) && raw.length > 0) {
           const klines = raw.map((k: any) => ({
             time: Math.floor(Number(k[0]) / 1000),
             open: Number(k[1]),
@@ -298,6 +299,18 @@ export async function bootstrapServer(): Promise<{
     broadcastWs: (msg) => wsHub.broadcast(msg),
     onOrderDispatched: (event) => decisionAuditService.recordExecution(event),
   });
+
+  // 8c. Initialize Multi-Period PnL Performance Service
+  const pnlService = new PnlService(
+    db,
+    tradesRepo,
+    client,
+    (sym) => markPriceMap.get(sym) || 0,
+    () => ({
+      mode: activeBroker.mode,
+      getAccount: () => activeBroker.getAccount(),
+    })
+  );
 
   // 9. Wire Stream Events to TradeManager, CvdEngine, and WsHub
   streamsManager.onMarkPrice((event) => {
@@ -448,6 +461,7 @@ export async function bootstrapServer(): Promise<{
     tradeManager,
     decisionAuditService,
     pillarAttributionService,
+    pnlService,
     get broker() {
       return activeBroker;
     },
@@ -477,17 +491,42 @@ export async function bootstrapServer(): Promise<{
     getKlines: async (sym, interval, limit) => {
       try {
         const raw = await client.getKlines(sym, interval, limit);
-        return raw.map((k: any) => ({
-          time: Math.floor(Number(k[0]) / 1000),
-          open: Number(k[1]),
-          high: Number(k[2]),
-          low: Number(k[3]),
-          close: Number(k[4]),
-          volume: Number(k[5]),
-        }));
-      } catch {
-        return candleHistoryMap.get(sym) || [];
+        if (Array.isArray(raw) && raw.length > 50) {
+          return raw.map((k: any) => ({
+            time: Math.floor(Number(k[0]) / 1000),
+            open: Number(k[1]),
+            high: Number(k[2]),
+            low: Number(k[3]),
+            close: Number(k[4]),
+            volume: Number(k[5]),
+          }));
+        }
+      } catch (err) {
+        console.warn('Binance client getKlines failed, trying public REST:', err);
       }
+
+      // Fallback: public Binance futures REST
+      try {
+        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
+        const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+        if (response.ok) {
+          const raw = (await response.json()) as (string | number)[][];
+          if (Array.isArray(raw) && raw.length > 0) {
+            return raw.map((row) => ({
+              time: Math.floor(Number(row[0]) / 1000),
+              open: Number(row[1]),
+              high: Number(row[2]),
+              low: Number(row[3]),
+              close: Number(row[4]),
+              volume: Number(row[5]),
+            }));
+          }
+        }
+      } catch (e) {
+        console.warn('Public REST fallback failed:', e);
+      }
+
+      return candleHistoryMap.get(sym) || [];
     },
   });
 

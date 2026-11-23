@@ -16,6 +16,7 @@ import {
   FileText,
   Timer,
   Layers,
+  DollarSign,
 } from 'lucide-react';
 import type { BrokerMode } from '@tradeos/shared';
 
@@ -30,6 +31,7 @@ export const TopBar: React.FC = () => {
   const wsStatus = useMarketStore((s) => s.wsStatus);
   const exchangeHealth = useMarketStore((s) => s.exchangeHealth);
   const brokerMode = useMarketStore((s) => s.brokerMode);
+  const activePosition = useMarketStore((s) => s.activePosition);
   const setSymbol = useMarketStore((s) => s.setSymbol);
   const setBrokerMode = useMarketStore((s) => s.setBrokerMode);
 
@@ -39,6 +41,7 @@ export const TopBar: React.FC = () => {
   const setIsTimeMachineModalOpen = useUiStore((s) => s.setIsTimeMachineModalOpen);
   const setIsPillarScorecardModalOpen = useUiStore((s) => s.setIsPillarScorecardModalOpen);
   const setIsCooldownModalOpen = useUiStore((s) => s.setIsCooldownModalOpen);
+  const setIsPnlModalOpen = useUiStore((s) => s.setIsPnlModalOpen);
 
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
   const [isSwitchingBroker, setIsSwitchingBroker] = useState(false);
@@ -189,20 +192,42 @@ export const TopBar: React.FC = () => {
           </span>
         </div>
 
-        <div>
-          <span className="text-[10px] text-[#7d8590] uppercase block">Session PnL</span>
+        {/* Interactive PnL Scorecard Pill */}
+        <button
+          onClick={() => setIsPnlModalOpen(true)}
+          className="flex flex-col text-left px-2.5 py-1 rounded border border-[#151d2c] hover:border-[#0ecb81]/50 bg-[#020305] transition-all cursor-pointer group shadow-sm hover:shadow-[0_0_12px_rgba(14,203,129,0.15)]"
+          title="Qazanc və Ziyan Hesabatını Aç (Sadə Dildə)"
+        >
+          <span className="text-[10px] text-[#7d8590] uppercase flex items-center space-x-1 group-hover:text-[#0ecb81]">
+            <span>Qazanc / PnL İcmalı</span>
+            <DollarSign className="w-2.5 h-2.5 text-[#0ecb81]" />
+          </span>
           <span
-            className={`font-semibold ${
-              risk.session_net_pnl >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'
+            className={`font-semibold tabular-nums text-xs ${
+              (account.unrealizedPnl && account.unrealizedPnl !== 0 ? account.unrealizedPnl > 0 : risk.session_net_pnl >= 0)
+                ? 'text-[#0ecb81]'
+                : 'text-[#f6465d]'
             }`}
           >
-            {risk.session_net_pnl >= 0 ? '+' : ''}${risk.session_net_pnl.toFixed(2)}
+            {account.unrealizedPnl && account.unrealizedPnl !== 0
+              ? `${account.unrealizedPnl > 0 ? '+' : ''}$${account.unrealizedPnl.toFixed(2)} (Canlı)`
+              : `${risk.session_net_pnl >= 0 ? '+' : ''}$${risk.session_net_pnl.toFixed(2)} (Session)`}
           </span>
-        </div>
+        </button>
       </div>
 
       {/* Right: Tools & System Health Status */}
       <div className="flex items-center space-x-2">
+        {/* Qazanc İcmalı Quick Trigger Button */}
+        <button
+          onClick={() => setIsPnlModalOpen(true)}
+          data-testid="pnl-summary-btn"
+          className="flex items-center space-x-1 px-2.5 py-1 rounded bg-[#0ecb81]/15 border border-[#0ecb81]/40 text-[#0ecb81] hover:bg-[#0ecb81]/25 font-bold transition-all shadow-sm"
+          title="Sadə Dildə Qazanc & Ziyan Hesabatı (Hazırda, Gün İçi, 3 Gün, Həftə)"
+        >
+          <DollarSign className="w-3.5 h-3.5 text-[#0ecb81]" />
+          <span className="hidden sm:inline">Qazanc İcmalı</span>
+        </button>
         {/* Scanner Trigger */}
         <button
           onClick={() => setIsScannerModalOpen(true)}

@@ -3,6 +3,7 @@ import { useMarketStore } from '../store/useMarketStore';
 import { useUiStore } from '../store/useUiStore';
 import { apiClient } from '../lib/apiClient';
 import { soundEffects } from '../lib/audio';
+import { formatUsd } from '../lib/formatters';
 import { calculateLiquidationPrice } from '@tradeos/shared';
 import { ShieldCheck, XCircle, ArrowUpRight, ArrowDownRight, AlertCircle, DollarSign } from 'lucide-react';
 
@@ -119,7 +120,7 @@ export const ActivePositionPanel: React.FC = () => {
             {roePercent.toFixed(2)}%
           </span>
           <span className="text-[11px] text-[#7d8590] ml-2">
-            ({unrealizedPnlUsd >= 0 ? '+' : ''}${unrealizedPnlUsd.toFixed(2)})
+            ({formatUsd(unrealizedPnlUsd, true)})
           </span>
         </div>
       </div>

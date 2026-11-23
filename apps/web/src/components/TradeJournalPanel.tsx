@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { apiClient } from '../lib/apiClient';
+import { formatUsd } from '../lib/formatters';
 import type { JournalSummary, TradeRecord } from '@tradeos/shared';
 import { BookOpen, RefreshCw, TrendingUp, TrendingDown, Award, PieChart, Shield } from 'lucide-react';
 
@@ -111,18 +112,18 @@ export const TradeJournalPanel: React.FC = () => {
           <span className="text-[10px] text-[#484f58] mt-1">Completed orders will be logged and audited here</span>
         </div>
       ) : (
-        <div className="overflow-x-auto flex-1 max-h-64">
+        <div className="overflow-x-auto overflow-y-auto max-h-[160px] custom-scrollbar flex-1">
           <table className="w-full text-left">
             <thead>
               <tr className="text-[10px] uppercase text-[#7d8590] border-b border-[#151d2c]/60">
                 <th className="py-1.5 px-2">Time</th>
                 <th className="py-1.5 px-2">Symbol</th>
                 <th className="py-1.5 px-2">Side</th>
-                <th className="py-1.5 px-2">Entry</th>
-                <th className="py-1.5 px-2">Exit</th>
-                <th className="py-1.5 px-2">Qty</th>
-                <th className="py-1.5 px-2">PnL ($)</th>
-                <th className="py-1.5 px-2">Fees</th>
+                <th className="py-1.5 px-2 text-right tabular-nums font-mono">Entry</th>
+                <th className="py-1.5 px-2 text-right tabular-nums font-mono">Exit</th>
+                <th className="py-1.5 px-2 text-right tabular-nums font-mono">Qty</th>
+                <th className="py-1.5 px-2 text-right tabular-nums font-mono">PnL ($)</th>
+                <th className="py-1.5 px-2 text-right tabular-nums font-mono">Fees</th>
                 <th className="py-1.5 px-2">Reason</th>
               </tr>
             </thead>
@@ -143,13 +144,13 @@ export const TradeJournalPanel: React.FC = () => {
                         {t.side}
                       </span>
                     </td>
-                    <td className="py-2 px-2 text-[#e6edf3]">{t.entry_price.toFixed(2)}</td>
-                    <td className="py-2 px-2 text-[#e6edf3]">{t.exit_price ? t.exit_price.toFixed(2) : '--'}</td>
-                    <td className="py-2 px-2 text-[#7d8590]">{t.quantity}</td>
-                    <td className={`py-2 px-2 font-bold ${isWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
-                      {isWin ? '+' : ''}${t.realized_pnl.toFixed(2)}
+                    <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.entry_price.toFixed(2)}</td>
+                    <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.exit_price ? t.exit_price.toFixed(2) : '--'}</td>
+                    <td className="py-2 px-2 text-[#7d8590] text-right tabular-nums font-mono">{t.quantity}</td>
+                    <td className={`py-2 px-2 font-bold text-right tabular-nums font-mono ${isWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                      {formatUsd(t.realized_pnl, true)}
                     </td>
-                    <td className="py-2 px-2 text-[#7d8590]">${t.fees_usd.toFixed(2)}</td>
+                    <td className="py-2 px-2 text-[#7d8590] text-right tabular-nums font-mono">${t.fees_usd.toFixed(2)}</td>
                     <td className="py-2 px-2">
                       <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#151d2c] text-[#7d8590]">
                         {t.exit_reason || 'NORMAL'}

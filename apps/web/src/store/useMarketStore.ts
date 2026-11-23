@@ -185,22 +185,33 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
   applySnapshot: (snapshot: CockpitState) => {
     const prevSymbol = get().symbol;
-    set((state) => ({
-      symbol: snapshot.symbol,
-      markPrice: snapshot.markPrice,
-      prevMarkPrice: state.markPrice || snapshot.markPrice,
-      fundingRate: snapshot.fundingRate,
-      nextFundingTime: snapshot.nextFundingTime,
-      account: snapshot.account,
-      activePosition: snapshot.activePosition,
-      openOrders: snapshot.openOrders,
-      indicators: snapshot.indicators,
-      cvd: snapshot.cvd,
-      risk: snapshot.risk,
-      sokrat: snapshot.sokrat,
-      exchangeHealth: snapshot.exchangeHealth,
-      brokerMode: snapshot.brokerMode,
-    }));
+    set((state) => {
+      // Optimistic retention: If snapshot has empty/zero account (e.g. during momentary reconnect handshake),
+      // preserve previous valid non-zero account.
+      const hasValidPrevAccount = state.account && (state.account.walletBalance > 0 || state.account.equity > 0);
+      const isSnapshotAccountEmpty = !snapshot.account || (snapshot.account.walletBalance === 0 && snapshot.account.equity === 0);
+      const resolvedAccount = (isSnapshotAccountEmpty && hasValidPrevAccount) ? state.account : (snapshot.account || state.account);
+
+      // Preserve activePosition optimistically if snapshot activePosition is undefined
+      const resolvedPosition = snapshot.activePosition !== undefined ? snapshot.activePosition : state.activePosition;
+
+      return {
+        symbol: snapshot.symbol,
+        markPrice: snapshot.markPrice || state.markPrice,
+        prevMarkPrice: state.markPrice || snapshot.markPrice,
+        fundingRate: snapshot.fundingRate,
+        nextFundingTime: snapshot.nextFundingTime,
+        account: resolvedAccount,
+        activePosition: resolvedPosition,
+        openOrders: snapshot.openOrders ?? state.openOrders,
+        indicators: snapshot.indicators ?? state.indicators,
+        cvd: snapshot.cvd ?? state.cvd,
+        risk: snapshot.risk ?? state.risk,
+        sokrat: snapshot.sokrat ?? state.sokrat,
+        exchangeHealth: snapshot.exchangeHealth ?? state.exchangeHealth,
+        brokerMode: snapshot.brokerMode ?? state.brokerMode,
+      };
+    });
 
     // If server snapshot reports a different symbol or klines are empty, sync klines and confluence immediately
     if ((snapshot.symbol && snapshot.symbol !== prevSymbol) || get().klines.length === 0) {

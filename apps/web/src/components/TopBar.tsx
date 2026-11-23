@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useMarketStore } from '../store/useMarketStore';
 import { useUiStore } from '../store/useUiStore';
 import { apiClient } from '../lib/apiClient';
+import { formatUsd } from '../lib/formatters';
 import {
   Activity,
   Radio,
@@ -149,7 +150,7 @@ export const TopBar: React.FC = () => {
           </button>
 
           {isSymbolDropdownOpen && (
-            <div className="absolute left-0 mt-1 w-36 bg-[#080c14] border border-[#151d2c] rounded shadow-xl z-50 py-1">
+            <div className="absolute left-0 mt-1 w-36 bg-[#080c14] border border-[#151d2c] rounded shadow-2xl ring-1 ring-white/10 z-50 py-1">
               {POPULAR_SYMBOLS.map((s) => (
                 <button
                   key={s}
@@ -169,7 +170,7 @@ export const TopBar: React.FC = () => {
         </div>
 
         {/* Mark Price Realtime */}
-        <div className="flex items-center space-x-2 pl-2">
+        <div className="flex items-center space-x-2 pl-2 border-r border-[#151d2c] pr-3 mr-2">
           <span className={`text-base font-bold tabular-nums transition-colors duration-150 ${priceColor}`}>
             {markPrice.toFixed(2)}
           </span>
@@ -195,12 +196,13 @@ export const TopBar: React.FC = () => {
         {/* Interactive PnL Scorecard Pill */}
         <button
           onClick={() => setIsPnlModalOpen(true)}
+          data-testid="pnl-summary-btn"
           className="flex flex-col text-left px-2.5 py-1 rounded border border-[#151d2c] hover:border-[#0ecb81]/50 bg-[#020305] transition-all cursor-pointer group shadow-sm hover:shadow-[0_0_12px_rgba(14,203,129,0.15)]"
           title="Qazanc və Ziyan Hesabatını Aç (Sadə Dildə)"
         >
           <span className="text-[10px] text-[#7d8590] uppercase flex items-center space-x-1 group-hover:text-[#0ecb81]">
-            <span>Qazanc / PnL İcmalı</span>
             <DollarSign className="w-2.5 h-2.5 text-[#0ecb81]" />
+            <span>Qazanc / PnL İcmalı</span>
           </span>
           <span
             className={`font-semibold tabular-nums text-xs ${
@@ -210,24 +212,14 @@ export const TopBar: React.FC = () => {
             }`}
           >
             {account.unrealizedPnl && account.unrealizedPnl !== 0
-              ? `${account.unrealizedPnl > 0 ? '+' : ''}$${account.unrealizedPnl.toFixed(2)} (Canlı)`
-              : `${risk.session_net_pnl >= 0 ? '+' : ''}$${risk.session_net_pnl.toFixed(2)} (Session)`}
+              ? `${formatUsd(account.unrealizedPnl, true)} (Canlı)`
+              : `${formatUsd(risk.session_net_pnl, true)} (Session)`}
           </span>
         </button>
       </div>
 
       {/* Right: Tools & System Health Status */}
       <div className="flex items-center space-x-2">
-        {/* Qazanc İcmalı Quick Trigger Button */}
-        <button
-          onClick={() => setIsPnlModalOpen(true)}
-          data-testid="pnl-summary-btn"
-          className="flex items-center space-x-1 px-2.5 py-1 rounded bg-[#0ecb81]/15 border border-[#0ecb81]/40 text-[#0ecb81] hover:bg-[#0ecb81]/25 font-bold transition-all shadow-sm"
-          title="Sadə Dildə Qazanc & Ziyan Hesabatı (Hazırda, Gün İçi, 3 Gün, Həftə)"
-        >
-          <DollarSign className="w-3.5 h-3.5 text-[#0ecb81]" />
-          <span className="hidden sm:inline">Qazanc İcmalı</span>
-        </button>
         {/* Scanner Trigger */}
         <button
           onClick={() => setIsScannerModalOpen(true)}
@@ -264,7 +256,7 @@ export const TopBar: React.FC = () => {
           onClick={handleExportAudit}
           disabled={auditExportStatus === 'exporting'}
           data-testid="audit-export-btn"
-          className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-[#020305] border border-[#151d2c] text-[#7d8590] hover:text-[#00f2fe] hover:border-[#00f2fe]/40 transition-colors disabled:opacity-50"
+          className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-[#020305] border border-[#151d2c] text-[#7d8590] hover:text-[#00f2fe] hover:border-[#00f2fe]/40 transition-colors disabled:opacity-50 min-w-[108px] text-center justify-center"
           title="Export Daily Decision Audit Trail (Markdown)"
         >
           <FileText

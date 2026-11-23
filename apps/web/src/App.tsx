@@ -111,12 +111,12 @@ export const App: React.FC = () => {
           </div>
 
           {/* Chart Canvas Area */}
-          <div className={`${isBottomExpanded ? 'flex-[3] min-h-[160px]' : 'flex-[6] min-h-[280px]'} relative transition-all duration-200`}>
+          <div className={`${isBottomExpanded ? 'flex-[3] min-h-[220px]' : 'flex-[6] min-h-[280px]'} relative transition-all duration-200`}>
             <ChartCanvas className="h-full" />
           </div>
 
           {/* Bottom Cockpit Panel with Tab Switcher */}
-          <div className={`${isBottomExpanded ? 'flex-[7] min-h-[420px]' : 'flex-[4] min-h-[200px]'} flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden transition-all duration-200`}>
+          <div className={`${isBottomExpanded ? 'flex-[7] min-h-[300px] max-h-[45vh]' : 'flex-[4] min-h-[200px]'} flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden transition-all duration-200`}>
             {/* Tab Header */}
             <div className="flex items-center space-x-1 px-3 py-1.5 border-b border-[#151d2c] bg-[#020305] font-mono text-xs">
               <button

@@ -146,6 +146,26 @@ export class TradesRepo {
     }
   }
 
+  getLatestTrade(brokerMode: BrokerMode, symbol?: string): TradeRecord | null {
+    if (symbol) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM trades 
+        WHERE broker_mode = ? AND symbol = ?
+        ORDER BY opened_at DESC LIMIT 1
+      `);
+      const row = stmt.get(brokerMode, symbol);
+      return row ? (row as unknown as TradeRecord) : null;
+    } else {
+      const stmt = this.db.prepare(`
+        SELECT * FROM trades 
+        WHERE broker_mode = ?
+        ORDER BY opened_at DESC LIMIT 1
+      `);
+      const row = stmt.get(brokerMode);
+      return row ? (row as unknown as TradeRecord) : null;
+    }
+  }
+
   update(id: string, updates: Partial<TradeRecord>): void {
     const keys = Object.keys(updates).filter(k => k !== 'id');
     if (keys.length === 0) return;

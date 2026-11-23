@@ -169,17 +169,17 @@ export class HierarchicalMtfManager {
     let regime: MacroRegime = 'MACRO_RANGING';
 
     if (ema200 !== null) {
-      if (mark > ema200 && latestDir === 'BULLISH' && adx >= 25) {
+      if (mark > ema200 && latestDir === 'BULLISH' && adx >= 22) {
         regime = 'MACRO_BULLISH';
-      } else if (mark < ema200 && latestDir === 'BEARISH' && adx >= 25) {
+      } else if (mark < ema200 && latestDir === 'BEARISH' && adx >= 22) {
         regime = 'MACRO_BEARISH';
       } else {
         regime = 'MACRO_RANGING';
       }
     } else {
-      if (latestDir === 'BULLISH' && adx >= 25) {
+      if (latestDir === 'BULLISH' && adx >= 22) {
         regime = 'MACRO_BULLISH';
-      } else if (latestDir === 'BEARISH' && adx >= 25) {
+      } else if (latestDir === 'BEARISH' && adx >= 22) {
         regime = 'MACRO_BEARISH';
       } else {
         regime = 'MACRO_RANGING';

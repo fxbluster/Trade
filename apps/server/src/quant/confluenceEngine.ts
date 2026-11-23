@@ -143,7 +143,7 @@ export class ConfluenceEngine {
     // 4. Pillar: ORDER_FLOW_L2 (15% Bayesian weight: 60s taker flow & Top-20 book imbalance)
     const p4OrderFlow = this.orderFlowEngine.evaluateL2(currentPrice, now);
 
-    // 5. Pillar: LIQ_CLUSTERS (7.5% Bayesian weight: Leverage pools 10x-100x from Open Interest)
+    // 5. Pillar: LIQ_CLUSTERS (8% Bayesian weight: Leverage pools 10x-100x from Open Interest)
     const p5Liq = this.liquidationEngine.evaluate({
       currentPrice,
       atr14: indicators?.atr14 ?? null,
@@ -151,6 +151,7 @@ export class ConfluenceEngine {
       recentLow,
       openInterestUsd: cvd?.openInterestUsd ?? null,
       pillarId: 'LIQ_CLUSTERS',
+      triggerAtrMultiplier: 1.5,
     });
 
     // 6. Pillar: MOMENTUM_RVOL (5% Bayesian weight: Volatility-adjusted RSI & MACD momentum)

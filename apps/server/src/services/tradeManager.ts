@@ -771,6 +771,138 @@ export class TradeManager {
   }
 
   /**
+   * Dynamically updates the active position's Stop-Loss on exchange and in SQLite.
+   * Enforces fail-closed atomic cancel-and-replace:
+   * Only allows tightening the stop (Long: higher SL, Short: lower SL).
+   */
+  public async updateStopLoss(
+    symbol: string,
+    newStopPrice: number,
+    reason: string = 'DYNAMIC_TRAILING_STOP'
+  ): Promise<TradeRecord> {
+    return this.withSymbolMutex(symbol, async () => {
+      const trade = this.tradesRepo.getActivePosition(this.brokerMode, symbol);
+      if (!trade) {
+        throw new TradeManagerError(
+          `Aktiv pozisiya tapılmadı: ${symbol}`,
+          404,
+          'ERR_NO_ACTIVE_POSITION'
+        );
+      }
+
+      const formattedNewSl = Number(newStopPrice.toFixed(4));
+      const markPrice = this.getMarkPrice(symbol);
+
+      // Validate stop loss direction: never allow widening risk
+      if (trade.side === 'BUY') {
+        if (trade.stop_loss && formattedNewSl <= trade.stop_loss) {
+          return trade; // Already higher or equal, skip
+        }
+        if (markPrice > 0 && formattedNewSl >= markPrice) {
+          throw new TradeManagerError(
+            `Trailing SL ($${formattedNewSl}) must be below current mark price ($${markPrice})`,
+            400,
+            'ERR_INVALID_SL_PRICE'
+          );
+        }
+      } else {
+        if (trade.stop_loss && formattedNewSl >= trade.stop_loss) {
+          return trade; // Already lower or equal, skip
+        }
+        if (markPrice > 0 && formattedNewSl <= markPrice) {
+          throw new TradeManagerError(
+            `Trailing SL ($${formattedNewSl}) must be above current mark price ($${markPrice})`,
+            400,
+            'ERR_INVALID_SL_PRICE'
+          );
+        }
+      }
+
+      const originalSlPrice = trade.stop_loss;
+      const originalSlId = trade.sl_algo_id;
+      const oppositeSide: TradeSide = trade.side === 'BUY' ? 'SELL' : 'BUY';
+
+      // 1. Cancel existing SL algo order
+      if (originalSlId) {
+        try {
+          await this.broker.cancelOrder(symbol, originalSlId, true);
+        } catch {
+          // Tolerated if order already cancelled or not found
+        }
+      }
+
+      // 2. Submit new Trailing SL algo order
+      let newSlId: string | null = null;
+      try {
+        const slRes = await this.broker.createAlgoOrder({
+          symbol,
+          side: oppositeSide,
+          type: 'STOP_MARKET',
+          triggerPrice: formattedNewSl,
+          quantity: trade.remaining_qty,
+          clientAlgoId: `tos_${trade.id}_sl`,
+          reduceOnly: true,
+        });
+        newSlId = slRes.algoId;
+      } catch (firstErr) {
+        // Fallback: restore original SL
+        let restored = false;
+        if (originalSlPrice && originalSlPrice > 0) {
+          await new Promise((r) => setTimeout(r, 200));
+          try {
+            const restoreRes = await this.broker.createAlgoOrder({
+              symbol,
+              side: oppositeSide,
+              type: 'STOP_MARKET',
+              triggerPrice: originalSlPrice,
+              quantity: trade.remaining_qty,
+              clientAlgoId: `tos_${trade.id}_sl`,
+              reduceOnly: true,
+            });
+            newSlId = restoreRes.algoId;
+            restored = true;
+            this.tradesRepo.update(trade.id, { sl_algo_id: newSlId });
+          } catch {
+            restored = false;
+          }
+        }
+
+        if (!restored) {
+          await this.emergencyUnwindPosition(
+            trade.id,
+            symbol,
+            trade.side,
+            trade.remaining_qty,
+            trade.entry_price,
+            'TRAILING_SL_FAIL_CLOSED_UNWIND'
+          );
+          throw new TradeManagerError(
+            'Trailing SL placement failed and restoration failed. Emergency unwind executed.',
+            502,
+            'ERR_TRAILING_SL_FAIL_CLOSED_UNWIND'
+          );
+        }
+
+        throw new TradeManagerError(
+          'Trailing SL placement failed. Original SL restored.',
+          500,
+          'ERR_TRAILING_SL_RESTORED'
+        );
+      }
+
+      // Update SQLite
+      this.tradesRepo.update(trade.id, {
+        stop_loss: formattedNewSl,
+        sl_algo_id: newSlId,
+      });
+
+      const updatedTrade = this.tradesRepo.getById(trade.id)!;
+      this.broadcastPositionEvent('UPDATED', updatedTrade, reason);
+      return updatedTrade;
+    });
+  }
+
+  /**
    * Processes User Data stream fill events (ORDER_TRADE_UPDATE / ALGO_UPDATE).
    * Correlates tradeId from deterministic clientOrderId prefix (tos_${tradeId}_*),
    * records fills to SQLite without duplicates, updates remaining_qty,
@@ -818,47 +950,57 @@ export class TradeManager {
         `${orderId}_${Date.now()}`
     );
 
+    // If this fill was already persisted and processed, ignore duplicate updates to avoid double-deductions [DEF-01]
+    if (this.fillsRepo.exists(binanceTradeId)) {
+      return;
+    }
+
     const price = Number(
       event.lastFilledPrice || event.L || event.o?.L || event.price || event.p || trade.entry_price
     );
+    // Explicitly check for executed trade quantity
     const qty = Number(
-      event.lastFilledQty || event.l || event.o?.l || event.executedQty || event.q || trade.remaining_qty
+      event.lastFilledQty || event.l || event.o?.l || event.executedQty || 0
     );
+
+    // If quantity is <= 0, this is an order status update or acknowledgment, not a trade fill
+    if (qty <= 0) {
+      return;
+    }
+
     const commission = Number(event.commission || event.n || event.o?.n || 0);
     const commissionAsset = event.commissionAsset || event.N || event.o?.N || 'USDT';
     const filledAt = Number(event.tradeTime || event.T || event.o?.T || Date.now());
 
     // Deduplicated fill persistence
-    if (!this.fillsRepo.exists(binanceTradeId)) {
-      let realizedPnl = 0;
-      if (leg === 'sl' || leg === 'tp1' || leg === 'tp2' || leg === 'be') {
-        realizedPnl =
-          trade.side === 'BUY'
-            ? (price - trade.entry_price) * qty
-            : (trade.entry_price - price) * qty;
-      }
-
-      this.fillsRepo.insert({
-        binance_trade_id: binanceTradeId,
-        trade_id: tradeId,
-        order_id: orderId,
-        symbol: trade.symbol,
-        side: event.side || event.S || trade.side,
-        price,
-        qty,
-        realized_pnl: Number(realizedPnl.toFixed(4)),
-        commission,
-        commission_asset: commissionAsset,
-        filled_at: filledAt,
-      });
+    let realizedPnl = 0;
+    if (leg === 'sl' || leg === 'tp1' || leg === 'tp2' || leg === 'be') {
+      realizedPnl =
+        trade.side === 'BUY'
+          ? (price - trade.entry_price) * qty
+          : (trade.entry_price - price) * qty;
     }
+
+    this.fillsRepo.insert({
+      binance_trade_id: binanceTradeId,
+      trade_id: tradeId,
+      order_id: orderId,
+      symbol: trade.symbol,
+      side: event.side || event.S || trade.side,
+      price,
+      qty,
+      realized_pnl: Number(realizedPnl.toFixed(4)),
+      commission,
+      commission_asset: commissionAsset,
+      filled_at: filledAt,
+    });
 
     // OCO Leg Handling & State Transitions
     if (leg === 'tp1') {
       const newRemaining = Math.max(0, Number((trade.remaining_qty - qty).toFixed(4)));
 
       if (newRemaining > 0) {
-        // Partial fill transition
+        // Partial fill transition: runner position remains open
         this.tradesRepo.update(trade.id, {
           status: 'PARTIALLY_CLOSED',
           remaining_qty: newRemaining,
@@ -945,52 +1087,175 @@ export class TradeManager {
   }
 
   /**
-   * Reconciles SQLite positions and open orders with exchange data.
-   * CRITICAL GUARANTEE: Never wipes SQLite metadata (stop_loss, tp1, tp2, opened_at, entry_price).
+   * Reconciles SQLite positions and open orders with live exchange data.
+   * CRITICAL GUARANTEE:
+   * Inspects live exchange position FIRST [DEF-02].
+   * If exchange has an open position but SQLite shows none, restores and adopts the position,
+   * places a protective Stop Loss if naked, and never leaves funds unhedged.
    */
-  public async reconcileWithExchange(): Promise<void> {
-    const activeTrade = this.tradesRepo.getActivePosition(this.brokerMode);
-    if (!activeTrade) return;
+  public async reconcileWithExchange(targetSymbol: string = 'SOLUSDT'): Promise<void> {
+    const sym = targetSymbol.toUpperCase().trim();
 
-    return this.withSymbolMutex(activeTrade.symbol, async () => {
-      // Re-verify after lock acquisition
-      const trade = this.tradesRepo.getActivePosition(this.brokerMode, activeTrade.symbol);
-      if (!trade) return;
-
+    return this.withSymbolMutex(sym, async () => {
       let pos: PositionInfo | null = null;
       try {
-        pos = await this.broker.getPosition(trade.symbol);
+        pos = await this.broker.getPosition(sym);
       } catch {
         return; // Tolerated on transient exchange connectivity errors
       }
 
-      // Case 1: Position is closed on exchange (positionAmt === 0 or null)
-      if (!pos || pos.positionAmt === 0) {
-        // Mark as closed, preserving all historical metadata intact
-        this.tradesRepo.update(trade.id, {
-          status: 'CLOSED',
-          remaining_qty: 0,
-          exit_reason: trade.exit_reason || 'EXCHANGE_SYNC_CLOSED',
-          closed_at: Date.now(),
-        });
-        const closed = this.tradesRepo.getById(trade.id)!;
-        this.broadcastPositionEvent('CLOSED', closed, 'EXCHANGE_SYNC_CLOSED');
+      const activeTrade = this.tradesRepo.getActivePosition(this.brokerMode, sym);
+      const liveQty = pos ? Math.abs(pos.positionAmt) : 0;
+
+      // Case 1: Exchange HAS an active position (liveQty > 0)
+      if (liveQty > 0 && pos) {
+        if (activeTrade) {
+          // Sync remaining_qty and actual exchange entry_price
+          const updates: any = {};
+          if (liveQty !== activeTrade.remaining_qty) {
+            updates.remaining_qty = liveQty;
+          }
+          if (pos.entryPrice && pos.entryPrice > 0 && Math.abs(pos.entryPrice - activeTrade.entry_price) > 0.0001) {
+            updates.entry_price = Number(pos.entryPrice.toFixed(4));
+          }
+          if (Object.keys(updates).length > 0) {
+            this.tradesRepo.update(activeTrade.id, updates);
+            const updated = this.tradesRepo.getById(activeTrade.id)!;
+            this.broadcastPositionEvent('UPDATED', updated, 'EXCHANGE_SYNC');
+          }
+        } else {
+          // ORPHAN POSITION DETECTED ON EXCHANGE! [DEF-02]
+          // SQLite thinks there's no active trade, but exchange has an open position!
+          const lastTrade = this.tradesRepo.getLatestTrade(this.brokerMode, sym);
+          const tradeSide: TradeSide = pos.positionAmt > 0 ? 'BUY' : 'SELL';
+          const entryPrice = pos.entryPrice > 0 ? pos.entryPrice : (lastTrade?.entry_price || this.getMarkPrice(sym));
+          const markPrice = this.getMarkPrice(sym) || entryPrice;
+          const oppositeSide: TradeSide = tradeSide === 'BUY' ? 'SELL' : 'BUY';
+
+          let adoptedTrade: TradeRecord;
+          if (lastTrade && lastTrade.symbol === sym) {
+            // Re-adopt the recently closed trade
+            this.tradesRepo.update(lastTrade.id, {
+              status: 'PARTIALLY_CLOSED',
+              remaining_qty: liveQty,
+              entry_price: Number(entryPrice.toFixed(4)),
+              exit_price: null,
+              exit_reason: null,
+              closed_at: null,
+            });
+            adoptedTrade = this.tradesRepo.getById(lastTrade.id)!;
+          } else {
+            // Create a new adopted trade record
+            const newTradeId = crypto.randomBytes(8).toString('hex');
+            const newRecord: TradeRecord = {
+              id: newTradeId,
+              symbol: sym,
+              broker_mode: this.brokerMode,
+              side: tradeSide,
+              status: 'OPEN',
+              entry_price: Number(entryPrice.toFixed(4)),
+              exit_price: null,
+              quantity: liveQty,
+              remaining_qty: liveQty,
+              leverage: pos.leverage || 10,
+              margin_usd: Number(((liveQty * entryPrice) / (pos.leverage || 10)).toFixed(2)),
+              stop_loss: null,
+              tp1: null,
+              tp2: null,
+              be_price: Number((tradeSide === 'BUY' ? entryPrice * 1.0025 : entryPrice * 0.9975).toFixed(4)),
+              is_breakeven: 0,
+              client_order_id: `tos_${newTradeId}_ent`,
+              client_sl_id: `tos_${newTradeId}_sl`,
+              client_tp1_id: null,
+              client_tp2_id: null,
+              entry_order_id: null,
+              sl_algo_id: null,
+              tp1_algo_id: null,
+              tp2_algo_id: null,
+              realized_pnl: 0,
+              fees_usd: 0,
+              exit_reason: null,
+              opened_at: Date.now(),
+              closed_at: null,
+            };
+            this.tradesRepo.insert(newRecord);
+            adoptedTrade = newRecord;
+          }
+
+          // CRITICAL FAIL-CLOSED SAFETY:
+          // Check if the exchange has an active Stop Loss for this adopted position
+          let hasActiveSl = false;
+          try {
+            const openOrders = await this.broker.getOpenOrders(sym);
+            hasActiveSl = openOrders.some(
+              (o) => (o.type === 'STOP_MARKET' || o.type === 'STOP') && o.side === oppositeSide
+            );
+          } catch {
+            // ignore
+          }
+
+          if (!hasActiveSl) {
+            // Immediately place a protective Stop Loss so the position is NEVER naked!
+            const isProfit = tradeSide === 'BUY' ? markPrice > entryPrice : markPrice < entryPrice;
+            const protectiveSl = tradeSide === 'BUY'
+              ? (isProfit ? Number((entryPrice * 1.0025).toFixed(4)) : Number((entryPrice * 0.985).toFixed(4)))
+              : (isProfit ? Number((entryPrice * 0.9975).toFixed(4)) : Number((entryPrice * 1.015).toFixed(4)));
+
+            try {
+              const slRes = await this.broker.createAlgoOrder({
+                symbol: sym,
+                side: oppositeSide,
+                type: 'STOP_MARKET',
+                triggerPrice: protectiveSl,
+                quantity: liveQty,
+                clientAlgoId: `tos_${adoptedTrade.id}_sl`,
+                reduceOnly: true,
+              });
+              this.tradesRepo.update(adoptedTrade.id, {
+                stop_loss: protectiveSl,
+                sl_algo_id: slRes.algoId,
+                is_breakeven: isProfit ? 1 : 0,
+              });
+              adoptedTrade = this.tradesRepo.getById(adoptedTrade.id)!;
+            } catch (slErr) {
+              this.broadcastAlert(
+                'CRITICAL',
+                `Warning: Orphan position adopted on ${sym} but protective SL placement failed: ${slErr}`
+              );
+            }
+          }
+
+          this.auditLogRepo.insert({
+            id: crypto.randomUUID(),
+            event_type: 'ORPHAN_POSITION_ADOPTED',
+            actor: 'RECONCILE_ENGINE',
+            reason: `Adopted live exchange position of ${liveQty} ${sym}`,
+            payload_json: JSON.stringify({
+              symbol: sym,
+              liveQty,
+              entryPrice,
+              tradeId: adoptedTrade.id,
+            }),
+            created_at: Date.now(),
+          });
+
+          this.broadcastPositionEvent('OPENED', adoptedTrade, 'ORPHAN_RECONCILE_ADOPTED');
+          this.broadcastAlert('INFO', `Orphan position adopted on ${sym}: ${liveQty} contracts restored to active tracking.`);
+        }
         return;
       }
 
-      // Case 2: Position still exists on exchange -> sync remaining_qty and actual exchange entry_price
-      const currentQty = Math.abs(pos.positionAmt);
-      const updates: any = {};
-      if (currentQty !== trade.remaining_qty) {
-        updates.remaining_qty = currentQty;
-      }
-      if (pos.entryPrice && pos.entryPrice > 0 && Math.abs(pos.entryPrice - trade.entry_price) > 0.0001) {
-        updates.entry_price = Number(pos.entryPrice.toFixed(4));
-      }
-      if (Object.keys(updates).length > 0) {
-        this.tradesRepo.update(trade.id, updates);
-        const updatedTrade = this.tradesRepo.getById(trade.id)!;
-        this.broadcastPositionEvent('UPDATED', updatedTrade, 'EXCHANGE_SYNC');
+      // Case 2: Exchange position is ZERO (liveQty === 0)
+      if (liveQty === 0 && activeTrade) {
+        // Mark as closed, preserving all historical metadata intact
+        this.tradesRepo.update(activeTrade.id, {
+          status: 'CLOSED',
+          remaining_qty: 0,
+          exit_reason: activeTrade.exit_reason || 'EXCHANGE_SYNC_CLOSED',
+          closed_at: Date.now(),
+        });
+        const closed = this.tradesRepo.getById(activeTrade.id)!;
+        this.broadcastPositionEvent('CLOSED', closed, 'EXCHANGE_SYNC_CLOSED');
       }
     });
   }

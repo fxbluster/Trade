@@ -123,11 +123,22 @@ export class LiquidationEngine {
           poolBelowVol = c.estimatedVolumeUsd;
         }
       }
-    } else {
-      const rHigh = recentHigh && recentHigh > currentPrice ? recentHigh : currentPrice * 1.02;
-      const rLow = recentLow && recentLow < currentPrice ? recentLow : currentPrice * 0.98;
-      poolAbove = rHigh;
-      poolBelow = rLow;
+    }
+
+    if (recentHigh && recentHigh > currentPrice && (poolAbove === null || recentHigh < poolAbove)) {
+      poolAbove = recentHigh;
+      poolAboveVol = (openInterestUsd ?? 10_000_000) * 0.15;
+    }
+    if (recentLow && recentLow < currentPrice && (poolBelow === null || recentLow > poolBelow)) {
+      poolBelow = recentLow;
+      poolBelowVol = (openInterestUsd ?? 10_000_000) * 0.15;
+    }
+
+    if (!poolAbove) {
+      poolAbove = recentHigh && recentHigh > currentPrice ? recentHigh : currentPrice * 1.01;
+    }
+    if (!poolBelow) {
+      poolBelow = recentLow && recentLow < currentPrice ? recentLow : currentPrice * 0.99;
     }
 
     const distAbove = poolAbove !== null ? poolAbove - currentPrice : Infinity;

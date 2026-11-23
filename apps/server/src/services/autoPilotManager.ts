@@ -95,6 +95,7 @@ export class AutoPilotManager {
   private consecutiveLosses: number = 0;
   private cooldownUntil: number = 0;
   private oppositeConsensusTickCount: number = 0;
+  private peakPriceByTrade: Map<string, number> = new Map();
 
   constructor(options: AutoPilotManagerOptions) {
     this.db = options.db;
@@ -471,11 +472,11 @@ export class AutoPilotManager {
     }
 
     // Case 2: Auto-Breakeven migration at Math.max(1.5 * ATR, 0.25% profit)
-    if (trade.is_breakeven === 0) {
-      const atr = this.getAtrFn ? this.getAtrFn(symbol) : trade.entry_price * 0.005;
-      const profitPerUnit =
-        trade.side === 'BUY' ? markPrice - trade.entry_price : trade.entry_price - markPrice;
+    const atr = this.getAtrFn ? this.getAtrFn(symbol) : trade.entry_price * 0.005;
+    const profitPerUnit =
+      trade.side === 'BUY' ? markPrice - trade.entry_price : trade.entry_price - markPrice;
 
+    if (trade.is_breakeven === 0) {
       const triggerThreshold = Math.max(1.5 * atr, trade.entry_price * 0.0025);
 
       if (profitPerUnit >= triggerThreshold) {
@@ -483,6 +484,49 @@ export class AutoPilotManager {
           await this.tradeManager.moveToBreakeven(symbol);
         } catch {
           // Tolerated if buffer not yet reached or broker rejected
+        }
+      }
+    }
+
+    // Case 2b: Dynamic Trailing Stop for Runners & Extended In-Profit Positions [DEF-03]
+    // Activated once TP1 has executed (status === 'PARTIALLY_CLOSED') OR profit reaches >= 2.0x ATR
+    if (trade.side === 'BUY') {
+      const currentPeak = this.peakPriceByTrade.get(trade.id) ?? trade.entry_price;
+      if (markPrice > currentPeak) {
+        this.peakPriceByTrade.set(trade.id, markPrice);
+      }
+    } else {
+      const currentTrough = this.peakPriceByTrade.get(trade.id) ?? trade.entry_price;
+      if (markPrice < currentTrough) {
+        this.peakPriceByTrade.set(trade.id, markPrice);
+      }
+    }
+
+    const trackedExtreme = this.peakPriceByTrade.get(trade.id) ?? markPrice;
+
+    if (trade.status === 'PARTIALLY_CLOSED' || profitPerUnit >= 2.0 * atr) {
+      const trailDist = 1.0 * atr;
+      if (trade.side === 'BUY') {
+        const candidateSl = Number((trackedExtreme - trailDist).toFixed(2));
+        const currentSl = trade.stop_loss ?? 0;
+        // Trail upward if candidateSl improves current SL by at least 0.1 * atr and is safely below mark price
+        if (candidateSl > currentSl + 0.1 * atr && candidateSl < markPrice - 0.2 * atr) {
+          try {
+            await this.tradeManager.updateStopLoss(symbol, candidateSl, 'DYNAMIC_TRAILING_STOP');
+          } catch {
+            // Tolerated
+          }
+        }
+      } else {
+        const candidateSl = Number((trackedExtreme + trailDist).toFixed(2));
+        const currentSl = trade.stop_loss ?? Infinity;
+        // Trail downward if candidateSl improves current SL by at least 0.1 * atr and is safely above mark price
+        if (candidateSl < currentSl - 0.1 * atr && candidateSl > markPrice + 0.2 * atr) {
+          try {
+            await this.tradeManager.updateStopLoss(symbol, candidateSl, 'DYNAMIC_TRAILING_STOP');
+          } catch {
+            // Tolerated
+          }
         }
       }
     }
@@ -538,6 +582,12 @@ export class AutoPilotManager {
     }
 
     this.lastExitTime = Date.now();
+    if (this.openTradeId) {
+      this.peakPriceByTrade.delete(this.openTradeId);
+    }
+    if (trade?.id) {
+      this.peakPriceByTrade.delete(trade.id);
+    }
     this.openTradeId = null;
     this.oppositeConsensusTickCount = 0;
     this.broadcastStatus();

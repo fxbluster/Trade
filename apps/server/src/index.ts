@@ -575,20 +575,65 @@ export async function bootstrapServer(): Promise<{
     if (p > 0) markPriceMap.set(activeSymbol, p);
   } catch {}
 
-  // Pre-load 200 historical klines for immediate indicator warmup (EMA200, RSI, MACD, ATR)
+  // Pre-load 200 historical klines for immediate indicator warmup across 1m, 15m, and 1h
+  const fetchBootKlines = async (sym: string, interval: string, limit: number = 200): Promise<KlineCandle[]> => {
+    try {
+      const rawKlines = await client.getKlines(sym, interval, limit);
+      if (Array.isArray(rawKlines) && rawKlines.length > 0) {
+        return rawKlines.map((k: any) => ({
+          time: Math.floor(Number(k[0]) / 1000),
+          open: Number(k[1]),
+          high: Number(k[2]),
+          low: Number(k[3]),
+          close: Number(k[4]),
+          volume: Number(k[5]),
+        }));
+      }
+    } catch {
+      // Demo testnet timed out or failed, try production public REST fallback
+    }
+
+    try {
+      const res = await fetch(`https://fapi.binance.com/fapi/v1/klines?symbol=${sym}&interval=${interval}&limit=${limit}`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const raw = (await res.json()) as any[];
+        if (Array.isArray(raw) && raw.length > 0) {
+          return raw.map((k: any) => ({
+            time: Math.floor(Number(k[0]) / 1000),
+            open: Number(k[1]),
+            high: Number(k[2]),
+            low: Number(k[3]),
+            close: Number(k[4]),
+            volume: Number(k[5]),
+          }));
+        }
+      }
+    } catch {}
+
+    return [];
+  };
+
   try {
-    const rawKlines = await client.getKlines(activeSymbol, '1m', 200);
-    if (Array.isArray(rawKlines) && rawKlines.length > 0) {
-      const historicalCandles: KlineCandle[] = rawKlines.map((k: any) => ({
-        time: Math.floor(Number(k[0]) / 1000),
-        open: Number(k[1]),
-        high: Number(k[2]),
-        low: Number(k[3]),
-        close: Number(k[4]),
-        volume: Number(k[5]),
-      }));
-      candleHistoryMap.set(activeSymbol, historicalCandles);
-      console.log(`[BOOT] Preloaded ${historicalCandles.length} historical candles for ${activeSymbol}. Indicators fully warmed up!`);
+    const candles1m = await fetchBootKlines(activeSymbol, '1m', 200);
+    if (candles1m.length > 0) {
+      candleHistoryMap.set(activeSymbol, candles1m);
+      mtfManager.setInitialCandles(activeSymbol, '1m', candles1m);
+      console.log(`[BOOT] Preloaded ${candles1m.length} 1m candles for ${activeSymbol}. Indicators fully warmed up!`);
+    }
+
+    const candles15m = await fetchBootKlines(activeSymbol, '15m', 200);
+    if (candles15m.length > 0) {
+      mtfManager.setInitialCandles(activeSymbol, '15m', candles15m);
+      smcEngine.onCandleClosed(activeSymbol, '15m', candles15m);
+      console.log(`[BOOT] Preloaded ${candles15m.length} 15m candles for ${activeSymbol}. Native SMC initialized!`);
+    }
+
+    const candles1h = await fetchBootKlines(activeSymbol, '1h', 200);
+    if (candles1h.length > 0) {
+      mtfManager.setInitialCandles(activeSymbol, '1h', candles1h);
+      console.log(`[BOOT] Preloaded ${candles1h.length} 1h candles for ${activeSymbol}. Macro Regime & ADX initialized!`);
     }
   } catch (err: any) {
     console.warn(`[BOOT] Failed to preload historical klines: ${err.message}`);

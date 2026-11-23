@@ -38,6 +38,17 @@ function parsePillarDetail(jsonStr?: string): PillarJsonDetail | null {
   }
 }
 
+export function getPillarBadgeColor(bias?: string): string {
+  const upper = bias?.toUpperCase();
+  if (upper === 'BULLISH' || upper === 'BUY') {
+    return 'border bg-[#0ecb81]/10 text-[#0ecb81] border-[#0ecb81]/30';
+  }
+  if (upper === 'BEARISH' || upper === 'SELL') {
+    return 'border bg-[#f6465d]/10 text-[#f6465d] border-[#f6465d]/30';
+  }
+  return 'border bg-[#151d2c] text-[#7d8590] border-[#151d2c]';
+}
+
 export interface AgentTelemetryPanelProps {
   isDockedRight?: boolean;
 }
@@ -231,6 +242,60 @@ export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDock
             const p6 = parsePillarDetail(imp.p6_momentum_rvol);
             const p7 = parsePillarDetail(imp.p7_sentiment_macro);
 
+            const sideBadge = (
+              <span
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center space-x-1 ${
+                  isSell
+                    ? 'bg-[#f6465d]/20 text-[#f6465d] border border-[#f6465d]/40'
+                    : isBuy
+                    ? 'bg-[#0ecb81]/20 text-[#0ecb81] border border-[#0ecb81]/40'
+                    : 'bg-[#151d2c] text-[#7d8590]'
+                }`}
+              >
+                {isSell && <TrendingDown className="w-3 h-3" />}
+                {isBuy && <TrendingUp className="w-3 h-3" />}
+                <span>{imp.consensus_side}</span>
+              </span>
+            );
+
+            const allVotes = [imp.p1_vote, imp.p2_vote, imp.p3_vote, imp.p4_vote, imp.p5_vote, imp.p6_vote, imp.p7_vote];
+            const bCount = allVotes.filter((v) => v === 'BUY').length;
+            const sCount = allVotes.filter((v) => v === 'SELL').length;
+            const dirCount = imp.consensus_side === 'BUY' ? bCount : imp.consensus_side === 'SELL' ? sCount : 0;
+            const hasSplit = bCount > 0 && sCount > 0;
+            const consensusPill = (
+              <span
+                className={`px-1.5 py-0.5 rounded border text-[10px] ${
+                  hasSplit
+                    ? 'bg-[#f0b90b]/10 border-[#f0b90b]/30 text-[#f0b90b]'
+                    : 'bg-[#151d2c] border-[#151d2c] text-[#7d8590]'
+                }`}
+                title={hasSplit ? `Bölünmə: ${bCount} BUY vs ${sCount} SELL` : undefined}
+              >
+                {hasSplit
+                  ? `${dirCount}/7 ${imp.consensus_side} (${imp.active_pillars_count} aktiv)`
+                  : `${imp.active_pillars_count}/7 Aktiv`}
+              </span>
+            );
+
+            const statusIndicator = (
+              <span
+                className={`px-1.5 py-0.5 rounded font-bold ${
+                  imp.status === 'SETTLED'
+                    ? 'bg-[#2962ff]/20 text-[#2962ff]'
+                    : 'bg-[#f0b90b]/20 text-[#f0b90b]'
+                }`}
+              >
+                {imp.status}
+              </span>
+            );
+
+            const chevronIcon = isExpanded ? (
+              <ChevronDown className="w-3.5 h-3.5 text-[#7d8590]" />
+            ) : (
+              <ChevronRight className="w-3.5 h-3.5 text-[#7d8590]" />
+            );
+
             return (
               <div
                 key={imp.id ?? `${imp.timestamp}-${imp.mark_price}`}
@@ -238,84 +303,62 @@ export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDock
                 onClick={() => toggleRow(imp.id)}
               >
                 {/* Main Row Summary */}
-                <div className="flex items-center justify-between text-[11px] gap-2">
-                  <div className="flex items-center space-x-2 min-w-0">
-                    <span className="text-[#7d8590] text-[10px] flex items-center space-x-1">
-                      <Clock className="w-3 h-3 inline text-[#7d8590]" />
-                      <span>{timeStr}</span>
-                    </span>
-
-                    <span className="font-bold text-[#e6edf3]">{imp.symbol}</span>
-
-                    {/* Consensus Side Badge */}
-                    <span
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold flex items-center space-x-1 ${
-                        isSell
-                          ? 'bg-[#f6465d]/20 text-[#f6465d] border border-[#f6465d]/40'
-                          : isBuy
-                          ? 'bg-[#0ecb81]/20 text-[#0ecb81] border border-[#0ecb81]/40'
-                          : 'bg-[#151d2c] text-[#7d8590]'
-                      }`}
-                    >
-                      {isSell && <TrendingDown className="w-3 h-3" />}
-                      {isBuy && <TrendingUp className="w-3 h-3" />}
-                      <span>{imp.consensus_side}</span>
-                    </span>
-
-                    {/* Composite Score */}
-                    <span className="text-[#f0b90b] font-semibold">{imp.composite_score}%</span>
-
-                    <span className="text-[#7d8590] text-[10px]">
-                      (Qiymət: <span className="text-[#e6edf3]">${imp.mark_price.toFixed(2)}</span>)
-                    </span>
-                  </div>
-
-                  <div className="flex items-center space-x-2 text-[10px] flex-shrink-0">
-                    {/* Active Pillar Badges */}
-                    {(() => {
-                      const allVotes = [imp.p1_vote, imp.p2_vote, imp.p3_vote, imp.p4_vote, imp.p5_vote, imp.p6_vote, imp.p7_vote];
-                      const bCount = allVotes.filter((v) => v === 'BUY').length;
-                      const sCount = allVotes.filter((v) => v === 'SELL').length;
-                      const dirCount = imp.consensus_side === 'BUY' ? bCount : imp.consensus_side === 'SELL' ? sCount : 0;
-                      const hasSplit = bCount > 0 && sCount > 0;
-                      return (
-                        <span
-                          className={`px-1.5 py-0.5 rounded border text-[10px] ${
-                            hasSplit
-                              ? 'bg-[#f0b90b]/10 border-[#f0b90b]/30 text-[#f0b90b]'
-                              : 'bg-[#151d2c] border-[#151d2c] text-[#7d8590]'
-                          }`}
-                          title={hasSplit ? `Bölünmə: ${bCount} BUY vs ${sCount} SELL` : undefined}
-                        >
-                          {hasSplit
-                            ? `${dirCount}/7 ${imp.consensus_side} (${imp.active_pillars_count} aktiv)`
-                            : `${imp.active_pillars_count}/7 Aktiv`}
+                {isDockedRight ? (
+                  <div className="flex flex-col gap-1.5 text-[11px]">
+                    {/* Row 1: Time, Symbol, Side, Composite score */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-[#7d8590] text-[10px] flex items-center space-x-1">
+                          <Clock className="w-3 h-3 inline text-[#7d8590]" />
+                          <span>{timeStr}</span>
                         </span>
-                      );
-                    })()}
+                        <span className="font-bold text-[#e6edf3]">{imp.symbol}</span>
+                        {sideBadge}
+                      </div>
+                      <span className="text-[#f0b90b] font-semibold">{imp.composite_score}%</span>
+                    </div>
 
-                    <span
-                      className={`px-1.5 py-0.5 rounded font-bold ${
-                        imp.status === 'SETTLED'
-                          ? 'bg-[#2962ff]/20 text-[#2962ff]'
-                          : 'bg-[#f0b90b]/20 text-[#f0b90b]'
-                      }`}
-                    >
-                      {imp.status}
-                    </span>
-
-                    {isExpanded ? (
-                      <ChevronDown className="w-3.5 h-3.5 text-[#7d8590]" />
-                    ) : (
-                      <ChevronRight className="w-3.5 h-3.5 text-[#7d8590]" />
-                    )}
+                    {/* Row 2: Mark price ($XX.XX font-mono), Consensus pill, Status indicator, Chevron */}
+                    <div className="flex items-center justify-between text-[10px]">
+                      <span className="text-[#e6edf3] font-mono">${imp.mark_price.toFixed(2)}</span>
+                      <div className="flex items-center space-x-2 flex-shrink-0">
+                        {consensusPill}
+                        {statusIndicator}
+                        {chevronIcon}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="flex items-center justify-between text-[11px] gap-2">
+                    <div className="flex items-center space-x-2 min-w-0">
+                      <span className="text-[#7d8590] text-[10px] flex items-center space-x-1">
+                        <Clock className="w-3 h-3 inline text-[#7d8590]" />
+                        <span>{timeStr}</span>
+                      </span>
+
+                      <span className="font-bold text-[#e6edf3]">{imp.symbol}</span>
+
+                      {sideBadge}
+
+                      <span className="text-[#f0b90b] font-semibold">{imp.composite_score}%</span>
+
+                      <span className="text-[#7d8590] text-[10px]">
+                        (Qiymət: <span className="text-[#e6edf3] font-mono">${imp.mark_price.toFixed(2)}</span>)
+                      </span>
+                    </div>
+
+                    <div className="flex items-center space-x-2 text-[10px] flex-shrink-0">
+                      {consensusPill}
+                      {statusIndicator}
+                      {chevronIcon}
+                    </div>
+                  </div>
+                )}
 
                 {/* Quick Teaser of Key Drivers (Sentiment / Momentum) */}
                 <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[10px]">
                   {p7?.state && (
-                    <span className="px-1.5 py-0.5 rounded bg-[#f6465d]/10 border border-[#f6465d]/20 text-[#f6465d]">
+                    <span className={`px-1.5 py-0.5 rounded ${getPillarBadgeColor(p7.bias || p7.state || imp.p7_vote)}`}>
                       P7 (Xəbər): {p7.state}
                     </span>
                   )}

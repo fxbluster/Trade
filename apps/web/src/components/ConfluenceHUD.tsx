@@ -30,6 +30,18 @@ export const PILLAR_METADATA: Record<
   SENTIMENT_MACRO: { name: 'Macro Sentiment', weight: '15%', icon: Newspaper },
 };
 
+/**
+ * Shortens verbose pillar texts to prevent visual overflow in HUD cards.
+ */
+export function compactText(t?: string): string {
+  if (!t) return '';
+  return t
+    .replace(/Equilibrium \(No Active Zones\)/gi, 'No Active Zones')
+    .replace(/Delta flow within normal bounds/gi, 'Normal Bounds')
+    .replace(/unmitigated FVGs/gi, 'FVGs')
+    .replace(/Order Blocks?/gi, 'OB');
+}
+
 export const ConfluenceHUD: React.FC = () => {
   const confluence = useMarketStore((s) => s.confluence);
   const indicators = useMarketStore((s) => s.indicators);
@@ -117,6 +129,12 @@ export const ConfluenceHUD: React.FC = () => {
   const bullishCount = confluence?.bullishCount ?? pillars.filter((p) => p.bias === 'BULLISH' && p.confirmed).length;
   const bearishCount = confluence?.bearishCount ?? pillars.filter((p) => p.bias === 'BEARISH' && p.confirmed).length;
 
+  const isEffectiveConsensusMet = Boolean(
+    consensusMet &&
+    ((consensusBias === 'BULLISH' && bullishCount >= 4) ||
+     (consensusBias === 'BEARISH' && bearishCount >= 4))
+  );
+
   const actionColor = () => {
     switch (recommendedAction) {
       case 'STRONG_BUY':
@@ -149,14 +167,14 @@ export const ConfluenceHUD: React.FC = () => {
           <div className="flex items-center space-x-1 pl-2">
             <span
               className={`px-2 py-0.5 rounded text-[11px] font-bold border ${
-                consensusMet
+                isEffectiveConsensusMet
                   ? consensusBias === 'BULLISH'
                     ? 'bg-[#0ecb81]/20 text-[#0ecb81] border-[#0ecb81]/50 shadow-sm shadow-[#0ecb81]/20 animate-pulse-subtle'
                     : 'bg-[#f6465d]/20 text-[#f6465d] border-[#f6465d]/50 shadow-sm shadow-[#f6465d]/20 animate-pulse-subtle'
                   : 'bg-[#151d2c] text-[#7d8590] border-[#151d2c]'
               }`}
             >
-              {consensusMet
+              {isEffectiveConsensusMet
                 ? `${consensusBias === 'BULLISH' ? bullishCount : bearishCount}/7 ${consensusBias} CONSENSUS`
                 : `${Math.max(bullishCount, bearishCount)}/7 Pillars (Min 4 Req)`}
             </span>
@@ -246,7 +264,8 @@ export const ConfluenceHUD: React.FC = () => {
           return (
             <div
               key={pillar.id}
-              className={`flex flex-col justify-between p-2 rounded border transition-colors ${cardBorder}`}
+              className={`flex flex-col justify-between p-1.5 rounded border transition-colors ${cardBorder}`}
+              title={`${pillar.valueText || ''} - ${pillar.subText || ''}`}
             >
               {/* Pillar Title & Weight */}
               <div className="flex items-center justify-between pb-1 border-b border-[#151d2c]/40">
@@ -261,11 +280,11 @@ export const ConfluenceHUD: React.FC = () => {
 
               {/* Metric Value */}
               <div className="py-1">
-                <div className="font-bold text-[11px] text-[#e6edf3] truncate" title={pillar.valueText}>
-                  {pillar.valueText}
+                <div className="font-bold text-[11px] text-[#e6edf3] line-clamp-1 break-words" title={pillar.valueText}>
+                  {compactText(pillar.valueText)}
                 </div>
-                <div className="text-[9px] text-[#7d8590] truncate" title={pillar.subText}>
-                  {pillar.subText}
+                <div className="text-[9px] text-[#7d8590] line-clamp-1 break-words" title={pillar.subText}>
+                  {compactText(pillar.subText)}
                 </div>
               </div>
 

@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useUiStore } from '../store/useUiStore';
 import { useMarketStore } from '../store/useMarketStore';
 import { apiClient } from '../lib/apiClient';
+import { formatUsd } from '../lib/formatters';
 import type { PnlSummaryResponse } from '@tradeos/shared';
 import {
   X,
@@ -157,8 +158,7 @@ export const PnLSummaryModal: React.FC = () => {
                             (data.live.unrealizedPnl || 0) >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'
                           }`}
                         >
-                          {(data.live.unrealizedPnl || 0) >= 0 ? '+' : ''}$
-                          {data.live.unrealizedPnl?.toFixed(2)}
+                          {formatUsd(data.live.unrealizedPnl, true)}
                         </span>
                         <span
                           className={`text-sm font-bold ${
@@ -228,7 +228,7 @@ export const PnLSummaryModal: React.FC = () => {
                           data.today.netPnl >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'
                         }`}
                       >
-                        {data.today.netPnl >= 0 ? '+' : ''}${data.today.netPnl.toFixed(2)}
+                        {formatUsd(data.today.netPnl, true)}
                       </span>
                       <span className="text-xs text-[#7d8590]">xalis</span>
                     </div>
@@ -236,7 +236,7 @@ export const PnLSummaryModal: React.FC = () => {
                     <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-[#151d2c] text-[11px]">
                       <div>
                         <span className="text-[#7d8590] block">Bağlanmış Real Qazanc:</span>
-                        <span className="font-semibold text-[#e6edf3]">${data.today.realizedPnl.toFixed(2)}</span>
+                        <span className="font-semibold text-[#e6edf3]">{formatUsd(data.today.realizedPnl, true)}</span>
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">Cari Canlı Qazanc:</span>
@@ -245,12 +245,12 @@ export const PnLSummaryModal: React.FC = () => {
                             data.today.unrealizedPnl >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'
                           }`}
                         >
-                          {data.today.unrealizedPnl >= 0 ? '+' : ''}${data.today.unrealizedPnl.toFixed(2)}
+                          {formatUsd(data.today.unrealizedPnl, true)}
                         </span>
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">Binance Komissiyası:</span>
-                        <span className="font-semibold text-rose-400">${data.today.commission.toFixed(2)}</span>
+                        <span className="font-semibold text-rose-400">{formatUsd(data.today.commission, false)}</span>
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">Uğurlu Əməliyyat:</span>
@@ -281,7 +281,7 @@ export const PnLSummaryModal: React.FC = () => {
                           data.threeDays.netPnl >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'
                         }`}
                       >
-                        {data.threeDays.netPnl >= 0 ? '+' : ''}${data.threeDays.netPnl.toFixed(2)}
+                        {formatUsd(data.threeDays.netPnl, true)}
                       </span>
                       <span className="text-xs text-[#7d8590]">xalis balans</span>
                     </div>
@@ -289,11 +289,11 @@ export const PnLSummaryModal: React.FC = () => {
                     <div className="grid grid-cols-2 gap-2 mt-3 pt-3 border-t border-[#151d2c] text-[11px]">
                       <div>
                         <span className="text-[#7d8590] block">Bağlanmış Real Qazanc:</span>
-                        <span className="font-semibold text-[#0ecb81]">+${data.threeDays.realizedPnl.toFixed(2)}</span>
+                        <span className="font-semibold text-[#0ecb81]">{formatUsd(data.threeDays.realizedPnl, true)}</span>
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">Ödənilən Komissiyalar:</span>
-                        <span className="font-semibold text-rose-400">${data.threeDays.commission.toFixed(2)}</span>
+                        <span className="font-semibold text-rose-400">{formatUsd(data.threeDays.commission, false)}</span>
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">Qazanclı Ticarət:</span>
@@ -301,7 +301,12 @@ export const PnLSummaryModal: React.FC = () => {
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">İtki Sayı:</span>
-                        <span className="font-semibold text-[#7d8590]">{data.threeDays.lossCount}</span>
+                        {(() => {
+                          const beCount = Math.max(0, data.threeDays.tradeCount - data.threeDays.winCount - data.threeDays.lossCount);
+                          return (
+                            <span className="font-semibold text-[#7d8590]">{data.threeDays.lossCount} ({beCount} Breakeven)</span>
+                          );
+                        })()}
                       </div>
                     </div>
                   </div>
@@ -328,7 +333,7 @@ export const PnLSummaryModal: React.FC = () => {
                           data.weekly.netPnl >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'
                         }`}
                       >
-                        {data.weekly.netPnl >= 0 ? '+' : ''}${data.weekly.netPnl.toFixed(2)}
+                        {formatUsd(data.weekly.netPnl, true)}
                       </span>
                       <span className="text-xs text-[#7d8590]">ümumi dinamika</span>
                     </div>
@@ -341,20 +346,22 @@ export const PnLSummaryModal: React.FC = () => {
                             data.weekly.realizedPnl >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'
                           }`}
                         >
-                          ${data.weekly.realizedPnl.toFixed(2)}
+                          {formatUsd(data.weekly.realizedPnl, true)}
                         </span>
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">Cəmi Komissiya:</span>
-                        <span className="font-semibold text-rose-400">${data.weekly.commission.toFixed(2)}</span>
+                        <span className="font-semibold text-rose-400">{formatUsd(data.weekly.commission, false)}</span>
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">Son 3 Günün Trendi:</span>
-                        <span className="font-semibold text-[#0ecb81]">Müsbət (+${data.threeDays.netPnl.toFixed(2)})</span>
+                        <span className={`font-semibold ${data.threeDays.netPnl >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                          {data.threeDays.netPnl >= 0 ? 'Müsbət (' : 'Mənfi ('}{formatUsd(data.threeDays.netPnl, true)})
+                        </span>
                       </div>
                       <div>
                         <span className="text-[#7d8590] block">Ümumi Cüzdan:</span>
-                        <span className="font-semibold text-[#e6edf3]">${data.account.walletBalance.toFixed(2)}</span>
+                        <span className="font-semibold text-[#e6edf3]">{formatUsd(data.account.walletBalance, false)}</span>
                       </div>
                     </div>
                   </div>

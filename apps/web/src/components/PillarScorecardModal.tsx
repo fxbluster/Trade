@@ -245,11 +245,11 @@ export const PillarScorecardModal: React.FC = () => {
                     </td>
 
                     <td className="py-2.5 px-3 text-right font-mono tabular-nums text-[#0ecb81]">
-                      +{row.avgMfePct.toFixed(2)}%
+                      {Math.abs(row.avgMfePct) < 0.005 ? '0.00%' : `+${row.avgMfePct.toFixed(2)}%`}
                     </td>
 
                     <td className="py-2.5 px-3 text-right font-mono tabular-nums text-[#f6465d]">
-                      -{row.avgMaePct.toFixed(2)}%
+                      {Math.abs(row.avgMaePct) < 0.005 ? '0.00%' : `-${row.avgMaePct.toFixed(2)}%`}
                     </td>
 
                     <td className="py-2.5 px-3 text-right font-mono tabular-nums text-[#7d8590]">

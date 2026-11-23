@@ -201,14 +201,14 @@ export const TimeMachineModal: React.FC = () => {
                 >
                   {(lossProb * 100).toFixed(1)}% SL
                 </div>
-                {timeoutProb && timeoutProb > 0.01 && (
+                {timeoutProb !== null && timeoutProb > 0.01 ? (
                   <div
                     style={{ width: `${timeoutProb * 100}%` }}
                     className="bg-[#7d8590] text-[#020305] flex items-center justify-center transition-all duration-300"
                   >
                     {(timeoutProb * 100).toFixed(0)}%
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
 

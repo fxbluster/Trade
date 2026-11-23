@@ -129,26 +129,26 @@ export const ScannerModal: React.FC = () => {
             <thead className="sticky top-0 bg-[#020305] border-b border-[#151d2c] text-[10px] uppercase text-[#7d8590]">
               <tr>
                 <th className="py-2 px-3">Symbol</th>
-                <th className="py-2 px-3">Price</th>
+                <th className="py-2 px-3 text-right tabular-nums font-mono">Price</th>
                 <th
-                  className="py-2 px-3 cursor-pointer hover:text-[#e6edf3]"
+                  className="py-2 px-3 text-right tabular-nums font-mono cursor-pointer hover:text-[#e6edf3]"
                   onClick={() => toggleSort('priceChangePercent24h')}
                 >
-                  <div className="flex items-center space-x-1">
+                  <div className="flex items-center justify-end space-x-1">
                     <span>24h Change</span>
                     <ArrowUpDown className="w-3 h-3" />
                   </div>
                 </th>
                 <th
-                  className="py-2 px-3 cursor-pointer hover:text-[#e6edf3]"
+                  className="py-2 px-3 text-right tabular-nums font-mono cursor-pointer hover:text-[#e6edf3]"
                   onClick={() => toggleSort('quoteVolume24h')}
                 >
-                  <div className="flex items-center space-x-1">
+                  <div className="flex items-center justify-end space-x-1">
                     <span>24h Volume</span>
                     <ArrowUpDown className="w-3 h-3" />
                   </div>
                 </th>
-                <th className="py-2 px-3">Funding</th>
+                <th className="py-2 px-3 text-right tabular-nums font-mono">Funding</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#151d2c]/60">
@@ -156,10 +156,10 @@ export const ScannerModal: React.FC = () => {
                 [...Array(6)].map((_, i) => (
                   <tr key={i} className="animate-pulse">
                     <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-20" /></td>
-                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-16" /></td>
-                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-14" /></td>
-                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-18" /></td>
-                    <td className="py-3 px-3"><div className="h-3.5 bg-[#151d2c] rounded w-12" /></td>
+                    <td className="py-3 px-3 text-right"><div className="h-3.5 bg-[#151d2c] rounded w-16 ml-auto" /></td>
+                    <td className="py-3 px-3 text-right"><div className="h-3.5 bg-[#151d2c] rounded w-14 ml-auto" /></td>
+                    <td className="py-3 px-3 text-right"><div className="h-3.5 bg-[#151d2c] rounded w-18 ml-auto" /></td>
+                    <td className="py-3 px-3 text-right"><div className="h-3.5 bg-[#151d2c] rounded w-12 ml-auto" /></td>
                   </tr>
                 ))
               ) : (
@@ -174,17 +174,17 @@ export const ScannerModal: React.FC = () => {
                       className="hover:bg-[#151d2c]/40 cursor-pointer transition-colors"
                     >
                       <td className="py-2.5 px-3 font-bold text-[#e6edf3]">{item.symbol}</td>
-                      <td className="py-2.5 px-3 font-semibold text-[#e6edf3]">{item.lastPrice.toFixed(2)}</td>
+                      <td className="py-2.5 px-3 font-semibold text-[#e6edf3] text-right tabular-nums font-mono">{item.lastPrice.toFixed(2)}</td>
                       <td
-                        className={`py-2.5 px-3 font-bold ${
+                        className={`py-2.5 px-3 font-bold text-right tabular-nums font-mono ${
                           isPositive ? 'text-[#0ecb81]' : 'text-[#f6465d]'
                         }`}
                       >
                         {isPositive ? '+' : ''}
                         {item.priceChangePercent24h.toFixed(2)}%
                       </td>
-                      <td className="py-2.5 px-3 text-[#7d8590]">${volumeMillion}M</td>
-                      <td className="py-2.5 px-3 text-[#f0b90b]">
+                      <td className="py-2.5 px-3 text-[#7d8590] text-right tabular-nums font-mono">${volumeMillion}M</td>
+                      <td className="py-2.5 px-3 text-[#f0b90b] text-right tabular-nums font-mono">
                         {(item.fundingRate * 100).toFixed(4)}%
                       </td>
                     </tr>

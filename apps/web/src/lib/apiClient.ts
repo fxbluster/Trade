@@ -217,7 +217,7 @@ export const apiClient = {
   async updateAutoPilotConfig(config: Partial<AutoPilotConfig>): Promise<{ ok: boolean; config: AutoPilotConfig }> {
     return request<{ ok: boolean; config: AutoPilotConfig }>('/api/autopilot/config', {
       method: 'POST',
-      body: JSON.stringify({ config }),
+      body: JSON.stringify(config),
     });
   },
 

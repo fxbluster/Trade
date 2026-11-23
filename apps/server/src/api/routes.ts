@@ -536,7 +536,8 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
 
   // 19. POST /api/autopilot/config — Update Auto-Pilot configuration
   app.post('/api/autopilot/config', (req: Request, res: Response) => {
-    const body = (req.body || {}) as any;
+    const rawBody = (req.body || {}) as any;
+    const body = (rawBody.config && typeof rawBody.config === 'object') ? rawBody.config : rawBody;
     if (body.marginAllocationPct !== undefined && body.marginAllocationPct > 10.0) {
       return sendJson(res, 400, { error: 'Bad Request: Auto-Pilot margin allocation cannot exceed 10.0%' });
     }

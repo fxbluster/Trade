@@ -231,22 +231,22 @@ export const CONFLUENCE_WEIGHTS: Record<ConfluencePillarId, number> = {
 
 /**
  * Empirical weights calibrated from real-time live telemetry:
- * - ORDER_FLOW_L2 boosted to 20% (proven 51.6% hit rate and 2.56x MFE/MAE institutional alpha)
- * - NATIVE_SMC maintained at 22%
- * - MACRO_REGIME adjusted to 18% with ADX 22.0 threshold to avoid false ranging lockouts
- * - CVD_ABSORPTION maintained at 18%
- * - LIQ_CLUSTERS calibrated to 8% with tighter intraday high-leverage thresholds
- * - MOMENTUM_RVOL adjusted to 8%
- * - SENTIMENT_MACRO calibrated to 6%
- * Total = 18 + 22 + 18 + 20 + 8 + 8 + 6 = 100%
+ * - ORDER_FLOW_L2: 20.0% (Alpha Leader)
+ * - NATIVE_SMC: 23.0% (Institutional structural zones)
+ * - CVD_ABSORPTION: 17.0% (Delta Z-Score absorption)
+ * - MACRO_REGIME: 20.0% (Smooth ADX [20-23] plateau)
+ * - LIQ_CLUSTERS: 8.0% (0.45x ATR proximity)
+ * - MOMENTUM_RVOL: 6.0% (Impulse confirmation)
+ * - SENTIMENT_MACRO: 6.0% (Macro news impact)
+ * Total = 20 + 23 + 17 + 20 + 8 + 6 + 6 = 100%
  */
 export const EMPIRICAL_CONFLUENCE_WEIGHTS: Record<ConfluencePillarId, number> = {
-  MACRO_REGIME: 0.18,
-  NATIVE_SMC: 0.22,
-  CVD_ABSORPTION: 0.18,
+  MACRO_REGIME: 0.20,
+  NATIVE_SMC: 0.23,
+  CVD_ABSORPTION: 0.17,
   ORDER_FLOW_L2: 0.20,
   LIQ_CLUSTERS: 0.08,
-  MOMENTUM_RVOL: 0.08,
+  MOMENTUM_RVOL: 0.06,
   SENTIMENT_MACRO: 0.06,
 };
 

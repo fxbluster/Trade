@@ -71,6 +71,8 @@ export class TradeManager {
 
   // Per-symbol async mutex queue to serialize actions per symbol
   private mutexQueues = new Map<string, Promise<unknown>>();
+  // Track cumulative executed quantity per order ID to prevent double-deduction on partial fills
+  private cumulativeExecutedByOrder = new Map<string, number>();
 
   constructor(options: TradeManagerOptions) {
     this.db = options.db;
@@ -958,10 +960,23 @@ export class TradeManager {
     const price = Number(
       event.lastFilledPrice || event.L || event.o?.L || event.price || event.p || trade.entry_price
     );
-    // Explicitly check for executed trade quantity
-    const qty = Number(
-      event.lastFilledQty || event.l || event.o?.l || event.executedQty || 0
-    );
+    // Deterministic executed quantity extraction tracking cumulative executedQty per orderId
+    const lastFilled = Number(event.lastFilledQty || event.l || event.o?.l || 0);
+    const cumulative = Number(event.executedQty || event.z || event.o?.z || 0);
+
+    let qty = 0;
+    if (lastFilled > 0) {
+      qty = lastFilled;
+      if (orderId && cumulative > 0) {
+        this.cumulativeExecutedByOrder.set(orderId, cumulative);
+      }
+    } else if (cumulative > 0 && orderId) {
+      const prev = this.cumulativeExecutedByOrder.get(orderId) ?? 0;
+      qty = Math.max(0, Number((cumulative - prev).toFixed(4)));
+      this.cumulativeExecutedByOrder.set(orderId, cumulative);
+    } else {
+      qty = Number(event.lastFilledQty || event.l || event.o?.l || event.executedQty || 0);
+    }
 
     // If quantity is <= 0, this is an order status update or acknowledgment, not a trade fill
     if (qty <= 0) {

@@ -3,13 +3,15 @@
  * Single source of truth for backend (apps/server) and frontend (apps/web).
  */
 
+import type { BlockReason } from './types.js';
+
 export type BrokerMode = 'BINANCE_DEMO' | 'LOCAL_PAPER';
 
 export type TradeSide = 'BUY' | 'SELL';
 
 export type OrderType = 'MARKET' | 'LIMIT';
 
-export type TradeStatus = 'OPEN' | 'PARTIALLY_CLOSED' | 'CLOSING' | 'CLOSED';
+export type TradeStatus = 'OPEN' | 'PARTIALLY_CLOSED' | 'CLOSING' | 'CLOSING_IN_PROGRESS' | 'CLOSED';
 
 export type ExchangeHealth = 'HEALTHY' | 'DEGRADED' | 'BANNED' | 'OFFLINE';
 
@@ -87,6 +89,9 @@ export interface ConfluenceSnapshot {
   activeFvgs: FairValueGap[];
   activeOrderBlocks: OrderBlock[];
   latestSweep: LiquiditySweep | null;
+  blockReason?: BlockReason | null;
+  eventBlackoutActive?: boolean;
+  noiseBandActive?: boolean;
 }
 
 export interface AutoPilotConfig {
@@ -188,37 +193,8 @@ export interface AuthSessionResponse {
 // Database Models (matches SQLite schema.sql)
 // ----------------------------------------------------------------------------
 
-export interface TradeRecord {
-  id: string;                                 // UUID v4
-  symbol: string;
-  broker_mode: BrokerMode;
-  side: TradeSide;
-  status: TradeStatus;
-  entry_price: number;
-  exit_price: number | null;
-  quantity: number;
-  remaining_qty: number;                      // Remaining quantity after partial TP1 fill
-  leverage: number;
-  margin_usd: number;
-  stop_loss: number | null;
-  tp1: number | null;
-  tp2: number | null;
-  be_price: number | null;
-  is_breakeven: number;                       // 0 or 1
-  client_order_id: string | null;             // tos_${id}_ent
-  client_sl_id: string | null;                // tos_${id}_sl
-  client_tp1_id: string | null;               // tos_${id}_tp1
-  client_tp2_id: string | null;               // tos_${id}_tp2
-  entry_order_id: string | null;
-  sl_algo_id: string | null;
-  tp1_algo_id: string | null;
-  tp2_algo_id: string | null;
-  realized_pnl: number;
-  fees_usd: number;
-  exit_reason: string | null;
-  opened_at: number;                          // UTC Unix ms
-  closed_at: number | null;                   // UTC Unix ms
-}
+import type { TradeRecord } from './types.js';
+export type { TradeRecord };
 
 export interface FillRecord {
   binance_trade_id: string;
@@ -634,5 +610,14 @@ export interface PnlSummaryResponse {
   humanExplanation: string;
   timestamp: number;
 }
+
+export type {
+  ExitReason,
+  BlockReason,
+  TrailingStopState,
+  NoiseBandSnapshot,
+  EconomicEvent,
+  ExtendedTradeStatus,
+} from './types.js';
 
 

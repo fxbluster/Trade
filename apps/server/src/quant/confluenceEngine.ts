@@ -9,6 +9,8 @@ import type {
   WebhookAlertPayload,
   TechnicalSummary,
   CvdSnapshot,
+  KlineCandle,
+  BlockReason,
 } from '@tradeos/shared';
 import { calculateCompositeConfluenceScore, EMPIRICAL_CONFLUENCE_WEIGHTS } from '@tradeos/shared';
 import { HierarchicalMtfManager } from './hierarchicalMtfManager.js';
@@ -16,6 +18,8 @@ import { NativeSmcEngine } from './nativeSmcEngine.js';
 import { OrderFlowEngine, type DepthLevel } from './orderFlowEngine.js';
 import { SentimentHarvester } from './sentimentHarvester.js';
 import { LiquidationEngine } from './liquidationEngine.js';
+import { NoiseBandEngine, noiseBandEngine } from './noiseBandEngine.js';
+import { EconomicEventGuard, economicEventGuard } from './economicEventGuard.js';
 
 export interface ConfluenceMarketData {
   symbol: string;
@@ -24,6 +28,9 @@ export interface ConfluenceMarketData {
   cvd: CvdSnapshot | null;
   recentHigh?: number;
   recentLow?: number;
+  candle15m?: KlineCandle;
+  vwap?: number;
+  timestamp?: number;
 }
 
 interface StoredPineAlert {
@@ -37,19 +44,21 @@ export interface ConfluenceEngineOptions {
   sentimentHarvester?: SentimentHarvester;
   orderFlowEngine?: OrderFlowEngine;
   liquidationEngine?: LiquidationEngine;
+  noiseBandEngine?: NoiseBandEngine;
+  economicEventGuard?: EconomicEventGuard;
 }
 
 /**
  * ConfluenceEngine — Institutional Quantitative Confluence Engine & Autonomous Market Intelligence.
  *
- * Evaluates the 7 institutional pillars with Bayesian probabilistic weighting:
- * 1. MACRO_REGIME (25%): 1h EMA200, SuperTrend (10, 3.0), and ADX (14) with Hard Directional Veto
- * 2. NATIVE_SMC (25%): Algorithmic Fair Value Gaps (FVG), Order Blocks (OB), and Liquidity Sweeps
- * 3. CVD_ABSORPTION (20%): Signed Z-score absorption divergence over 15-minute sliding sample
- * 4. ORDER_FLOW_L2 (15%): Top-20 order book depth pressure and 60s aggressive taker flow
- * 5. LIQ_CLUSTERS (7.5%): Projected leverage liquidation clusters (10x-100x) from Open Interest
- * 6. MOMENTUM_RVOL (5%): Volatility-adjusted momentum (RSI 14 + MACD histogram)
- * 7. SENTIMENT_MACRO (2.5%): Crypto VADER sentiment and macro funding
+ * Evaluates the 7 institutional pillars with calibrated Bayesian probabilistic weighting:
+ * 1. ORDER_FLOW_L2 (20%): Depth pressure & 60s aggressive taker flow (Alpha Leader)
+ * 2. NATIVE_SMC (23%): Algorithmic Fair Value Gaps (FVG), Order Blocks (OB), and Sweeps
+ * 3. CVD_ABSORPTION (17%): Signed Z-score absorption divergence
+ * 4. MACRO_REGIME (20%): 1h EMA200, SuperTrend (10, 3.0), and ADX (14) smooth plateau [20-23]
+ * 5. LIQ_CLUSTERS (8%): Leverage liquidation clusters with tightened 0.45x ATR proximity
+ * 6. MOMENTUM_RVOL (6%): Volatility-adjusted RSI & MACD momentum
+ * 7. SENTIMENT_MACRO (6%): Macro news and funding sentiment
  */
 export class ConfluenceEngine {
   public readonly mtfManager: HierarchicalMtfManager;
@@ -57,6 +66,8 @@ export class ConfluenceEngine {
   public readonly orderFlowEngine: OrderFlowEngine;
   public readonly sentimentHarvester: SentimentHarvester;
   public readonly liquidationEngine: LiquidationEngine;
+  public readonly noiseBandEngine: NoiseBandEngine;
+  public readonly economicEventGuard: EconomicEventGuard;
 
   private latestPineAlert: StoredPineAlert | null = null;
   private readonly alertNonceCache: Map<string, number> = new Map(); // alert_id -> timestamp (60s LRU)
@@ -71,6 +82,8 @@ export class ConfluenceEngine {
       this.smcEngine = new NativeSmcEngine();
       this.orderFlowEngine = new OrderFlowEngine();
       this.liquidationEngine = new LiquidationEngine();
+      this.noiseBandEngine = noiseBandEngine;
+      this.economicEventGuard = economicEventGuard;
     } else {
       const opts = (options as ConfluenceEngineOptions) || {};
       this.mtfManager = opts.mtfManager || new HierarchicalMtfManager();
@@ -78,6 +91,8 @@ export class ConfluenceEngine {
       this.sentimentHarvester = opts.sentimentHarvester || new SentimentHarvester();
       this.orderFlowEngine = opts.orderFlowEngine || new OrderFlowEngine();
       this.liquidationEngine = opts.liquidationEngine || new LiquidationEngine();
+      this.noiseBandEngine = opts.noiseBandEngine || noiseBandEngine;
+      this.economicEventGuard = opts.economicEventGuard || economicEventGuard;
     }
   }
 
@@ -151,7 +166,7 @@ export class ConfluenceEngine {
       recentLow,
       openInterestUsd: cvd?.openInterestUsd ?? null,
       pillarId: 'LIQ_CLUSTERS',
-      triggerAtrMultiplier: 1.5,
+      triggerAtrMultiplier: 0.45,
     });
 
     // 6. Pillar: MOMENTUM_RVOL (5% Bayesian weight: Volatility-adjusted RSI & MACD momentum)
@@ -210,10 +225,25 @@ export class ConfluenceEngine {
       recommendedAction === 'SELL' ||
       recommendedAction === 'STRONG_SELL';
 
+    // Pre-consensus gates: Economic Event Blackout & Noise Band Filter
+    const gateCheck = this.checkPreTradeGates(
+      symbol,
+      currentPrice,
+      data.candle15m,
+      data.vwap,
+      now
+    );
+
+    const blockReason: BlockReason | null = gateCheck.blocked ? (gateCheck.reason ?? null) : null;
+    const eventBlackoutActive = gateCheck.reason === 'BLOCKED_EVENT_BLACKOUT';
+    const noiseBandActive = gateCheck.reason === 'BLOCKED_NOISE_BAND';
+
     const consensusMet =
+      !gateCheck.blocked &&
       !macroVetoActive &&
       (compositeScore >= 75 || (compositeScore >= 60 && thresholdMet && isActionable));
     const consensusBias = consensusMet ? mathBias : 'NEUTRAL';
+    const finalRecommendedAction = gateCheck.blocked ? 'WAIT' : recommendedAction;
 
     const snapshot: ConfluenceSnapshot = {
       symbol: symbol.toUpperCase(),
@@ -225,16 +255,56 @@ export class ConfluenceEngine {
       consensusMet,
       threshold: this.consensusThreshold,
       compositeScore,
-      recommendedAction,
+      recommendedAction: finalRecommendedAction,
       macroVetoActive,
       macroRegime,
       activeFvgs,
       activeOrderBlocks,
       latestSweep,
+      blockReason,
+      eventBlackoutActive,
+      noiseBandActive,
     };
 
     this.latestSnapshot = snapshot;
     return snapshot;
+  }
+
+  /**
+   * Evaluates pre-trade volatility and economic event gates.
+   */
+  public checkPreTradeGates(
+    symbol: string,
+    currentPrice: number,
+    candle15m?: KlineCandle,
+    vwap?: number,
+    timestamp?: number
+  ): { blocked: boolean; reason?: BlockReason; details?: string } {
+    const now = timestamp ?? Date.now();
+
+    // 1. Economic Event Blackout Gate (+/- 15m)
+    const blackout = this.economicEventGuard.isBlackoutActive(now);
+    if (blackout.active) {
+      return {
+        blocked: true,
+        reason: 'BLOCKED_EVENT_BLACKOUT',
+        details: `Blackout active for ${blackout.eventName ?? 'Economic Event'} (${blackout.remainingSeconds ?? 0}s remaining)`,
+      };
+    }
+
+    // 2. Volatility Noise Band Filter Gate
+    if (candle15m && vwap !== undefined) {
+      const isNoise = this.noiseBandEngine.isNoise(candle15m, vwap, currentPrice);
+      if (isNoise) {
+        return {
+          blocked: true,
+          reason: 'BLOCKED_NOISE_BAND',
+          details: 'Market range is within the 20-day 15m True Range noise threshold',
+        };
+      }
+    }
+
+    return { blocked: false };
   }
 
   public getLatestSnapshot(symbol?: string): ConfluenceSnapshot | null {

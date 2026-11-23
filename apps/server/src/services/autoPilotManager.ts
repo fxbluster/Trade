@@ -5,6 +5,7 @@ import type {
   TradeRecord,
   WsServerMessage,
   TradeSide,
+  TrailingStopState,
 } from '@tradeos/shared';
 import { calculateLiquidationPrice } from '@tradeos/shared';
 import { TradesRepo, SettingsRepo } from '../db/sqlite.js';
@@ -201,6 +202,29 @@ export class AutoPilotManager {
     return diff > 0 ? Math.ceil(diff / 1000) : 0;
   }
 
+  public getTrailingStopState(symbol: string): TrailingStopState | null {
+    const sym = symbol.toUpperCase().trim();
+    const active = this.tradesRepo.getActivePosition(this.broker.mode, sym);
+    if (!active) return null;
+    const atr = this.getAtrFn ? this.getAtrFn(sym) : active.entry_price * 0.005;
+    const peakPrice = active.peak_price ?? active.entry_price;
+    const peakMfe = active.peak_mfe ?? 0;
+    const activeFlag = active.trailing_stop_active === 1;
+    const floor =
+      active.side === 'BUY'
+        ? peakPrice - 0.5 * peakMfe
+        : peakPrice + 0.5 * peakMfe;
+
+    return {
+      enabled: true,
+      active: activeFlag,
+      peakPrice,
+      peakMfe,
+      activationMfeThreshold: 2.0 * atr,
+      givebackFloorPrice: Number(floor.toFixed(2)),
+    };
+  }
+
   private evaluateCooldownExpiry(): void {
     if (this.cooldownUntil > 0 && Date.now() >= this.cooldownUntil) {
       this.cooldownUntil = 0;
@@ -265,9 +289,17 @@ export class AutoPilotManager {
       return;
     }
 
+    // Session Trade Cap: Max 2 filled round-trip trades per calendar day (UTC) [CUJ 4]
+    const nowUtc = new Date();
+    const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
+    const filledToday = this.tradesRepo.getFilledTradeCountToday(this.broker.mode, sym, startOfUtcDay);
+    if (filledToday >= 2) {
+      return;
+    }
+
     // Evaluate Confluence Consensus
     const snapshot = this.confluenceEngine.getSnapshot(sym);
-    if (!snapshot || !snapshot.consensusMet || snapshot.macroVetoActive) {
+    if (!snapshot || !snapshot.consensusMet || snapshot.macroVetoActive || snapshot.blockReason) {
       return;
     }
 
@@ -319,6 +351,30 @@ export class AutoPilotManager {
           leverage,
           atr,
           errorMessage: 'Insufficient balance: walletBalance <= 0',
+        });
+        return;
+      }
+
+      // Daily Mark-to-Market Drawdown Ceiling: Hard halt if session net loss >= 2% of wallet equity [CUJ 5]
+      const nowUtc = new Date();
+      const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
+      const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
+      const maxDrawdownUsd = balance * 0.02;
+      if (dailyStats.netPnl <= -maxDrawdownUsd && maxDrawdownUsd > 0) {
+        const tomorrowUtc = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1);
+        this.cooldownUntil = tomorrowUtc;
+        this.settingsRepo.set('autopilot_cooldown_until', { until: this.cooldownUntil });
+        this.state = 'COOLDOWN_ACTIVE';
+        this.broadcastStatus();
+        this.onOrderDispatched?.({
+          symbol,
+          side,
+          action: 'FAILED',
+          price: limitPrice,
+          marginUsd: 0,
+          leverage,
+          atr,
+          errorMessage: 'BLOCKED_DAILY_MAX_LOSS: Daily drawdown ceiling of 2% equity reached',
         });
         return;
       }
@@ -423,6 +479,12 @@ export class AutoPilotManager {
         marginAllocationPct,
       });
 
+      this.tradesRepo.update(trade.id, {
+        peak_price: limitPrice,
+        peak_mfe: 0,
+        trailing_stop_active: 0,
+      });
+
       this.openTradeId = trade.id;
       this.state = 'POSITION_OPEN';
       this.oppositeConsensusTickCount = 0;
@@ -476,6 +538,34 @@ export class AutoPilotManager {
     const profitPerUnit =
       trade.side === 'BUY' ? markPrice - trade.entry_price : trade.entry_price - markPrice;
 
+    // Case 2a: High-Impact Economic Event Blackout Window Unwind (CUJ 3)
+    const blackout = this.confluenceEngine.economicEventGuard.isBlackoutActive();
+    if (blackout.active) {
+      const decision = this.confluenceEngine.economicEventGuard.evaluateOpenPositionAtBlackout({
+        entryPrice: trade.entry_price,
+        markPrice,
+        side: trade.side,
+        feeBufferPct: 0.0015,
+      });
+
+      if (decision === 'MOVE_TO_BREAKEVEN' && trade.is_breakeven === 0) {
+        try {
+          await this.tradeManager.moveToBreakeven(symbol);
+        } catch {}
+      } else if (decision === 'UNWIND') {
+        this.state = 'CLOSING';
+        this.tradesRepo.update(trade.id, { status: 'CLOSING_IN_PROGRESS' });
+        this.broadcastStatus();
+        try {
+          await this.tradeManager.closePosition(symbol, 'EVENT_BLACKOUT_UNWIND');
+        } finally {
+          const updated = this.tradesRepo.getById(this.openTradeId);
+          this.handlePositionClosed(updated);
+        }
+        return;
+      }
+    }
+
     if (trade.is_breakeven === 0) {
       const triggerThreshold = Math.max(1.5 * atr, trade.entry_price * 0.0025);
 
@@ -485,6 +575,67 @@ export class AutoPilotManager {
         } catch {
           // Tolerated if buffer not yet reached or broker rejected
         }
+      }
+    }
+
+    // Case 2b: Dynamic "Giveback-Half" Trailing Stop for Runners & Post-TP1 Positions [CUJ 1]
+    let updatedPeak = false;
+    let peakPrice = trade.peak_price ?? trade.entry_price;
+    let peakMfe = trade.peak_mfe ?? 0;
+    let trailingActive = trade.trailing_stop_active === 1;
+
+    if (trade.side === 'BUY') {
+      const currentMfe = markPrice - trade.entry_price;
+      if (trade.peak_price === null || trade.peak_price === undefined || markPrice > peakPrice) {
+        peakPrice = markPrice;
+        peakMfe = Math.max(0, currentMfe);
+        updatedPeak = true;
+      }
+    } else {
+      const currentMfe = trade.entry_price - markPrice;
+      if (trade.peak_price === null || trade.peak_price === undefined || markPrice < peakPrice) {
+        peakPrice = markPrice;
+        peakMfe = Math.max(0, currentMfe);
+        updatedPeak = true;
+      }
+    }
+
+    // Mathematical activation criteria: MFE >= 2.0x ATR
+    if (!trailingActive && peakMfe >= 2.0 * atr) {
+      trailingActive = true;
+      updatedPeak = true;
+    }
+
+    if (updatedPeak) {
+      this.tradesRepo.update(trade.id, {
+        peak_price: peakPrice,
+        peak_mfe: peakMfe,
+        trailing_stop_active: trailingActive ? 1 : 0,
+      });
+      trade.peak_price = peakPrice;
+      trade.peak_mfe = peakMfe;
+      trade.trailing_stop_active = trailingActive ? 1 : 0;
+    }
+
+    // Giveback-Half Trigger: Pullback >= 50% MFE once activated (or post-TP1 runner)
+    if (trailingActive && peakMfe >= 2.0 * atr) {
+      const givebackThreshold = 0.50 * peakMfe;
+      const isGivebackTriggered =
+        trade.side === 'BUY'
+          ? markPrice <= peakPrice - givebackThreshold
+          : markPrice >= peakPrice + givebackThreshold;
+
+      if (isGivebackTriggered) {
+        this.state = 'CLOSING';
+        this.tradesRepo.update(trade.id, { status: 'CLOSING_IN_PROGRESS' });
+        this.broadcastStatus();
+        try {
+          await this.tradeManager.closePosition(symbol, 'TRAILING_GIVEBACK_HALF');
+        } finally {
+          const updated = this.tradesRepo.getById(this.openTradeId);
+          this.handlePositionClosed(updated);
+        }
+        return;
       }
     }
 

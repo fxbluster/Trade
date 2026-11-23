@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS trades (
     tp2 REAL,
     be_price REAL,
     is_breakeven INTEGER DEFAULT 0,
+    peak_price REAL,
+    peak_mfe REAL,
+    trailing_stop_active INTEGER DEFAULT 0,
     client_order_id TEXT,                      -- tos_${id}_ent
     client_sl_id TEXT,                         -- tos_${id}_sl
     client_tp1_id TEXT,                        -- tos_${id}_tp1
@@ -183,5 +186,16 @@ CREATE TABLE IF NOT EXISTS pillar_daily_scorecards (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (date, symbol, horizon)
 );
+
+CREATE TABLE IF NOT EXISTS economic_events (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  impact TEXT NOT NULL,
+  currency TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_economic_events_ts ON economic_events(timestamp);
+
 
 

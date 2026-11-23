@@ -169,17 +169,17 @@ export class HierarchicalMtfManager {
     let regime: MacroRegime = 'MACRO_RANGING';
 
     if (ema200 !== null) {
-      if (mark > ema200 && latestDir === 'BULLISH' && adx >= 22) {
+      if (mark > ema200 && latestDir === 'BULLISH' && adx >= 20.0) {
         regime = 'MACRO_BULLISH';
-      } else if (mark < ema200 && latestDir === 'BEARISH' && adx >= 22) {
+      } else if (mark < ema200 && latestDir === 'BEARISH' && adx >= 20.0) {
         regime = 'MACRO_BEARISH';
       } else {
         regime = 'MACRO_RANGING';
       }
     } else {
-      if (latestDir === 'BULLISH' && adx >= 22) {
+      if (latestDir === 'BULLISH' && adx >= 20.0) {
         regime = 'MACRO_BULLISH';
-      } else if (latestDir === 'BEARISH' && adx >= 22) {
+      } else if (latestDir === 'BEARISH' && adx >= 20.0) {
         regime = 'MACRO_BEARISH';
       } else {
         regime = 'MACRO_RANGING';
@@ -228,7 +228,7 @@ export class HierarchicalMtfManager {
     }
 
     if (bias.regime === 'MACRO_BULLISH') {
-      const score = Math.min(100, Math.round(75 + Math.min(25, (bias.adx - 22) * 2)));
+      const score = Math.min(100, Math.round(75 + Math.min(25, (bias.adx - 20) * 2.5)));
       return {
         id: 'MACRO_REGIME' as any,
         title: '1h Macro Regime',
@@ -242,7 +242,7 @@ export class HierarchicalMtfManager {
     }
 
     if (bias.regime === 'MACRO_BEARISH') {
-      const score = Math.min(100, Math.round(75 + Math.min(25, (bias.adx - 22) * 2)));
+      const score = Math.min(100, Math.round(75 + Math.min(25, (bias.adx - 20) * 2.5)));
       return {
         id: 'MACRO_REGIME' as any,
         title: '1h Macro Regime',

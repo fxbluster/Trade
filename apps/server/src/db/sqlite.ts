@@ -22,7 +22,8 @@ import type {
   PillarScorecardItem,
   PillarAttributionResponse,
   PillarDailyScorecardRecord,
-  ConfluencePillarId
+  ConfluencePillarId,
+  EconomicEvent,
 } from '@tradeos/shared';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -45,6 +46,29 @@ export function initializeDatabase(dbPath: string): DatabaseSync {
 
   // Execute schema DDL
   db.exec(schemaSql);
+
+  // Schema migrations for existing databases
+  try {
+    db.exec('ALTER TABLE trades ADD COLUMN peak_price REAL;');
+  } catch {}
+  try {
+    db.exec('ALTER TABLE trades ADD COLUMN peak_mfe REAL;');
+  } catch {}
+  try {
+    db.exec('ALTER TABLE trades ADD COLUMN trailing_stop_active INTEGER DEFAULT 0;');
+  } catch {}
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS economic_events (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        timestamp INTEGER NOT NULL,
+        impact TEXT NOT NULL,
+        currency TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_economic_events_ts ON economic_events(timestamp);
+    `);
+  } catch {}
 
   return db;
 }
@@ -75,13 +99,15 @@ export class TradesRepo {
       INSERT INTO trades (
         id, symbol, broker_mode, side, status, entry_price, exit_price,
         quantity, remaining_qty, leverage, margin_usd, stop_loss, tp1, tp2,
-        be_price, is_breakeven, client_order_id, client_sl_id, client_tp1_id,
+        be_price, is_breakeven, peak_price, peak_mfe, trailing_stop_active,
+        client_order_id, client_sl_id, client_tp1_id,
         client_tp2_id, entry_order_id, sl_algo_id, tp1_algo_id, tp2_algo_id,
         realized_pnl, fees_usd, exit_reason, opened_at, closed_at
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
+        ?, ?, ?,
         ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?
       )
@@ -104,6 +130,9 @@ export class TradesRepo {
       trade.tp2 ?? null,
       trade.be_price ?? null,
       trade.is_breakeven,
+      trade.peak_price ?? null,
+      trade.peak_mfe ?? null,
+      trade.trailing_stop_active ?? 0,
       trade.client_order_id ?? null,
       trade.client_sl_id ?? null,
       trade.client_tp1_id ?? null,
@@ -130,7 +159,7 @@ export class TradesRepo {
     if (symbol) {
       const stmt = this.db.prepare(`
         SELECT * FROM trades 
-        WHERE broker_mode = ? AND symbol = ? AND status IN ('OPEN', 'PARTIALLY_CLOSED', 'CLOSING')
+        WHERE broker_mode = ? AND symbol = ? AND status IN ('OPEN', 'PARTIALLY_CLOSED', 'CLOSING', 'CLOSING_IN_PROGRESS')
         ORDER BY opened_at DESC LIMIT 1
       `);
       const row = stmt.get(brokerMode, symbol);
@@ -138,7 +167,7 @@ export class TradesRepo {
     } else {
       const stmt = this.db.prepare(`
         SELECT * FROM trades 
-        WHERE broker_mode = ? AND status IN ('OPEN', 'PARTIALLY_CLOSED', 'CLOSING')
+        WHERE broker_mode = ? AND status IN ('OPEN', 'PARTIALLY_CLOSED', 'CLOSING', 'CLOSING_IN_PROGRESS')
         ORDER BY opened_at DESC LIMIT 1
       `);
       const row = stmt.get(brokerMode);
@@ -211,6 +240,33 @@ export class TradesRepo {
       const row = stmt.get(brokerMode) as { count: number } | undefined;
       return row?.count ?? 0;
     }
+  }
+
+  getFilledTradeCountToday(brokerMode: BrokerMode, symbol: string, startOfDayMs: number): number {
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) as count FROM trades 
+      WHERE broker_mode = ? AND symbol = ? AND opened_at >= ?
+    `);
+    const row = stmt.get(brokerMode, symbol, startOfDayMs) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  getDailyRealizedPnl(brokerMode: BrokerMode, startOfDayMs: number): { realizedPnl: number; feesUsd: number; netPnl: number } {
+    const stmt = this.db.prepare(`
+      SELECT 
+        COALESCE(SUM(realized_pnl), 0) as realizedPnl,
+        COALESCE(SUM(fees_usd), 0) as feesUsd
+      FROM trades
+      WHERE broker_mode = ? AND (closed_at >= ? OR opened_at >= ?)
+    `);
+    const row = stmt.get(brokerMode, startOfDayMs, startOfDayMs) as { realizedPnl: number; feesUsd: number } | undefined;
+    const realizedPnl = row?.realizedPnl ?? 0;
+    const feesUsd = row?.feesUsd ?? 0;
+    return {
+      realizedPnl,
+      feesUsd,
+      netPnl: realizedPnl - feesUsd,
+    };
   }
 }
 
@@ -967,5 +1023,45 @@ export class PillarTelemetryRepo {
     return Number(result.changes ?? 0);
   }
 }
+
+/**
+ * Repository for economic_events table.
+ */
+export class EconomicEventsRepo {
+  constructor(private db: DatabaseSync) {}
+
+  public upsert(event: EconomicEvent): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO economic_events (id, name, timestamp, impact, currency)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        timestamp = excluded.timestamp,
+        impact = excluded.impact,
+        currency = excluded.currency
+    `);
+    stmt.run(event.id, event.name, event.timestamp, event.impact, event.currency);
+  }
+
+  public getEventsInRange(startMs: number, endMs: number): EconomicEvent[] {
+    const stmt = this.db.prepare(`
+      SELECT id, name, timestamp, impact, currency
+      FROM economic_events
+      WHERE timestamp >= ? AND timestamp <= ?
+      ORDER BY timestamp ASC
+    `);
+    return stmt.all(startMs, endMs) as unknown as EconomicEvent[];
+  }
+
+  public getAll(): EconomicEvent[] {
+    const stmt = this.db.prepare(`
+      SELECT id, name, timestamp, impact, currency
+      FROM economic_events
+      ORDER BY timestamp ASC
+    `);
+    return stmt.all() as unknown as EconomicEvent[];
+  }
+}
+
 
 

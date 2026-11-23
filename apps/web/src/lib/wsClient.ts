@@ -47,6 +47,11 @@ export type AutoPilotStatusData = {
   state: string;
   config: AutoPilotConfig;
   openTradeId: string | null;
+  message?: string;
+  blockReason?: string | null;
+  filledToday?: number;
+  maxDailyTrades?: number;
+  cooldownRemainingSec?: number;
 };
 
 type MessageHandlers = {

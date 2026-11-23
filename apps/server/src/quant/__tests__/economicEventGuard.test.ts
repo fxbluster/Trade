@@ -118,4 +118,16 @@ describe('EconomicEventGuard — Macro Event Calendar & Blackout Window', () => 
     const upcoming = freshGuard.getUpcomingEvents(24);
     expect(upcoming.some(e => e.id === 'persisted_nfp')).toBe(true);
   });
+
+  it('starts and stops hourly cron without leaking interval timers', () => {
+    const guard = new EconomicEventGuard(db);
+    guard.startCron(60_000);
+    expect((guard as any).cronTimer).not.toBeNull();
+    // calling startCron again does not duplicate timers
+    guard.startCron(60_000);
+    expect((guard as any).cronTimer).not.toBeNull();
+
+    guard.stopCron();
+    expect((guard as any).cronTimer).toBeNull();
+  });
 });

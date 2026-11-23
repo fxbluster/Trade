@@ -6,6 +6,7 @@ import type {
   WsServerMessage,
   TradeSide,
   TrailingStopState,
+  BlockReason,
 } from '@tradeos/shared';
 import { calculateLiquidationPrice } from '@tradeos/shared';
 import { TradesRepo, SettingsRepo } from '../db/sqlite.js';
@@ -19,7 +20,8 @@ export type AutoPilotState =
   | 'PLACING_ORDER'
   | 'POSITION_OPEN'
   | 'CLOSING'
-  | 'COOLDOWN_ACTIVE';
+  | 'COOLDOWN_ACTIVE'
+  | 'BLOCKED_SESSION_TRADE_CAP';
 
 export interface AutoPilotManagerOptions {
   db: DatabaseSync;
@@ -80,6 +82,11 @@ export class AutoPilotManager {
   private settingsRepo: SettingsRepo;
 
   private state: AutoPilotState = 'IDLE';
+  private blockReason: BlockReason | null = null;
+  private statusMessage: string | null = null;
+  private filledToday: number = 0;
+  private cachedBalance: number = 0;
+
   private config: AutoPilotConfig = {
     enabled: false,
     consensusThreshold: 4,
@@ -88,6 +95,8 @@ export class AutoPilotManager {
     oppositeExitEnabled: true,
     circuitBreakerConsecutiveLosses: 2,
     circuitBreakerCooldownMs: 60 * 60 * 1000, // 60 minutes
+    maxDailyTrades: 5, // Default 5
+    dailyDrawdownLimitPct: 2.0, // Default 2.0%
   };
 
   private openTradeId: string | null = null;
@@ -121,6 +130,11 @@ export class AutoPilotManager {
     if (options.config) {
       this.updateConfig(options.config);
     }
+
+    // Pre-warm cached balance from broker
+    this.broker.getAccount().then((acc) => {
+      if (acc && acc.walletBalance > 0) this.cachedBalance = acc.walletBalance;
+    }).catch(() => {});
 
     // Restore persisted 60-minute cooldown from SQLite settings if active
     const persistedCooldown = this.settingsRepo.get<{ until: number }>('autopilot_cooldown_until');
@@ -164,6 +178,12 @@ export class AutoPilotManager {
     }
     if (partial.circuitBreakerCooldownMs !== undefined) {
       this.config.circuitBreakerCooldownMs = partial.circuitBreakerCooldownMs;
+    }
+    if (partial.maxDailyTrades !== undefined) {
+      this.config.maxDailyTrades = Math.max(1, Math.min(50, partial.maxDailyTrades));
+    }
+    if (partial.dailyDrawdownLimitPct !== undefined) {
+      this.config.dailyDrawdownLimitPct = Math.max(0.5, Math.min(10.0, partial.dailyDrawdownLimitPct));
     }
 
     try {
@@ -247,6 +267,10 @@ export class AutoPilotManager {
           config: this.getConfig(),
           openTradeId: this.openTradeId,
           cooldownRemainingSec: this.getCooldownRemainingSec(),
+          blockReason: this.blockReason,
+          message: this.statusMessage ?? undefined,
+          filledToday: this.filledToday,
+          maxDailyTrades: this.config.maxDailyTrades ?? 5,
         },
       } as any);
     } catch {
@@ -271,8 +295,8 @@ export class AutoPilotManager {
       return;
     }
 
-    // Synchronous state latch: only evaluate entries when strictly IDLE
-    if (this.state !== 'IDLE') {
+    // Synchronous state latch: only evaluate entries when strictly IDLE or recovering from cap block
+    if (this.state !== 'IDLE' && this.state !== 'BLOCKED_SESSION_TRADE_CAP') {
       return;
     }
 
@@ -289,11 +313,43 @@ export class AutoPilotManager {
       return;
     }
 
-    // Session Trade Cap: Max 2 filled round-trip trades per calendar day (UTC) [CUJ 4]
     const nowUtc = new Date();
     const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
-    const filledToday = this.tradesRepo.getFilledTradeCountToday(this.broker.mode, sym, startOfUtcDay);
-    if (filledToday >= 2) {
+
+    // 1. Session Trade Cap: Max N filled round-trip trades per calendar day (UTC) [CUJ 4 / DEF-12]
+    const maxTrades = this.config.maxDailyTrades ?? 5;
+    this.filledToday = this.tradesRepo.getFilledTradeCountToday(this.broker.mode, sym, startOfUtcDay);
+    if (this.filledToday >= maxTrades) {
+      if (this.state !== 'BLOCKED_SESSION_TRADE_CAP') {
+        this.state = 'BLOCKED_SESSION_TRADE_CAP';
+        this.blockReason = 'BLOCKED_SESSION_TRADE_CAP';
+        this.statusMessage = `Session Cap Reached (${this.filledToday}/${maxTrades} trades) - Halted`;
+        this.broadcastStatus();
+      }
+      return;
+    } else if (this.state === 'BLOCKED_SESSION_TRADE_CAP') {
+      this.state = 'IDLE';
+      this.blockReason = null;
+      this.statusMessage = null;
+      this.broadcastStatus();
+    }
+
+    // 2. Proactive Daily Mark-to-Market Drawdown Ceiling (Synchronous Pre-Check) [CUJ 5 / DEF-13]
+    const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
+    const balance = this.cachedBalance > 0 ? this.cachedBalance : 1000;
+    const drawdownLimitPct = (this.config.dailyDrawdownLimitPct ?? 2.0) / 100;
+    const maxDrawdownUsd = balance * drawdownLimitPct;
+
+    if (balance > 0 && maxDrawdownUsd > 0 && dailyStats.netPnl <= -maxDrawdownUsd) {
+      const tomorrowUtc = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1);
+      if (this.cooldownUntil < tomorrowUtc) {
+        this.cooldownUntil = tomorrowUtc;
+        this.settingsRepo.set('autopilot_cooldown_until', { until: this.cooldownUntil });
+      }
+      this.state = 'COOLDOWN_ACTIVE';
+      this.blockReason = 'BLOCKED_DAILY_MAX_LOSS';
+      this.statusMessage = `Daily Drawdown Limit (-${(drawdownLimitPct * 100).toFixed(1)}%) Reached ($${Math.abs(dailyStats.netPnl).toFixed(2)} loss >= $${maxDrawdownUsd.toFixed(2)} limit) - Cooldown Active`;
+      this.broadcastStatus();
       return;
     }
 
@@ -339,6 +395,7 @@ export class AutoPilotManager {
     try {
       const account = await this.broker.getAccount();
       const balance = account.walletBalance;
+      this.cachedBalance = balance;
 
       if (balance <= 0) {
         this.state = 'IDLE';
@@ -355,16 +412,19 @@ export class AutoPilotManager {
         return;
       }
 
-      // Daily Mark-to-Market Drawdown Ceiling: Hard halt if session net loss >= 2% of wallet equity [CUJ 5]
+      // Daily Mark-to-Market Drawdown Ceiling: Hard halt if session net loss >= dailyDrawdownLimitPct of wallet equity [CUJ 5 / DEF-13]
       const nowUtc = new Date();
       const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
       const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
-      const maxDrawdownUsd = balance * 0.02;
+      const drawdownLimitPct = (this.config.dailyDrawdownLimitPct ?? 2.0) / 100;
+      const maxDrawdownUsd = balance * drawdownLimitPct;
       if (dailyStats.netPnl <= -maxDrawdownUsd && maxDrawdownUsd > 0) {
         const tomorrowUtc = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1);
         this.cooldownUntil = tomorrowUtc;
         this.settingsRepo.set('autopilot_cooldown_until', { until: this.cooldownUntil });
         this.state = 'COOLDOWN_ACTIVE';
+        this.blockReason = 'BLOCKED_DAILY_MAX_LOSS';
+        this.statusMessage = `Daily Drawdown Limit (-${(drawdownLimitPct * 100).toFixed(1)}%) Reached ($${Math.abs(dailyStats.netPnl).toFixed(2)} loss >= $${maxDrawdownUsd.toFixed(2)} limit) - Cooldown Active`;
         this.broadcastStatus();
         this.onOrderDispatched?.({
           symbol,

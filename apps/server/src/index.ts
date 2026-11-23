@@ -32,6 +32,8 @@ import { SentimentHarvester } from './quant/sentimentHarvester.js';
 import { HierarchicalMtfManager } from './quant/hierarchicalMtfManager.js';
 import { NativeSmcEngine } from './quant/nativeSmcEngine.js';
 import { ConfluenceEngine } from './quant/confluenceEngine.js';
+import { EconomicEventGuard } from './quant/economicEventGuard.js';
+import { NoiseBandEngine } from './quant/noiseBandEngine.js';
 import { TradeManager } from './services/tradeManager.js';
 import { AutoPilotManager } from './services/autoPilotManager.js';
 import { PnlService } from './services/pnlService.js';
@@ -70,6 +72,8 @@ export async function bootstrapServer(): Promise<{
   smcEngine: NativeSmcEngine;
   decisionAuditService: DecisionAuditService;
   pillarAttributionService: PillarAttributionService;
+  economicEventGuard: EconomicEventGuard;
+  noiseBandEngine: NoiseBandEngine;
   close: () => Promise<void>;
 }> {
   // 1. Initialize SQLite WAL Database Engine
@@ -206,10 +210,15 @@ export async function bootstrapServer(): Promise<{
   const sentimentHarvester = new SentimentHarvester(CRYPTOPANIC_API_KEY);
   sentimentHarvester.start();
 
+  const economicEventGuard = new EconomicEventGuard(db);
+  const noiseBandEngine = new NoiseBandEngine();
+
   const confluenceEngine = new ConfluenceEngine({
     mtfManager,
     smcEngine,
     sentimentHarvester,
+    economicEventGuard,
+    noiseBandEngine,
   });
 
   // 7b. Initialize WebSocket Hub on /ws
@@ -242,8 +251,8 @@ export async function bootstrapServer(): Promise<{
         }
       }).catch(() => {});
 
-      // Pre-warm 15m candle history via REST (200 candles) for SMC and Intermediate Structure
-      client.getKlines(activeSymbol, '15m', 200).then((raw) => {
+      // Pre-warm 15m candle history via REST (1000 candles) for SMC, Intermediate Structure & NoiseBandEngine
+      client.getKlines(activeSymbol, '15m', 1000).then((raw) => {
         if (Array.isArray(raw)) {
           const klines = raw.map((k: any) => ({
             time: Math.floor(Number(k[0]) / 1000),
@@ -255,6 +264,7 @@ export async function bootstrapServer(): Promise<{
           }));
           mtfManager.setInitialCandles(activeSymbol, '15m', klines);
           smcEngine.onCandleClosed(activeSymbol, '15m', klines);
+          noiseBandEngine.loadKlines(klines);
         }
       }).catch(() => {});
 
@@ -370,6 +380,13 @@ export async function bootstrapServer(): Promise<{
     const cvdSnap = cvdEngine.getSnapshot();
     const recentHigh = candles.length > 0 ? Math.max(...candles.slice(-20).map(c => c.high)) : undefined;
     const recentLow = candles.length > 0 ? Math.min(...candles.slice(-20).map(c => c.low)) : undefined;
+
+    const candles15m = mtfManager.getCandles(event.symbol, '15m');
+    const candle15m = candles15m.length > 0 ? candles15m[candles15m.length - 1] : undefined;
+    const rollingVwap15m = candles15m.length > 0
+      ? noiseBandEngine.calculateVWAP(candles15m)
+      : event.markPrice;
+
     const confluenceSnapshot = confluenceEngine.evaluate({
       symbol: event.symbol,
       currentPrice: event.markPrice,
@@ -377,6 +394,8 @@ export async function bootstrapServer(): Promise<{
       cvd: cvdSnap,
       recentHigh,
       recentLow,
+      candle15m,
+      vwap: rollingVwap15m,
     });
     wsHub.broadcastConfluence(confluenceSnapshot);
 
@@ -422,6 +441,9 @@ export async function bootstrapServer(): Promise<{
     if (event.isFinal && (interval === '15m' || interval === '1h')) {
       const closedCandles = mtfManager.getCandles(sym, interval as any);
       smcEngine.onCandleClosed(sym, interval, closedCandles);
+      if (interval === '15m') {
+        noiseBandEngine.loadKlines(closedCandles);
+      }
     }
 
     // Trigger Decision Audit shadow tracking on confirmed 1m candle close
@@ -671,11 +693,12 @@ export async function bootstrapServer(): Promise<{
       console.log(`[BOOT] Preloaded ${candles1m.length} 1m candles for ${activeSymbol}. Indicators fully warmed up!`);
     }
 
-    const candles15m = await fetchBootKlines(activeSymbol, '15m', 200);
+    const candles15m = await fetchBootKlines(activeSymbol, '15m', 1000);
     if (candles15m.length > 0) {
       mtfManager.setInitialCandles(activeSymbol, '15m', candles15m);
       smcEngine.onCandleClosed(activeSymbol, '15m', candles15m);
-      console.log(`[BOOT] Preloaded ${candles15m.length} 15m candles for ${activeSymbol}. Native SMC initialized!`);
+      noiseBandEngine.loadKlines(candles15m);
+      console.log(`[BOOT] Preloaded ${candles15m.length} 15m candles for ${activeSymbol}. Native SMC & NoiseBandEngine initialized!`);
     }
 
     const candles1h = await fetchBootKlines(activeSymbol, '1h', 200);
@@ -701,8 +724,18 @@ export async function bootstrapServer(): Promise<{
     console.warn(`[BOOT] Failed to preload L2 depth: ${err.message}`);
   }
 
+  // Start hourly economic event calendar ingestion cron and fetch initial events
+  await economicEventGuard.fetchCalendar().catch((err: any) => {
+    console.warn('[BOOT] Initial economic calendar fetch failed, using DB cache:', err?.message || err);
+  });
+  economicEventGuard.startCron();
+  console.log(`[BOOT] EconomicEventGuard loaded. ${economicEventGuard.getUpcomingEvents(168).length} events tracked.`);
+
   // Graceful shutdown helper
   const close = async () => {
+    try {
+      economicEventGuard.stopCron();
+    } catch {}
     try {
       pillarAttributionService.destroy();
     } catch {}
@@ -736,6 +769,8 @@ export async function bootstrapServer(): Promise<{
     smcEngine,
     decisionAuditService,
     pillarAttributionService,
+    economicEventGuard,
+    noiseBandEngine,
     close,
   };
 }

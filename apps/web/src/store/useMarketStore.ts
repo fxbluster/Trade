@@ -107,6 +107,8 @@ const defaultAutoPilotConfig: AutoPilotConfig = {
   oppositeExitEnabled: true,
   circuitBreakerConsecutiveLosses: 2,
   circuitBreakerCooldownMs: 3600000,
+  maxDailyTrades: 5,
+  dailyDrawdownLimitPct: 2.0,
 };
 
 export const useMarketStore = create<MarketStoreState>((set, get) => ({
@@ -136,6 +138,11 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     state: 'IDLE',
     config: defaultAutoPilotConfig,
     openTradeId: null,
+    message: undefined,
+    blockReason: null,
+    filledToday: 0,
+    maxDailyTrades: 5,
+    cooldownRemainingSec: 0,
   },
   hidePineOverlay: false,
   pineSignals: [],

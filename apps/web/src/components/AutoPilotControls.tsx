@@ -75,6 +75,8 @@ export const AutoPilotControls: React.FC = () => {
         return 'bg-[#2962ff]/20 text-[#2962ff] border-[#2962ff]/50 animate-pulse';
       case 'COOLDOWN_ACTIVE':
         return 'bg-[#f6465d]/20 text-[#f6465d] border-[#f6465d]/50 animate-pulse font-bold';
+      case 'BLOCKED_SESSION_TRADE_CAP':
+        return 'bg-[#f0b90b]/20 text-[#f0b90b] border-[#f0b90b]/50 animate-pulse font-bold';
       case 'EVALUATING':
         return 'bg-[#f0b90b]/20 text-[#f0b90b] border-[#f0b90b]/40';
       case 'IDLE':
@@ -98,7 +100,13 @@ export const AutoPilotControls: React.FC = () => {
 
         {/* State Badge */}
         <span className={`px-2 py-0.5 rounded text-[10px] font-bold border uppercase ${stateBadgeColor()}`}>
-          {isEnabled ? apState : 'STANDBY (MANUAL)'}
+          {!isEnabled
+            ? 'STANDBY (MANUAL)'
+            : apState === 'BLOCKED_SESSION_TRADE_CAP'
+            ? `SESSION CAP REACHED (${autoPilot.filledToday || 0}/${config.maxDailyTrades || 5})`
+            : apState === 'COOLDOWN_ACTIVE' && autoPilot.blockReason === 'BLOCKED_DAILY_MAX_LOSS'
+            ? 'DRAWDOWN LIMIT HIT (-2.0%)'
+            : apState}
         </span>
       </div>
 
@@ -108,18 +116,49 @@ export const AutoPilotControls: React.FC = () => {
         </div>
       )}
 
+      {/* Warning Banners for Session Cap or Drawdown Limit */}
+      {apState === 'BLOCKED_SESSION_TRADE_CAP' && (
+        <div className="p-2 rounded bg-[#f0b90b]/15 border border-[#f0b90b]/40 text-[#f0b90b] text-[11px] font-bold flex items-center space-x-2">
+          <AlertOctagon className="w-4 h-4 flex-shrink-0 text-[#f0b90b]" />
+          <span>
+            Session Trade Cap Reached ({autoPilot.filledToday || 0}/{config.maxDailyTrades || 5} trades today) — AutoPilot halted.
+          </span>
+        </div>
+      )}
+
+      {apState === 'COOLDOWN_ACTIVE' && (
+        <div className="p-2 rounded bg-[#f6465d]/15 border border-[#f6465d]/40 text-[#f6465d] text-[11px] font-bold flex items-center space-x-2 animate-pulse">
+          <ShieldAlert className="w-4 h-4 flex-shrink-0 text-[#f6465d]" />
+          <span>
+            {autoPilot.message || 'Daily 2% Drawdown Ceiling Hit — Circuit Breaker Locked until 00:00 UTC.'}
+          </span>
+        </div>
+      )}
+
       {/* 2. Master Toggle Switch Button */}
       <button
         onClick={handleToggle}
         disabled={isToggling}
         className={`w-full flex items-center justify-center space-x-2 py-2.5 rounded font-bold uppercase transition-all shadow-md ${
           isEnabled
-            ? 'bg-[#0ecb81] text-[#020305] hover:bg-[#0bb573] shadow-[#0ecb81]/20'
+            ? apState === 'BLOCKED_SESSION_TRADE_CAP'
+              ? 'bg-[#f0b90b] text-[#020305] hover:bg-[#d9a506] shadow-[#f0b90b]/20'
+              : apState === 'COOLDOWN_ACTIVE'
+              ? 'bg-[#f6465d] text-white hover:bg-[#d9384e] shadow-[#f6465d]/20'
+              : 'bg-[#0ecb81] text-[#020305] hover:bg-[#0bb573] shadow-[#0ecb81]/20'
             : 'bg-[#151d2c] text-[#7d8590] hover:text-[#e6edf3] hover:bg-[#1a2436]'
         }`}
       >
         <Power className={`w-4 h-4 ${isToggling ? 'animate-spin' : ''}`} />
-        <span>{isEnabled ? 'AUTO-PILOT ARMED & ENGAGED' : 'ENGAGE AUTONOMOUS AUTO-PILOT'}</span>
+        <span>
+          {isEnabled
+            ? apState === 'BLOCKED_SESSION_TRADE_CAP'
+              ? `SESSION CAP REACHED (${autoPilot.filledToday || 0}/${config.maxDailyTrades || 5} TRADES) - HALTED`
+              : apState === 'COOLDOWN_ACTIVE'
+              ? 'COOLDOWN ACTIVE - HALTED'
+              : 'AUTO-PILOT ARMED & ENGAGED'
+            : 'ENGAGE AUTONOMOUS AUTO-PILOT'}
+        </span>
       </button>
 
       {/* 3. Safety Guardrails & Rules Card */}
@@ -142,6 +181,30 @@ export const AutoPilotControls: React.FC = () => {
                 }`}
               >
                 {th}/7
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Daily Trade Cap Selector (DEF-12) */}
+        <div className="flex items-center justify-between text-[11px]">
+          <span className="text-[#7d8590] flex items-center space-x-1">
+            <ShieldCheck className="w-3 h-3 text-[#f0b90b]" />
+            <span>Daily Trade Cap:</span>
+          </span>
+          <div className="flex items-center space-x-1">
+            {[2, 3, 5, 10].map((cap) => (
+              <button
+                key={cap}
+                onClick={() => handleUpdateConfig({ maxDailyTrades: cap })}
+                disabled={isSavingConfig}
+                className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
+                  (config.maxDailyTrades ?? 5) === cap
+                    ? 'bg-[#f0b90b]/20 text-[#f0b90b] border-[#f0b90b] font-bold'
+                    : 'bg-[#080c14] text-[#7d8590] border-[#151d2c] hover:text-[#e6edf3]'
+                }`}
+              >
+                {cap} Trades
               </button>
             ))}
           </div>

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { NoiseBandEngine } from '../noiseBandEngine.js';
+import { ConfluenceEngine } from '../confluenceEngine.js';
 import type { KlineCandle } from '@tradeos/shared';
 
 describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
@@ -122,5 +123,35 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
     // sum typical*vol = 32,000; sum vol = 300 -> vwap = 32,000 / 300 = 106.6667
     const vwap = engine.calculateVWAP(testCandles);
     expect(vwap).toBeCloseTo(106.67, 2);
+  });
+
+  it('blocks consensus in ConfluenceEngine with BLOCKED_NOISE_BAND when 15m candle is inside noise band', () => {
+    const candles = generateMockCandles(96, 100, 2.0); // threshold = 2.50
+    const engine = new NoiseBandEngine(candles);
+    const confluence = new ConfluenceEngine({ noiseBandEngine: engine });
+
+    // Sub-threshold candle: range = 1.0 (< 2.50)
+    const tightCandle: KlineCandle = {
+      time: 1795132800,
+      open: 100,
+      high: 100.5,
+      low: 99.5,
+      close: 100.2,
+      volume: 500,
+    };
+
+    const snap = confluence.evaluate({
+      symbol: 'SOLUSDT',
+      currentPrice: 100.2,
+      indicators: null,
+      cvd: null,
+      candle15m: tightCandle,
+      vwap: 95.0,
+    });
+
+    expect(snap.blockReason).toBe('BLOCKED_NOISE_BAND');
+    expect(snap.noiseBandActive).toBe(true);
+    expect(snap.consensusMet).toBe(false);
+    expect(snap.recommendedAction).toBe('WAIT');
   });
 });

@@ -221,6 +221,28 @@ export const ConfluenceHUD: React.FC = () => {
         </div>
       )}
 
+      {/* Economic Event Blackout Window Banner */}
+      {confluence?.eventBlackoutActive && (
+        <div
+          data-testid="event-blackout-banner"
+          className="flex items-center space-x-2 px-3 py-2 bg-[#f6465d]/15 border border-[#f6465d]/50 rounded text-[#f6465d] text-xs font-bold tracking-wide animate-pulse"
+        >
+          <ShieldAlert className="w-4 h-4 flex-shrink-0 text-[#f6465d]" />
+          <span>ECONOMIC EVENT BLACKOUT: +/-15m Freeze Active (High-Impact Catalyst Window)</span>
+        </div>
+      )}
+
+      {/* Volatility Noise Band Filter Banner */}
+      {confluence?.noiseBandActive && (
+        <div
+          data-testid="noise-band-banner"
+          className="flex items-center space-x-2 px-3 py-2 bg-[#2962ff]/15 border border-[#2962ff]/50 rounded text-[#2962ff] text-xs font-bold tracking-wide"
+        >
+          <Waves className="w-4 h-4 flex-shrink-0 text-[#2962ff]" />
+          <span>NOISE BAND ACTIVE: Range within 20-day 15m True Range noise threshold</span>
+        </div>
+      )}
+
       {/* 2. Responsive 7-Pillars Cards Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-1.5">
         {pillars.map((pillar) => {

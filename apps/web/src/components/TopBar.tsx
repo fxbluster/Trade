@@ -33,6 +33,7 @@ export const TopBar: React.FC = () => {
   const exchangeHealth = useMarketStore((s) => s.exchangeHealth);
   const brokerMode = useMarketStore((s) => s.brokerMode);
   const activePosition = useMarketStore((s) => s.activePosition);
+  const autoPilot = useMarketStore((s) => s.autoPilot);
   const setSymbol = useMarketStore((s) => s.setSymbol);
   const setBrokerMode = useMarketStore((s) => s.setBrokerMode);
 
@@ -313,22 +314,43 @@ export const TopBar: React.FC = () => {
           </div>
         )}
 
+        {/* Session Trade Cap Alert Badge */}
+        {autoPilot?.config?.enabled && autoPilot?.state === 'BLOCKED_SESSION_TRADE_CAP' && (
+          <div
+            className="flex items-center space-x-1 px-2 py-1 rounded border border-[#f0b90b]/40 bg-[#f0b90b]/15 text-[#f0b90b] font-bold text-xs animate-pulse cursor-help"
+            title={`Session Trade Cap Reached (${autoPilot.filledToday || 0}/${autoPilot.config.maxDailyTrades || 5} trades) - AutoPilot Halted until next UTC day`}
+          >
+            <ShieldAlert className="w-3.5 h-3.5 text-[#f0b90b]" />
+            <span>Session Cap ({autoPilot.filledToday || 0}/{autoPilot.config.maxDailyTrades || 5})</span>
+          </div>
+        )}
+
         {/* Cooldown Status Badge / Modal Trigger */}
         <button
           onClick={() => setIsCooldownModalOpen(true)}
           className={`flex items-center space-x-1.5 px-2 py-1 rounded border transition-colors ${
-            isCooldownActive
+            isCooldownActive || (autoPilot?.state === 'COOLDOWN_ACTIVE' && autoPilot?.blockReason === 'BLOCKED_DAILY_MAX_LOSS')
               ? 'bg-[#f6465d]/20 border-[#f6465d]/40 text-[#f6465d] animate-pulse font-bold'
               : 'bg-[#0ecb81]/10 border-[#0ecb81]/30 text-[#0ecb81] hover:bg-[#0ecb81]/20'
           }`}
-          title="Risk Diagnostics & Cooldown Status"
+          title={
+            autoPilot?.state === 'COOLDOWN_ACTIVE' && autoPilot?.blockReason === 'BLOCKED_DAILY_MAX_LOSS'
+              ? 'Daily 2% Drawdown Ceiling Reached - AutoPilot Locked in Cooldown until 00:00 UTC'
+              : 'Risk Diagnostics & Cooldown Status'
+          }
         >
-          {isCooldownActive ? (
+          {isCooldownActive || (autoPilot?.state === 'COOLDOWN_ACTIVE' && autoPilot?.blockReason === 'BLOCKED_DAILY_MAX_LOSS') ? (
             <Clock className="w-3.5 h-3.5 text-[#f6465d]" />
           ) : (
             <ShieldCheck className="w-3.5 h-3.5 text-[#0ecb81]" />
           )}
-          <span>{isCooldownActive ? 'Cooldown Active' : 'Cooldown: Inactive'}</span>
+          <span>
+            {autoPilot?.state === 'COOLDOWN_ACTIVE' && autoPilot?.blockReason === 'BLOCKED_DAILY_MAX_LOSS'
+              ? 'Drawdown Limit Hit (-2.0%)'
+              : isCooldownActive
+              ? 'Cooldown Active'
+              : 'Cooldown: Inactive'}
+          </span>
         </button>
 
         {/* Broker Mode Switch & Testnet Badge */}

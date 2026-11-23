@@ -102,6 +102,8 @@ export interface AutoPilotConfig {
   oppositeExitEnabled: boolean; // true
   circuitBreakerConsecutiveLosses: number; // 2
   circuitBreakerCooldownMs: number; // 3,600,000 (1 hour)
+  maxDailyTrades?: number; // default 5 (configurable: 2, 3, 5, 10)
+  dailyDrawdownLimitPct?: number; // default 2.0 (2% daily equity drawdown ceiling)
 }
 
 export interface WebhookAlertPayload {
@@ -453,6 +455,11 @@ export type WsServerMessage =
         state: string;
         config: AutoPilotConfig;
         openTradeId: string | null;
+        message?: string;
+        blockReason?: BlockReason | null;
+        filledToday?: number;
+        maxDailyTrades?: number;
+        cooldownRemainingSec?: number;
       };
     };
 

@@ -5,7 +5,7 @@
 
 ## 1. Tamamlananlar (Faktiki Sübutlu)
 - [x] **Dizayn və Spesifikasiya:** `docs/designs/next-gen-modular-quant-architecture.md` təsdiqləndi.
-- [x] **Shared Müqavilələri və Tiplər (`packages/shared`, commit `d91653b` + sync):**
+- [x] **Shared Müqavilələri və Tiplər (`packages/shared`, commit `37387d4`):**
   - `FactorOutput`, `FactorEvaluationContext`, `AlphaFactorMetadata`, `ChasingOrderState`, `SizingBreakdown`, `NoiseBandTelemetry`.
   - `BlockReason` (`BLOCKED_NOISE_BAND`, `BLOCKED_EVENT_BLACKOUT`, `BLOCKED_SESSION_TRADE_CAP`, `BLOCKED_CHASING_TIMEOUT`, `BLOCKED_AIRBAG_VIOLATION`), `ExitReason` (`TRAILING_GIVEBACK_HALF`, `EVENT_BLACKOUT_UNWIND`), `AutoPilotState` (`LIMIT_CHASING`).
   - AST / regex audit ilə `packages/shared`-də 0 Node.js native asılılığı təsdiqləndi.

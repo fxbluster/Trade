@@ -570,6 +570,18 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     sendJson(res, 404, { error: 'AutoPilotManager not initialized' });
   });
 
+  // 21. POST /api/autopilot/reset-cooldown — Reset Auto-Pilot cooldown
+  app.post('/api/autopilot/reset-cooldown', (req: Request, res: Response) => {
+    if (ctx.autoPilotManager) {
+      ctx.autoPilotManager.resetCooldown();
+      return sendJson(res, 200, {
+        ok: true,
+        state: ctx.autoPilotManager.getState(),
+      });
+    }
+    sendJson(res, 404, { error: 'AutoPilotManager not initialized' });
+  });
+
   // 21. GET /api/audit/daily — Daily decision audit summary & counterfactual report
   app.get('/api/audit/daily', (req: Request, res: Response) => {
     if (!ctx.decisionAuditService) {

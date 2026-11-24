@@ -431,6 +431,11 @@ export class SettingsRepo {
     `);
     stmt.run(key, valueJson, now);
   }
+
+  delete(key: string): void {
+    const stmt = this.db.prepare('DELETE FROM settings WHERE key = ?');
+    stmt.run(key);
+  }
 }
 
 /**

@@ -18,14 +18,41 @@ import {
 export const AutoPilotControls: React.FC = () => {
   const autoPilot = useMarketStore((s) => s.autoPilot);
   const setAutoPilotStatus = useMarketStore((s) => s.setAutoPilotStatus);
+  const refreshState = useMarketStore((s) => s.refreshState);
   const isAudioMuted = useUiStore((s) => s.isAudioMuted);
 
   const [isToggling, setIsToggling] = useState(false);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [isResettingCooldown, setIsResettingCooldown] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const { state: apState, config } = autoPilot;
   const isEnabled = config.enabled;
+
+  const isCooldown =
+    apState === 'COOLDOWN_ACTIVE' ||
+    autoPilot.blockReason === 'BLOCKED_DAILY_MAX_LOSS' ||
+    (autoPilot.cooldownRemainingSec !== undefined && autoPilot.cooldownRemainingSec > 0);
+
+  const handleResetCooldown = async () => {
+    setIsResettingCooldown(true);
+    setErrorMsg(null);
+    try {
+      const res = await apiClient.resetAutoPilotCooldown();
+      setAutoPilotStatus({
+        ...autoPilot,
+        state: (res?.state as any) || 'IDLE',
+        blockReason: null,
+        message: undefined,
+        cooldownRemainingSec: 0,
+      });
+      await refreshState();
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to reset cooldown');
+    } finally {
+      setIsResettingCooldown(false);
+    }
+  };
 
   const handleToggle = async () => {
     setIsToggling(true);
@@ -100,18 +127,33 @@ export const AutoPilotControls: React.FC = () => {
           </span>
         </div>
 
-        {/* State Badge */}
-        <span className={`px-2 py-0.5 rounded text-[10px] font-bold border uppercase ${stateBadgeColor()}`}>
-          {!isEnabled
-            ? 'STANDBY (MANUAL)'
-            : apState === 'LIMIT_CHASING'
-            ? `MAKER CHASING (${autoPilot.chasingOrder?.amendCount || 0}/10 AMENDS)`
-            : apState === 'BLOCKED_SESSION_TRADE_CAP'
-            ? `SESSION CAP REACHED (${autoPilot.filledToday || 0}/${config.maxDailyTrades || 5})`
-            : apState === 'COOLDOWN_ACTIVE' && autoPilot.blockReason === 'BLOCKED_DAILY_MAX_LOSS'
-            ? 'DRAWDOWN LIMIT HIT (-2.0%)'
-            : apState}
-        </span>
+        {/* Right: Reset Cooldown Button (when active) & State Badge */}
+        <div className="flex items-center space-x-2">
+          {isCooldown && (
+            <button
+              data-testid="reset-cooldown-btn"
+              onClick={handleResetCooldown}
+              disabled={isResettingCooldown}
+              className="px-2.5 py-1 rounded text-[10px] font-bold bg-[#f6465d] hover:bg-[#d9384e] text-white border border-[#f6465d]/60 shadow-sm shadow-[#f6465d]/20 transition-all flex items-center space-x-1 cursor-pointer active:scale-95"
+            >
+              <RefreshCw className={`w-3 h-3 ${isResettingCooldown ? 'animate-spin' : ''}`} />
+              <span>Reset Cooldown</span>
+            </button>
+          )}
+
+          {/* State Badge */}
+          <span className={`px-2 py-0.5 rounded text-[10px] font-bold border uppercase ${stateBadgeColor()}`}>
+            {!isEnabled
+              ? 'STANDBY (MANUAL)'
+              : apState === 'LIMIT_CHASING'
+              ? `MAKER CHASING (${autoPilot.chasingOrder?.amendCount || 0}/10 AMENDS)`
+              : apState === 'BLOCKED_SESSION_TRADE_CAP'
+              ? `SESSION CAP REACHED (${autoPilot.filledToday || 0}/${config.maxDailyTrades || 5})`
+              : apState === 'COOLDOWN_ACTIVE' && autoPilot.blockReason === 'BLOCKED_DAILY_MAX_LOSS'
+              ? 'DRAWDOWN LIMIT HIT (-2.0%)'
+              : apState}
+          </span>
+        </div>
       </div>
 
       {errorMsg && (
@@ -207,11 +249,21 @@ export const AutoPilotControls: React.FC = () => {
       )}
 
       {apState === 'COOLDOWN_ACTIVE' && (
-        <div className="p-2 rounded bg-[#f6465d]/15 border border-[#f6465d]/40 text-[#f6465d] text-[11px] font-bold flex items-center space-x-2 animate-pulse">
-          <ShieldAlert className="w-4 h-4 flex-shrink-0 text-[#f6465d]" />
-          <span>
-            {autoPilot.message || 'Daily 2% Drawdown Ceiling Hit — Circuit Breaker Locked until 00:00 UTC.'}
-          </span>
+        <div className="p-2 rounded bg-[#f6465d]/15 border border-[#f6465d]/40 text-[#f6465d] text-[11px] font-bold flex items-center justify-between animate-pulse">
+          <div className="flex items-center space-x-2">
+            <ShieldAlert className="w-4 h-4 flex-shrink-0 text-[#f6465d]" />
+            <span>
+              {autoPilot.message || 'Daily 2% Drawdown Ceiling Hit — Circuit Breaker Locked until 00:00 UTC.'}
+            </span>
+          </div>
+          <button
+            data-testid="banner-reset-cooldown-btn"
+            onClick={handleResetCooldown}
+            disabled={isResettingCooldown}
+            className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#f6465d] hover:bg-[#d9384e] text-white border border-[#f6465d]/60 ml-2 whitespace-nowrap cursor-pointer active:scale-95"
+          >
+            Reset Cooldown
+          </button>
         </div>
       )}
 
@@ -246,21 +298,22 @@ export const AutoPilotControls: React.FC = () => {
         <div className="flex items-center justify-between text-[11px]">
           <span className="text-[#7d8590] flex items-center space-x-1">
             <Sliders className="w-3 h-3 text-[#2962ff]" />
-            <span>Consensus Threshold:</span>
+            <span>Quant Conviction Threshold:</span>
           </span>
           <div className="flex items-center space-x-1">
-            {[3, 4, 5, 6].map((th) => (
+            {[60, 65, 70, 75].map((th) => (
               <button
                 key={th}
+                data-testid={`conviction-threshold-${th}`}
                 onClick={() => handleUpdateConfig({ consensusThreshold: th })}
                 disabled={isSavingConfig}
                 className={`px-2 py-0.5 rounded text-[10px] border transition-colors ${
-                  config.consensusThreshold === th
+                  config.consensusThreshold === th || (!config.consensusThreshold && th === 70) || (config.consensusThreshold === 4 && th === 70)
                     ? 'bg-[#2962ff]/20 text-[#2962ff] border-[#2962ff] font-bold'
                     : 'bg-[#080c14] text-[#7d8590] border-[#151d2c] hover:text-[#e6edf3]'
                 }`}
               >
-                {th}/7
+                {th}%
               </button>
             ))}
           </div>

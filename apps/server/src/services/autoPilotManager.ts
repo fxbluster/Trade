@@ -182,7 +182,10 @@ export class AutoPilotManager {
   public updateConfig(partial: Partial<AutoPilotConfig>): void {
     if (partial.enabled !== undefined) this.config.enabled = partial.enabled;
     if (partial.consensusThreshold !== undefined) {
-      this.config.consensusThreshold = Math.max(1, Math.min(7, partial.consensusThreshold));
+      this.config.consensusThreshold =
+        partial.consensusThreshold >= 20
+          ? Math.max(50, Math.min(95, partial.consensusThreshold))
+          : Math.max(1, Math.min(7, partial.consensusThreshold));
       this.confluenceEngine.setConsensusThreshold(this.config.consensusThreshold);
     }
     if (partial.marginAllocationPct !== undefined) {
@@ -237,6 +240,18 @@ export class AutoPilotManager {
   public isCooldownActive(): boolean {
     this.evaluateCooldownExpiry();
     return this.cooldownUntil > Date.now();
+  }
+
+  public resetCooldown(): void {
+    this.cooldownUntil = 0;
+    this.consecutiveLosses = 0;
+    this.settingsRepo.delete('autopilot_cooldown_until');
+    if (this.state === 'COOLDOWN_ACTIVE') {
+      this.state = 'IDLE';
+      this.blockReason = null;
+      this.statusMessage = null;
+    }
+    this.broadcastStatus();
   }
 
   public getCooldownRemainingSec(): number {
@@ -384,7 +399,7 @@ export class AutoPilotManager {
 
     // Evaluate Confluence Consensus
     const snapshot = this.confluenceEngine.getSnapshot(sym);
-    if (!snapshot || !snapshot.consensusMet || snapshot.macroVetoActive || snapshot.blockReason) {
+    if (!snapshot || !snapshot.consensusMet || snapshot.blockReason) {
       return;
     }
 

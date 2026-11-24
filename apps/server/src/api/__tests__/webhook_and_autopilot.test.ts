@@ -497,5 +497,21 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
       expect(statusCode).toBe(404);
       expect(JSON.parse(bodyData).error).toContain('AutoPilotManager not initialized');
     });
+
+    it('successfully resets cooldown via POST /api/autopilot/reset-cooldown', async () => {
+      // Put manager in cooldown first
+      const settingsRepo = (autoPilotManager as any).settingsRepo;
+      settingsRepo.set('autopilot_cooldown_until', { until: Date.now() + 3600000 });
+      (autoPilotManager as any).cooldownUntil = Date.now() + 3600000;
+      (autoPilotManager as any).state = 'COOLDOWN_ACTIVE';
+
+      const res = await invokeRoute('POST', '/api/autopilot/reset-cooldown');
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      expect(res.body.state).toBe('IDLE');
+      expect(autoPilotManager.getState()).toBe('IDLE');
+      expect(autoPilotManager.isCooldownActive()).toBe(false);
+      expect(settingsRepo.get('autopilot_cooldown_until')).toBeNull();
+    });
   });
 });

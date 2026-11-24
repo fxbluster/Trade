@@ -229,6 +229,12 @@ export const apiClient = {
     });
   },
 
+  async resetAutoPilotCooldown(): Promise<{ ok: boolean; state?: string }> {
+    return request<{ ok: boolean; state?: string }>('/api/autopilot/reset-cooldown', {
+      method: 'POST',
+    });
+  },
+
   async getPillarScorecard(
     symbol: string = 'SOLUSDT',
     horizon: TrajectoryHorizon = '15m'
@@ -305,4 +311,8 @@ export async function downloadDailyAudit(
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(objectUrl);
+}
+
+export async function resetAutoPilotCooldown(): Promise<{ ok: boolean; state?: string }> {
+  return apiClient.resetAutoPilotCooldown();
 }

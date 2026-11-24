@@ -8,11 +8,29 @@ import { flushSync } from 'react-dom';
 import { useMarketStore } from '../../store/useMarketStore';
 import { AutoPilotControls } from '../AutoPilotControls';
 import type { AutoPilotStatusData } from '../../lib/wsClient';
+import { apiClient } from '../../lib/apiClient';
 
 vi.mock('../../lib/apiClient', () => ({
   apiClient: {
     toggleAutoPilot: vi.fn(),
-    updateAutoPilotConfig: vi.fn(),
+    updateAutoPilotConfig: vi.fn().mockResolvedValue({ ok: true, config: {} }),
+    resetAutoPilotCooldown: vi.fn().mockResolvedValue({ ok: true, state: 'IDLE' }),
+    getKlines: vi.fn().mockResolvedValue([]),
+    getState: vi.fn().mockResolvedValue({
+      symbol: 'SOLUSDT',
+      markPrice: 100,
+      fundingRate: 0.0001,
+      nextFundingTime: Date.now() + 3600000,
+      account: { walletBalance: 1000, equity: 1000, availableBalance: 1000, unrealizedPnl: 0, currency: 'USDT' },
+      activePosition: null,
+      openOrders: [],
+      indicators: null,
+      cvd: null,
+      risk: { broker_mode: 'BINANCE_DEMO', consecutive_losses: 0, cooldown_until: 0, cooldown_reason: null, session_net_pnl: 0, session_started_at: Date.now(), updated_at: Date.now() },
+      sokrat: null,
+      exchangeHealth: 'HEALTHY',
+      brokerMode: 'BINANCE_DEMO',
+    }),
   },
 }));
 
@@ -137,6 +155,91 @@ describe('AutoPilotControls Next-Gen Presentation Tier', () => {
     expect(badge?.textContent).toContain('Airbag: SECURE');
     expect(badge?.textContent).toContain('Kelly: 0.95x');
     expect(badge?.textContent).toContain('Vol Parity: 1.10x');
+    root.unmount();
+  });
+
+  it('renders modernized Quant Conviction Threshold buttons instead of legacy min-pillar buttons', () => {
+    const root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(AutoPilotControls));
+    });
+
+    // Check legacy 3/7, 4/7 buttons are gone
+    expect(container.textContent).not.toContain('3/7');
+    expect(container.textContent).not.toContain('4/7');
+    expect(container.textContent).not.toContain('5/7');
+    expect(container.textContent).not.toContain('6/7');
+
+    // Check modernized Quant Conviction Threshold buttons
+    expect(container.textContent).toContain('Quant Conviction Threshold:');
+    const btn60 = container.querySelector('[data-testid="conviction-threshold-60"]') as HTMLButtonElement;
+    const btn65 = container.querySelector('[data-testid="conviction-threshold-65"]') as HTMLButtonElement;
+    const btn70 = container.querySelector('[data-testid="conviction-threshold-70"]') as HTMLButtonElement;
+    const btn75 = container.querySelector('[data-testid="conviction-threshold-75"]') as HTMLButtonElement;
+
+    expect(btn60).not.toBeNull();
+    expect(btn65).not.toBeNull();
+    expect(btn70).not.toBeNull();
+    expect(btn75).not.toBeNull();
+
+    expect(btn60.textContent).toBe('60%');
+    expect(btn65.textContent).toBe('65%');
+    expect(btn70.textContent).toBe('70%');
+    expect(btn75.textContent).toBe('75%');
+
+    // Click 65% button and verify updateAutoPilotConfig is called
+    flushSync(() => {
+      btn65.click();
+    });
+    expect(apiClient.updateAutoPilotConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ consensusThreshold: 65 })
+    );
+
+    root.unmount();
+  });
+
+  it('renders prominent Reset Cooldown button when in COOLDOWN_ACTIVE and handles reset click', async () => {
+    const statusData: AutoPilotStatusData = {
+      state: 'COOLDOWN_ACTIVE',
+      config: {
+        enabled: true,
+        consensusThreshold: 70,
+        marginAllocationPct: 5,
+        leverage: 10,
+        oppositeExitEnabled: true,
+        circuitBreakerConsecutiveLosses: 2,
+        circuitBreakerCooldownMs: 3600000,
+        maxDailyTrades: 5,
+        dailyDrawdownLimitPct: 2.0,
+      },
+      openTradeId: null,
+      cooldownRemainingSec: 1800,
+      blockReason: 'BLOCKED_DAILY_MAX_LOSS',
+      message: 'Daily Drawdown Limit (-2.0%) Reached - Cooldown Active',
+    };
+
+    useMarketStore.setState({ autoPilot: statusData });
+
+    const root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(AutoPilotControls));
+    });
+
+    const resetBtn = container.querySelector('[data-testid="reset-cooldown-btn"]') as HTMLButtonElement;
+    expect(resetBtn).not.toBeNull();
+    expect(resetBtn.textContent).toContain('Reset Cooldown');
+
+    // Also check banner reset button
+    const bannerResetBtn = container.querySelector('[data-testid="banner-reset-cooldown-btn"]') as HTMLButtonElement;
+    expect(bannerResetBtn).not.toBeNull();
+
+    // Click Reset Cooldown
+    await flushSync(async () => {
+      resetBtn.click();
+    });
+
+    expect(apiClient.resetAutoPilotCooldown).toHaveBeenCalled();
+    expect(apiClient.getState).toHaveBeenCalled();
     root.unmount();
   });
 });

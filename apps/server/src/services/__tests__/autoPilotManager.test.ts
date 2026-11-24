@@ -598,5 +598,12 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     );
     expect(drawdownMsg).toBeDefined();
     expect((drawdownMsg as any).data.state).toBe('COOLDOWN_ACTIVE');
+
+    // Test resetCooldown() resets state and clears persisted cooldown
+    autoPilot.resetCooldown();
+    expect(autoPilot.getState()).toBe('IDLE');
+    expect(autoPilot.isCooldownActive()).toBe(false);
+    const settingsRepo = new SettingsRepo(db);
+    expect(settingsRepo.get('autopilot_cooldown_until')).toBeNull();
   });
 });

@@ -334,4 +334,105 @@ describe('ConfluenceHUD & Institutional SMC State Slices', () => {
     expect(banner?.textContent).toContain('Threshold: $1.88');
     root.unmount();
   });
+
+  it('renders Next-Gen Orthogonal Quant Conviction indicator with proper color-coding and no legacy 7-pillar cards grid', () => {
+    // Test case 1: Score >= 70% (green/emerald)
+    useMarketStore.setState({
+      confluence: {
+        symbol: 'BTCUSDT',
+        macroVetoActive: false,
+        macroRegime: 'MACRO_BULLISH',
+        pillars: [],
+        bullishCount: 5,
+        bearishCount: 0,
+        neutralCount: 2,
+        consensusBias: 'BULLISH',
+        consensusMet: true,
+        threshold: 70,
+        compositeScore: 78,
+        recommendedAction: 'STRONG_BUY',
+        activeFvgs: [],
+        activeOrderBlocks: [],
+        latestSweep: null,
+      },
+    });
+
+    let root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ConfluenceHUD));
+    });
+
+    const indicator = container.querySelector('[data-testid="quant-conviction-indicator"]');
+    expect(indicator).not.toBeNull();
+    expect(indicator?.textContent).toBe('Orthogonal Quant Conviction: Score: 78%');
+    expect(indicator?.className).toContain('text-[#0ecb81]'); // green/emerald
+
+    // Verify legacy 7-pillar text is gone
+    expect(container.textContent).not.toContain('Pillars (Min 4 Req)');
+    // Verify no 7-pillar cards grid exists
+    expect(container.querySelectorAll('.lg\\:grid-cols-7')).toHaveLength(0);
+    root.unmount();
+
+    // Test case 2: Score >= 60% and < 70% (yellow/amber)
+    useMarketStore.setState({
+      confluence: {
+        symbol: 'BTCUSDT',
+        macroVetoActive: false,
+        macroRegime: 'MACRO_BULLISH',
+        pillars: [],
+        bullishCount: 3,
+        bearishCount: 1,
+        neutralCount: 3,
+        consensusBias: 'NEUTRAL',
+        consensusMet: false,
+        threshold: 70,
+        compositeScore: 65,
+        recommendedAction: 'WAIT',
+        activeFvgs: [],
+        activeOrderBlocks: [],
+        latestSweep: null,
+      },
+    });
+
+    root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ConfluenceHUD));
+    });
+
+    const indicator65 = container.querySelector('[data-testid="quant-conviction-indicator"]');
+    expect(indicator65?.textContent).toBe('Orthogonal Quant Conviction: Score: 65%');
+    expect(indicator65?.className).toContain('text-[#f0b90b]'); // yellow/amber
+    root.unmount();
+
+    // Test case 3: Score < 60% (slate/gray)
+    useMarketStore.setState({
+      confluence: {
+        symbol: 'BTCUSDT',
+        macroVetoActive: false,
+        macroRegime: 'MACRO_BULLISH',
+        pillars: [],
+        bullishCount: 1,
+        bearishCount: 2,
+        neutralCount: 4,
+        consensusBias: 'NEUTRAL',
+        consensusMet: false,
+        threshold: 70,
+        compositeScore: 45,
+        recommendedAction: 'WAIT',
+        activeFvgs: [],
+        activeOrderBlocks: [],
+        latestSweep: null,
+      },
+    });
+
+    root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ConfluenceHUD));
+    });
+
+    const indicator45 = container.querySelector('[data-testid="quant-conviction-indicator"]');
+    expect(indicator45?.textContent).toBe('Orthogonal Quant Conviction: Score: 45%');
+    expect(indicator45?.className).toContain('text-[#7d8590]'); // slate/gray
+    root.unmount();
+  });
 });

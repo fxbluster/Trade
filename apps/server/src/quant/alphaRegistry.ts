@@ -50,6 +50,7 @@ export const MGS_WINDOW = 60;
 export const MGS_EPSILON = 1e-7;
 export const MGS_COLLINEAR_THRESHOLD = 1e-6;
 export const DIRICHLET_ALPHA = 1.0; // Dirichlet prior concentration
+export const MIN_CALIBRATED_WEIGHT = 0.05;
 
 interface FactorWindowState {
   alphaHistory: number[]; // rolling window of rawAlpha values
@@ -62,6 +63,7 @@ interface FactorWindowState {
 export class AlphaRegistry {
   private readonly factors: IAlphaFactor[] = [];
   private readonly windowStates: Map<string, FactorWindowState> = new Map();
+  private readonly calibratedWeights: Map<string, number> = new Map();
   private db: DatabaseSync | null = null;
 
   /**
@@ -73,6 +75,7 @@ export class AlphaRegistry {
     }
     this.factors.push(factor);
     this.windowStates.set(factor.id, { alphaHistory: [] });
+    this.calibratedWeights.set(factor.id, factor.defaultWeight);
   }
 
   /**
@@ -111,6 +114,36 @@ export class AlphaRegistry {
   }
 
   /**
+   * Override calibrated prior weight for a factor (clamped to >= 0.05 floor).
+   */
+  public setCalibratedWeight(factorId: string, weight: number): void {
+    const safeWeight = Number.isFinite(weight)
+      ? Math.max(MIN_CALIBRATED_WEIGHT, weight)
+      : MIN_CALIBRATED_WEIGHT;
+    this.calibratedWeights.set(factorId, safeWeight);
+  }
+
+  /**
+   * Batch-apply calibrated prior weights from StrategyDecayEngine or config.
+   */
+  public applyCalibratedWeights(weights: Record<string, number>): void {
+    for (const [factorId, weight] of Object.entries(weights)) {
+      this.setCalibratedWeight(factorId, weight);
+    }
+  }
+
+  /**
+   * Get active prior weight for a factor (calibrated override, registered default, or 0).
+   */
+  public getCalibratedWeight(factorId: string): number {
+    const calibrated = this.calibratedWeights.get(factorId);
+    if (calibrated !== undefined) {
+      return calibrated;
+    }
+    return this.getFactor(factorId)?.defaultWeight ?? 0;
+  }
+
+  /**
    * Tear down all registered factors.
    */
   public async teardown(): Promise<void> {
@@ -119,6 +152,7 @@ export class AlphaRegistry {
     }
     this.factors.length = 0;
     this.windowStates.clear();
+    this.calibratedWeights.clear();
     this.db = null;
   }
 
@@ -203,9 +237,11 @@ export class AlphaRegistry {
     }
 
     // 5. Bayesian Dirichlet-regularized posterior weight synthesis
-    const defaultWeights = factorEntries.map((e) => e.factor.defaultWeight);
+    const priorWeights = factorEntries.map((e) =>
+      this.getCalibratedWeight(e.factor.id)
+    );
     const posteriorWeights = dirichletPosterior(
-      defaultWeights,
+      priorWeights,
       orthogonalAlphas,
       isCollinear,
       DIRICHLET_ALPHA

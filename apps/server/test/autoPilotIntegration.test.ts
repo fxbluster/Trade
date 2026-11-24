@@ -1,9 +1,22 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { DatabaseSync } from 'node:sqlite';
-import { initializeDatabase, ExecutionChaseLogsRepo, TradesRepo } from '../src/db/sqlite.js';
+import {
+  initializeDatabase,
+  ExecutionChaseLogsRepo,
+  TradesRepo,
+  DecisionLogsRepo,
+  FactorTelemetryRecordsRepo,
+} from '../src/db/sqlite.js';
 import { TradeManager } from '../src/services/tradeManager.js';
 import { AutoPilotManager } from '../src/services/autoPilotManager.js';
+import { DecisionAuditService } from '../src/services/decisionAuditService.js';
 import { ConfluenceEngine } from '../src/quant/confluenceEngine.js';
+import { AlphaRegistry } from '../src/quant/alphaRegistry.js';
+import {
+  OrderFlowFactor,
+  NativeSmcFactor,
+  CvdAbsorptionFactor,
+} from '../src/quant/factors/index.js';
 import { AdaptiveSizingEngine } from '../src/quant/adaptiveSizingEngine.js';
 import { ChasingExecutionEngine } from '../src/services/chasingExecutionEngine.js';
 import { TwapExecutionSlicer } from '../src/services/twapExecutionSlicer.js';
@@ -19,6 +32,7 @@ import type {
   OpenOrderInfo,
   BrokerMode,
   ConfluenceSnapshot,
+  FactorTelemetryEvent,
 } from '@tradeos/shared';
 
 class MockBroker implements BrokerAdapter {
@@ -266,5 +280,210 @@ describe('AutoPilotManager Next-Gen Modular Integration', () => {
 
     const updated = tradesRepo.getById(existingTradeId);
     expect(updated?.is_breakeven).toBe(1);
+  });
+
+  it('synthesizes FactorTelemetryEvent on ConfluenceEngine.evaluate() with archetype and collinear factors', () => {
+    const registry = new AlphaRegistry();
+    registry.registerFactor(new OrderFlowFactor());
+    registry.registerFactor(new NativeSmcFactor());
+    registry.registerFactor(new CvdAbsorptionFactor());
+
+    const engineWithRegistry = new ConfluenceEngine({ alphaRegistry: registry });
+    const now = Date.now();
+    engineWithRegistry.orderFlowEngine.updateDepth([[100.0, 2000]], [[100.1, 200]]);
+    for (let i = 0; i < 3; i++) {
+      engineWithRegistry.orderFlowEngine.processTrade(100, false, now - (3 - i) * 1000, 100 + i * 0.1);
+    }
+
+    const snap = engineWithRegistry.evaluate({
+      symbol: 'SOLUSDT',
+      currentPrice: 100,
+      indicators: null,
+      cvd: null,
+    });
+
+    expect(snap.telemetryEvent).toBeDefined();
+    expect(snap.telemetryEvent!.symbol).toBe('SOLUSDT');
+    expect(Array.isArray(snap.telemetryEvent!.activeFactors)).toBe(true);
+    expect(Array.isArray(snap.telemetryEvent!.collinearFactors)).toBe(true);
+    expect(snap.telemetryEvent!.activeFactors.length + snap.telemetryEvent!.collinearFactors.length).toBeGreaterThan(0);
+    expect([
+      'SUB_THRESHOLD',
+      'EXPLORATORY_PROBE',
+      'STANDARD_INSTITUTIONAL',
+      'HIGH_CONVICTION_CORE',
+      'A_PLUS_INSTITUTIONAL',
+    ]).toContain(snap.telemetryEvent!.convictionArchetype);
+  });
+
+  it('emits SIGNAL_CONFIRMED, ORDER_AMENDED, POSITION_ENTERED, POSITION_EXITED and onStateTransition("IDLE") across trade lifecycle', async () => {
+    const telemetryEvents: FactorTelemetryEvent[] = [];
+    const stateTransitions: string[] = [];
+    const logsRepo = new DecisionLogsRepo(db);
+    const factorRecordsRepo = new FactorTelemetryRecordsRepo(db);
+    const auditService = new DecisionAuditService(logsRepo, undefined, {
+      factorTelemetryRecordsRepo: factorRecordsRepo,
+      executionChaseLogsRepo: executionLogsRepo,
+      flushIntervalMs: 0,
+    });
+
+    const localChasing = new ChasingExecutionEngine(broker, {
+      debouncMs: 5,
+      timeoutMs: 2000,
+      tickSize: 0.01,
+    });
+
+    const wiredAutoPilot = new AutoPilotManager({
+      db,
+      tradeManager,
+      broker,
+      confluenceEngine,
+      adaptiveSizingEngine,
+      chasingExecutionEngine: localChasing,
+      twapExecutionSlicer: new TwapExecutionSlicer(localChasing, { thresholdUsd: 50_000 }),
+      executionChaseLogsRepo: executionLogsRepo,
+      getMarkPrice: () => currentMarkPrice,
+      getAtr: () => 2.0,
+      onTelemetryEvent: (ev) => {
+        telemetryEvents.push(ev);
+        auditService.recordFactorTelemetry(ev);
+      },
+      onStateTransition: (newState) => {
+        stateTransitions.push(newState);
+      },
+      onOrderDispatched: (ev) => auditService.recordExecution(ev),
+      config: {
+        enabled: true,
+        consensusThreshold: 4,
+        marginAllocationPct: 10,
+        leverage: 10,
+        maxDailyTrades: 10,
+      },
+    });
+
+    broker.account.walletBalance = 1000;
+    broker.account.availableBalance = 800;
+
+    // Seed L2 depth so ChasingExecutionEngine places & amends at least once before filling
+    confluenceEngine.orderFlowEngine.updateDepth([[99.9, 500]], [[100.1, 500]]);
+
+    const snap: ConfluenceSnapshot = {
+      symbol: 'SOLUSDT',
+      pillars: [],
+      bullishCount: 5,
+      bearishCount: 0,
+      neutralCount: 2,
+      consensusBias: 'BULLISH',
+      consensusMet: true,
+      threshold: 4,
+      compositeScore: 84,
+      recommendedAction: 'STRONG_BUY',
+      macroVetoActive: false,
+      macroRegime: 'MACRO_BULLISH',
+      activeFvgs: [],
+      activeOrderBlocks: [],
+      latestSweep: null,
+      noiseBandActive: false,
+      telemetryEvent: {
+        timestamp: Date.now(),
+        symbol: 'SOLUSDT',
+        triggerType: 'SIGNAL_CONFIRMED',
+        markPrice: 100,
+        compositeScore: 84,
+        convictionArchetype: 'HIGH_CONVICTION_CORE',
+        consensusSide: 'BUY',
+        noiseBandActive: false,
+        macroVetoActive: false,
+        activeFactors: [
+          {
+            factorId: 'ORDER_FLOW_L2',
+            name: 'Order Flow L2',
+            bias: 'BULLISH',
+            rawAlpha: 0.8,
+            orthogonalAlpha: 0.72,
+            effectiveWeight: 0.65,
+            isCollinear: false,
+            confidence: 0.9,
+            summaryText: 'Bid imbalance 2.1x',
+          },
+        ],
+        collinearFactors: ['Native SMC'],
+      },
+    };
+    confluenceEngine.getSnapshot = () => snap;
+
+    let openOrderChecks = 0;
+    vi.spyOn(broker, 'openOrder').mockImplementation(async (req: any) => {
+      const orderId = 'chase_ord_1';
+      broker.openOrders = [
+        {
+          orderId,
+          symbol: req.symbol,
+          side: req.side,
+          price: req.limitPrice,
+          origQty: req.quantity,
+          executedQty: 0,
+          type: 'LIMIT',
+          isAlgo: false,
+        },
+      ];
+      return {
+        orderId,
+        clientOrderId: 'tos_ent',
+        status: 'NEW',
+        executedQty: 0,
+        avgPrice: req.limitPrice,
+      };
+    });
+
+    vi.spyOn(broker, 'getOpenOrders').mockImplementation(async () => {
+      openOrderChecks += 1;
+      if (openOrderChecks === 1) {
+        // Shift depth so ChasingExecutionEngine performs an in-flight amendment
+        confluenceEngine.orderFlowEngine.updateDepth([[99.95, 500]], [[100.15, 500]]);
+        return broker.openOrders;
+      }
+      // Second check: mark as filled by clearing openOrders
+      broker.openOrders = [];
+      return [];
+    });
+
+    await wiredAutoPilot.onTick('SOLUSDT', 100);
+
+    const triggers = telemetryEvents.map((e) => e.triggerType);
+    expect(triggers).toContain('SIGNAL_CONFIRMED');
+    expect(triggers).toContain('ORDER_AMENDED');
+    expect(triggers).toContain('POSITION_ENTERED');
+
+    const amendedEv = telemetryEvents.find((e) => e.triggerType === 'ORDER_AMENDED')!;
+    expect(amendedEv.chasingTelemetry).toBeDefined();
+    expect(amendedEv.chasingTelemetry!.anchorMarkPrice).toBe(100);
+
+    const enteredEv = telemetryEvents.find((e) => e.triggerType === 'POSITION_ENTERED')!;
+    expect(enteredEv.chasingTelemetry).toBeDefined();
+    expect(enteredEv.chasingTelemetry!.status).toBe('FILLED');
+    expect(enteredEv.chasingTelemetry!.amendmentCount).toBeGreaterThanOrEqual(1);
+    expect(enteredEv.sizingTelemetry).toBeDefined();
+    expect(enteredEv.sizingTelemetry!.allocatedMarginUsd).toBeGreaterThan(0);
+
+    // Verify decision_logs received serialized Next-Gen vectors
+    const logs = logsRepo.listSessionDecisions(0);
+    expect(logs.length).toBeGreaterThanOrEqual(1);
+    const execLog = logs.find((l) => l.action === 'EXECUTED')!;
+    expect(execLog.factor_telemetry_json).toBeTruthy();
+    expect(execLog.execution_chase_json).toBeTruthy();
+    expect(execLog.sizing_breakdown_json).toBeTruthy();
+    expect(execLog.noise_band_state).toBe(0);
+
+    // Trigger Watchdog SL close -> emits POSITION_EXITED and transitions to IDLE
+    stateTransitions.length = 0;
+    currentMarkPrice = 95;
+    await wiredAutoPilot.onTick('SOLUSDT', 95);
+
+    expect(telemetryEvents.some((e) => e.triggerType === 'POSITION_EXITED')).toBe(true);
+    expect(stateTransitions).toContain('IDLE');
+    expect(wiredAutoPilot.getState()).toBe('IDLE');
+
+    auditService.dispose();
   });
 });

@@ -16,7 +16,24 @@ import type {
   ExitReason,
   AutoPilotState,
   TradeSide,
+  QuantConvictionArchetype,
+  FactorStateDetail,
+  ChasingTelemetrySnapshot,
+  SizingTelemetrySnapshot,
+  FactorTelemetryTriggerType,
+  FactorTelemetryEvent,
+  FactorAttributionSummaryItem,
+  FactorTelemetryRecordStatus,
+  FactorTelemetryDbRecord,
+  ConfluenceSnapshot,
+  WsServerMessage,
 } from '../contracts.js';
+import type {
+  QuantConvictionArchetype as IndexQuantConvictionArchetype,
+  FactorTelemetryEvent as IndexFactorTelemetryEvent,
+  FactorAttributionSummaryItem as IndexFactorAttributionSummaryItem,
+  FactorTelemetryDbRecord as IndexFactorTelemetryDbRecord,
+} from '../index.js';
 
 describe('TradeOS Next-Gen Modular Quant Architecture Contracts (@tradeos/shared)', () => {
   it('instantiates valid FactorOutput with bounded rawAlpha and confidence', () => {
@@ -332,5 +349,161 @@ describe('TradeOS Next-Gen Modular Quant Architecture Contracts (@tradeos/shared
         `File ${file} contains node:* import: ${nodeMatch?.[0]}`
       ).toBeNull();
     }
+  });
+
+  it('instantiates Next-Gen FactorTelemetryEvent, FactorStateDetail, Chasing/Sizing snapshots, ConfluenceSnapshot.telemetryEvent, and WsServerMessage FACTOR_TELEMETRY', () => {
+    const archetypes: QuantConvictionArchetype[] = [
+      'SUB_THRESHOLD',
+      'EXPLORATORY_PROBE',
+      'STANDARD_INSTITUTIONAL',
+      'HIGH_CONVICTION_CORE',
+      'A_PLUS_INSTITUTIONAL',
+    ];
+    expect(archetypes).toHaveLength(5);
+
+    const triggerTypes: FactorTelemetryTriggerType[] = [
+      'SUB_THRESHOLD_IMPULSE',
+      'SIGNAL_CONFIRMED',
+      'ORDER_AMENDED',
+      'POSITION_ENTERED',
+      'POSITION_EXITED',
+    ];
+    expect(triggerTypes).toHaveLength(5);
+
+    const statuses: FactorTelemetryRecordStatus[] = [
+      'EVALUATING',
+      'SETTLED',
+      'INCOMPLETE_FEED',
+    ];
+    expect(statuses).toHaveLength(3);
+
+    const factorDetail: FactorStateDetail = {
+      factorId: 'ORDER_FLOW_L2',
+      name: 'Order Flow L2',
+      bias: 'BULLISH',
+      rawAlpha: 0.78,
+      orthogonalAlpha: 0.72,
+      effectiveWeight: 0.546,
+      isCollinear: false,
+      confidence: 0.91,
+      summaryText: 'Depth Imbalance 1.8x Bid',
+    };
+
+    const chasingTelemetry: ChasingTelemetrySnapshot = {
+      orderId: 'chase-1',
+      status: 'FILLED',
+      anchorMarkPrice: 145.5,
+      currentLimitPrice: 145.48,
+      spreadPennyJumps: 2,
+      amendmentCount: 2,
+      durationMs: 840,
+      realizedFeeUsd: 0.95,
+      feeSavedVsTakerUsd: 1.42,
+    };
+
+    const sizingTelemetry: SizingTelemetrySnapshot = {
+      allocatedMarginUsd: 1200,
+      allocatedMarginPct: 25.0,
+      baseConvictionMargin: 0.21,
+      quarterKellyMultiplier: 0.85,
+      volatilityParityMultiplier: 1.1,
+      circuitBreakerMultiplier: 1.0,
+      solvencyAirbagOk: true,
+    };
+
+    const telemetryEvent: FactorTelemetryEvent = {
+      timestamp: 1700000000000,
+      symbol: 'SOLUSDT',
+      triggerType: 'POSITION_ENTERED',
+      markPrice: 145.5,
+      compositeScore: 84,
+      convictionArchetype: 'HIGH_CONVICTION_CORE',
+      consensusSide: 'BUY',
+      noiseBandActive: false,
+      macroVetoActive: false,
+      activeFactors: [factorDetail],
+      collinearFactors: ['NATIVE_SMC', 'MACRO_REGIME'],
+      chasingTelemetry,
+      sizingTelemetry,
+    };
+
+    const snapshot: ConfluenceSnapshot = {
+      symbol: 'SOLUSDT',
+      pillars: [],
+      bullishCount: 4,
+      bearishCount: 1,
+      neutralCount: 2,
+      consensusBias: 'BULLISH',
+      consensusMet: true,
+      threshold: 4,
+      compositeScore: 84,
+      recommendedAction: 'STRONG_BUY',
+      macroVetoActive: false,
+      macroRegime: 'MACRO_BULLISH',
+      activeFvgs: [],
+      activeOrderBlocks: [],
+      latestSweep: null,
+      telemetryEvent,
+    };
+    expect(snapshot.telemetryEvent?.convictionArchetype).toBe('HIGH_CONVICTION_CORE');
+
+    const wsMsg: WsServerMessage = {
+      type: 'FACTOR_TELEMETRY',
+      data: telemetryEvent,
+    };
+    expect(wsMsg.type).toBe('FACTOR_TELEMETRY');
+    if (wsMsg.type === 'FACTOR_TELEMETRY') {
+      expect(wsMsg.data.activeFactors[0].factorId).toBe('ORDER_FLOW_L2');
+      expect(wsMsg.data.chasingTelemetry?.feeSavedVsTakerUsd).toBe(1.42);
+      expect(wsMsg.data.sizingTelemetry?.solvencyAirbagOk).toBe(true);
+    }
+
+    // Verify index.ts re-exports match contracts.ts
+    const idxArchetype: IndexQuantConvictionArchetype = telemetryEvent.convictionArchetype;
+    const idxEvent: IndexFactorTelemetryEvent = telemetryEvent;
+    const idxAttr: IndexFactorAttributionSummaryItem = {
+      factorId: 'ORDER_FLOW_L2',
+      name: 'Order Flow L2',
+      empiricalHitRate: 0.64,
+      informationRatio: 1.82,
+      informationCoefficient: 0.31,
+      effectiveWeight: 0.546,
+      sampleSize: 45,
+    };
+    const idxDbRecord: IndexFactorTelemetryDbRecord = {
+      id: 1,
+      decision_log_id: null,
+      event_id: 'evt-1',
+      trigger_type: 'SUB_THRESHOLD_IMPULSE',
+      timestamp: 1700000000000,
+      symbol: 'SOLUSDT',
+      consensus_side: 'NEUTRAL',
+      entry_price: 145.5,
+      composite_score: 52,
+      factor_id: 'ORDER_FLOW_L2',
+      raw_alpha: 0.4,
+      orthogonal_alpha: 0.38,
+      effective_weight: 0.3,
+      is_collinear: 0,
+      confidence: 0.8,
+      summary_text: 'Depth Imbalance 1.3x Bid',
+      telemetry_payload_json: JSON.stringify(telemetryEvent),
+      status: 'EVALUATING',
+      settle_timestamp: null,
+      post_1m_mfe: null,
+      post_1m_mae: null,
+      post_5m_mfe: null,
+      post_5m_mae: null,
+      post_15m_mfe: null,
+      post_15m_mae: null,
+      post_1h_mfe: null,
+      post_1h_mae: null,
+    };
+    const dbRec: FactorTelemetryDbRecord = idxDbRecord;
+    const attrItem: FactorAttributionSummaryItem = idxAttr;
+    expect(idxArchetype).toBe('HIGH_CONVICTION_CORE');
+    expect(idxEvent.symbol).toBe('SOLUSDT');
+    expect(attrItem.sampleSize).toBe(45);
+    expect(dbRec.status).toBe('EVALUATING');
   });
 });

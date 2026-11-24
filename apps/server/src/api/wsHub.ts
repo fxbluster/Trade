@@ -11,6 +11,7 @@ import type {
   TradeRecord,
   ConfluenceSnapshot,
   AutoPilotConfig,
+  FactorTelemetryEvent,
 } from '@tradeos/shared';
 import { SESSION_TOKEN } from '../config.js';
 
@@ -320,6 +321,64 @@ export class WsHub {
       data,
     };
     this.broadcast(msg);
+  }
+
+  /**
+   * Broadcasts Next-Gen orthogonal FactorTelemetryEvent enforcing a hard <= 4096-byte JSON payload cap.
+   */
+  public broadcastFactorTelemetry(event: FactorTelemetryEvent): void {
+    const MAX_BYTES = 4096;
+    const compact: FactorTelemetryEvent = {
+      ...event,
+      activeFactors: Array.isArray(event.activeFactors)
+        ? event.activeFactors.map((f) => ({ ...f }))
+        : [],
+      collinearFactors: Array.isArray(event.collinearFactors)
+        ? [...event.collinearFactors]
+        : [],
+    };
+
+    const serializeSize = (): number =>
+      Buffer.byteLength(
+        JSON.stringify({ type: 'FACTOR_TELEMETRY', data: compact }),
+        'utf8'
+      );
+
+    if (serializeSize() > MAX_BYTES) {
+      if (compact.macroVetoReason && compact.macroVetoReason.length > 120) {
+        compact.macroVetoReason = `${compact.macroVetoReason.slice(0, 117)}...`;
+      }
+
+      for (const maxSummaryLen of [80, 32, 0]) {
+        if (serializeSize() <= MAX_BYTES) break;
+        for (const factor of compact.activeFactors) {
+          if (factor.summaryText && factor.summaryText.length > maxSummaryLen) {
+            factor.summaryText =
+              maxSummaryLen > 3
+                ? `${factor.summaryText.slice(0, maxSummaryLen - 3)}...`
+                : '';
+          }
+        }
+      }
+
+      if (serializeSize() > MAX_BYTES && compact.macroVetoReason) {
+        compact.macroVetoReason = compact.macroVetoReason.slice(0, 32);
+      }
+
+      while (serializeSize() > MAX_BYTES && compact.collinearFactors.length > 0) {
+        compact.collinearFactors.pop();
+      }
+
+      while (serializeSize() > MAX_BYTES && compact.activeFactors.length > 0) {
+        compact.activeFactors.pop();
+      }
+
+      if (serializeSize() > MAX_BYTES && compact.macroVetoReason !== undefined) {
+        delete compact.macroVetoReason;
+      }
+    }
+
+    this.broadcast({ type: 'FACTOR_TELEMETRY', data: compact });
   }
 
   /**

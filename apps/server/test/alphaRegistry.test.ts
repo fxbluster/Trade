@@ -401,4 +401,101 @@ describe('AlphaRegistry', () => {
       expect(resBear.compositeScore).toBeGreaterThanOrEqual(0);
     });
   });
+
+  describe('Calibrated Weight Overrides', () => {
+    const context: FactorEvaluationContext = {
+      symbol: 'SOLUSDT',
+      currentPrice: 150.0,
+      candles: [],
+      timestamp: Date.now(),
+    };
+
+    it('initializes calibrated weights from factor defaultWeight and returns 0 for unregistered factors', () => {
+      const registry = new AlphaRegistry();
+      registry.registerFactor(createMockFactor('ORDER_FLOW_L2', 'Order Flow L2', 0.4));
+      registry.registerFactor(createMockFactor('CVD_ABSORPTION', 'CVD Absorption', 0.3));
+
+      expect(registry.getCalibratedWeight('ORDER_FLOW_L2')).toBeCloseTo(0.4, 6);
+      expect(registry.getCalibratedWeight('CVD_ABSORPTION')).toBeCloseTo(0.3, 6);
+      expect(registry.getCalibratedWeight('UNKNOWN_FACTOR')).toBe(0);
+    });
+
+    it('clamps calibrated weights to the 0.05 floor in setCalibratedWeight and applyCalibratedWeights', () => {
+      const registry = new AlphaRegistry();
+      registry.registerFactor(createMockFactor('ORDER_FLOW_L2', 'Order Flow L2', 0.4));
+      registry.registerFactor(createMockFactor('CVD_ABSORPTION', 'CVD Absorption', 0.3));
+
+      registry.setCalibratedWeight('ORDER_FLOW_L2', 0.01);
+      expect(registry.getCalibratedWeight('ORDER_FLOW_L2')).toBeCloseTo(0.05, 6);
+
+      registry.setCalibratedWeight('CVD_ABSORPTION', -0.25);
+      expect(registry.getCalibratedWeight('CVD_ABSORPTION')).toBeCloseTo(0.05, 6);
+
+      registry.applyCalibratedWeights({
+        ORDER_FLOW_L2: 0.02,
+        CVD_ABSORPTION: 0.65,
+      });
+      expect(registry.getCalibratedWeight('ORDER_FLOW_L2')).toBeCloseTo(0.05, 6);
+      expect(registry.getCalibratedWeight('CVD_ABSORPTION')).toBeCloseTo(0.65, 6);
+    });
+
+    it('shifts Dirichlet posterior synthesis weights away from decayed factors while preserving >= 0.05 floor and sum == 1.0', () => {
+      const registry = new AlphaRegistry();
+
+      const orderFlow = createMockFactor('ORDER_FLOW_L2', 'Order Flow L2', 0.5);
+      vi.mocked(orderFlow.computeFactor)
+        .mockReturnValueOnce({
+          factorId: 'ORDER_FLOW_L2',
+          bias: 'BULLISH',
+          rawAlpha: 0.5,
+          confidence: 0.8,
+          uncertainty: 0.2,
+          halfLifeMs: 60_000,
+          metadata: {},
+        })
+        .mockReturnValueOnce({
+          factorId: 'ORDER_FLOW_L2',
+          bias: 'BEARISH',
+          rawAlpha: -0.5,
+          confidence: 0.8,
+          uncertainty: 0.2,
+          halfLifeMs: 60_000,
+          metadata: {},
+        });
+
+      const cvd = createMockFactor('CVD_ABSORPTION', 'CVD Absorption', 0.5, {
+        rawAlpha: 0.5,
+        bias: 'BULLISH',
+        confidence: 0.8,
+      });
+
+      registry.registerFactor(orderFlow);
+      registry.registerFactor(cvd);
+
+      // Tick 1: equal calibrated weights (0.5 / 0.5) and equal |alpha| (0.5) -> equal posterior (0.5 / 0.5)
+      const before = registry.evaluate(context);
+      const beforeOrderFlow = before.details.find((d) => d.factorId === 'ORDER_FLOW_L2')!;
+      const beforeCvd = before.details.find((d) => d.factorId === 'CVD_ABSORPTION')!;
+      expect(beforeOrderFlow.posteriorWeight).toBeCloseTo(0.5, 6);
+      expect(beforeCvd.posteriorWeight).toBeCloseTo(0.5, 6);
+
+      // Decay ORDER_FLOW_L2 below floor (0.01 -> clamped to 0.05)
+      registry.applyCalibratedWeights({ ORDER_FLOW_L2: 0.01 });
+      expect(registry.getCalibratedWeight('ORDER_FLOW_L2')).toBeCloseTo(0.05, 6);
+
+      // Tick 2: histories [0.5, -0.5] and [0.5, 0.5] are strictly orthogonal (<u1, u2> = 0),
+      // both |orthogonalAlpha| = 0.5, so shift is driven solely by calibrated prior weights.
+      const after = registry.evaluate(context);
+      const afterOrderFlow = after.details.find((d) => d.factorId === 'ORDER_FLOW_L2')!;
+      const afterCvd = after.details.find((d) => d.factorId === 'CVD_ABSORPTION')!;
+
+      expect(afterOrderFlow.isCollinear).toBe(false);
+      expect(afterCvd.isCollinear).toBe(false);
+      expect(afterOrderFlow.posteriorWeight).toBeLessThan(beforeOrderFlow.posteriorWeight);
+      expect(afterCvd.posteriorWeight).toBeGreaterThan(beforeCvd.posteriorWeight);
+      expect(afterOrderFlow.posteriorWeight).toBeGreaterThanOrEqual(0.05);
+      expect(afterOrderFlow.posteriorWeight + afterCvd.posteriorWeight).toBeCloseTo(1.0, 6);
+      expect(after.rawConviction).toBeGreaterThan(0);
+    });
+  });
 });

@@ -593,7 +593,25 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     const format = query.format || 'json';
 
     const sinceMs = session === 'current' ? Date.now() - 28_800_000 : undefined;
-    const summary = ctx.decisionAuditService.generateSessionSummary(sinceMs);
+
+    const paginationOpts: { limit?: number; offset?: number } = {};
+    if (query.limit !== undefined && query.limit !== '') {
+      const parsedLimit = Number.parseInt(query.limit, 10);
+      if (Number.isFinite(parsedLimit)) {
+        paginationOpts.limit = Math.max(1, Math.min(200, parsedLimit));
+      }
+    }
+    if (query.offset !== undefined && query.offset !== '') {
+      const parsedOffset = Number.parseInt(query.offset, 10);
+      if (Number.isFinite(parsedOffset)) {
+        paginationOpts.offset = Math.max(0, parsedOffset);
+      }
+    }
+
+    const summary =
+      format !== 'markdown' && Object.keys(paginationOpts).length > 0
+        ? ctx.decisionAuditService.generateSessionSummary(sinceMs, paginationOpts)
+        : ctx.decisionAuditService.generateSessionSummary(sinceMs);
 
     if (format === 'markdown') {
       res.statusCode = 200;

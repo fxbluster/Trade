@@ -1,6 +1,7 @@
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+PRAGMA wal_autocheckpoint = 1000;
 
 CREATE TABLE IF NOT EXISTS trades (
     id TEXT PRIMARY KEY,                       -- UUID v4
@@ -114,7 +115,11 @@ CREATE TABLE IF NOT EXISTS decision_logs (
     expires_at INTEGER,
     shadow_closed_at INTEGER,
     error_message TEXT,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    factor_telemetry_json TEXT,
+    execution_chase_json TEXT,
+    sizing_breakdown_json TEXT,
+    noise_band_state INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_decision_logs_ts ON decision_logs(timestamp);
@@ -227,6 +232,41 @@ CREATE TABLE IF NOT EXISTS execution_chase_logs (
 
 CREATE INDEX IF NOT EXISTS idx_execution_chase_trade_id ON execution_chase_logs(trade_id);
 CREATE INDEX IF NOT EXISTS idx_execution_chase_sym_ts ON execution_chase_logs(symbol, created_at);
+
+CREATE TABLE IF NOT EXISTS factor_telemetry_records (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  decision_log_id TEXT REFERENCES decision_logs(id) ON DELETE CASCADE,
+  event_id TEXT NOT NULL,
+  trigger_type TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  consensus_side TEXT NOT NULL,
+  entry_price REAL NOT NULL,
+  composite_score REAL NOT NULL,
+  factor_id TEXT NOT NULL,
+  raw_alpha REAL NOT NULL,
+  orthogonal_alpha REAL NOT NULL,
+  effective_weight REAL NOT NULL,
+  is_collinear INTEGER NOT NULL,
+  confidence REAL DEFAULT 0,
+  summary_text TEXT,
+  telemetry_payload_json TEXT,
+  status TEXT DEFAULT 'EVALUATING',
+  settle_timestamp INTEGER,
+  post_1m_mfe REAL,
+  post_1m_mae REAL,
+  post_5m_mfe REAL,
+  post_5m_mae REAL,
+  post_15m_mfe REAL,
+  post_15m_mae REAL,
+  post_1h_mfe REAL,
+  post_1h_mae REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_factor_telemetry_factor_time ON factor_telemetry_records(factor_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_factor_telemetry_status ON factor_telemetry_records(status, symbol, timestamp);
+CREATE INDEX IF NOT EXISTS idx_factor_telemetry_event_id ON factor_telemetry_records(event_id);
+
 
 
 

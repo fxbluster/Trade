@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import crypto from 'node:crypto';
+import type { AutoPilotState } from '@tradeos/shared';
 import type {
   MonteCarloWorkerRequest,
   MonteCarloWorkerResponse,
@@ -97,6 +98,7 @@ function resolveWorkerPath(): string {
 
 export class StrategyDecayEngine {
   private readonly factors: Map<string, FactorDecayState> = new Map();
+  private readonly pendingWeightUpdates: Map<string, number> = new Map();
   private readonly defaultMinWeightFloor: number;
   private readonly workerTimeoutMs: number;
 
@@ -240,6 +242,7 @@ export class StrategyDecayEngine {
       // Down-scale weight by 50% toward minWeightFloor (default 0.05)
       const downscaled = state.currentWeight * 0.5;
       state.currentWeight = Math.max(state.minWeightFloor, downscaled);
+      this.pendingWeightUpdates.set(factorId, state.currentWeight);
 
       // Reset CUSUM accumulators after change-point trigger
       state.cusumS = 0;
@@ -285,8 +288,37 @@ export class StrategyDecayEngine {
   public setFactorWeight(factorId: string, weight: number): void {
     const factor = this.factors.get(factorId);
     if (factor) {
-      factor.currentWeight = Math.max(factor.minWeightFloor, weight);
+      const safeWeight = Number.isFinite(weight)
+        ? Math.max(factor.minWeightFloor, weight)
+        : factor.minWeightFloor;
+      factor.currentWeight = safeWeight;
+      this.pendingWeightUpdates.set(factorId, factor.currentWeight);
     }
+  }
+
+  /**
+   * Returns a snapshot of queued factor weight updates awaiting IDLE synchronization.
+   */
+  public getPendingWeightUpdates(): Record<string, number> {
+    return Object.fromEntries(this.pendingWeightUpdates.entries());
+  }
+
+  /**
+   * IDLE Synchronization Barrier:
+   * Applies pending factor weight updates via applyFn and clears the queue ONLY
+   * when autoPilotState === 'IDLE', returning true if applied or false otherwise.
+   */
+  public flushPendingWeightsIfIdle(
+    autoPilotState: AutoPilotState | string,
+    applyFn: (weights: Record<string, number>) => void
+  ): boolean {
+    if (autoPilotState !== 'IDLE' || this.pendingWeightUpdates.size === 0) {
+      return false;
+    }
+    const updates = Object.fromEntries(this.pendingWeightUpdates.entries());
+    applyFn(updates);
+    this.pendingWeightUpdates.clear();
+    return true;
   }
 
   /**
@@ -432,5 +464,6 @@ export class StrategyDecayEngine {
   public async dispose(): Promise<void> {
     await this.terminateWorker();
     this.factors.clear();
+    this.pendingWeightUpdates.clear();
   }
 }

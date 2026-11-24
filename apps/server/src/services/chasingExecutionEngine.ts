@@ -101,6 +101,11 @@ export class ChasingExecutionEngine {
     return this.state;
   }
 
+  /** Configured tick size for penny-jump distance calculations */
+  getTickSize(): number {
+    return this.tickSize;
+  }
+
   /**
    * Compute penny-jump target price for a BUY order.
    * BUY: if (bestAsk - bestBid > tick) min(bestBid + tick, bestAsk - tick); else bestBid.

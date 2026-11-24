@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type {
@@ -24,6 +25,11 @@ import type {
   PillarDailyScorecardRecord,
   ConfluencePillarId,
   EconomicEvent,
+  FactorTelemetryEvent,
+  FactorTelemetryDbRecord,
+  FactorTelemetryTriggerType,
+  FactorStateDetail,
+  QuantConvictionArchetype,
 } from '@tradeos/shared';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -105,7 +111,67 @@ export function initializeDatabase(dbPath: string): DatabaseSync {
     `);
   } catch {}
 
+  ensureNextGenTelemetrySchema(db);
+
   return db;
+}
+
+const FACTOR_TELEMETRY_RECORDS_DDL = `
+  CREATE TABLE IF NOT EXISTS factor_telemetry_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_log_id TEXT REFERENCES decision_logs(id) ON DELETE CASCADE,
+    event_id TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    consensus_side TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    composite_score REAL NOT NULL,
+    factor_id TEXT NOT NULL,
+    raw_alpha REAL NOT NULL,
+    orthogonal_alpha REAL NOT NULL,
+    effective_weight REAL NOT NULL,
+    is_collinear INTEGER NOT NULL,
+    confidence REAL DEFAULT 0,
+    summary_text TEXT,
+    telemetry_payload_json TEXT,
+    status TEXT DEFAULT 'EVALUATING',
+    settle_timestamp INTEGER,
+    post_1m_mfe REAL,
+    post_1m_mae REAL,
+    post_5m_mfe REAL,
+    post_5m_mae REAL,
+    post_15m_mfe REAL,
+    post_15m_mae REAL,
+    post_1h_mfe REAL,
+    post_1h_mae REAL
+  );
+  CREATE INDEX IF NOT EXISTS idx_factor_telemetry_factor_time ON factor_telemetry_records(factor_id, timestamp);
+  CREATE INDEX IF NOT EXISTS idx_factor_telemetry_status ON factor_telemetry_records(status, symbol, timestamp);
+  CREATE INDEX IF NOT EXISTS idx_factor_telemetry_event_id ON factor_telemetry_records(event_id);
+`;
+
+/**
+ * Idempotently upgrades pre-Next-Gen SQLite databases with WAL autocheckpoint,
+ * decision_logs JSON telemetry columns, and factor_telemetry_records table/indexes.
+ */
+export function ensureNextGenTelemetrySchema(db: DatabaseSync): void {
+  db.exec('PRAGMA wal_autocheckpoint = 1000;');
+  try {
+    db.exec('ALTER TABLE decision_logs ADD COLUMN factor_telemetry_json TEXT;');
+  } catch {}
+  try {
+    db.exec('ALTER TABLE decision_logs ADD COLUMN execution_chase_json TEXT;');
+  } catch {}
+  try {
+    db.exec('ALTER TABLE decision_logs ADD COLUMN sizing_breakdown_json TEXT;');
+  } catch {}
+  try {
+    db.exec('ALTER TABLE decision_logs ADD COLUMN noise_band_state INTEGER DEFAULT 0;');
+  } catch {}
+  try {
+    db.exec(FACTOR_TELEMETRY_RECORDS_DDL);
+  } catch {}
 }
 
 /**
@@ -478,11 +544,13 @@ export class DecisionLogsRepo {
         pillars_json, macro_regime, macro_veto_active, veto_reasons_json,
         execution_price, margin_usd, leverage, atr, trade_id,
         shadow_status, shadow_sl, shadow_tp, shadow_pnl_usd,
-        expires_at, shadow_closed_at, error_message, created_at
+        expires_at, shadow_closed_at, error_message, created_at,
+        factor_telemetry_json, execution_chase_json, sizing_breakdown_json, noise_band_state
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?, ?, ?
       )
@@ -511,7 +579,11 @@ export class DecisionLogsRepo {
       record.expires_at ?? null,
       record.shadow_closed_at ?? null,
       record.error_message ?? null,
-      record.created_at
+      record.created_at,
+      record.factor_telemetry_json ?? null,
+      record.execution_chase_json ?? null,
+      record.sizing_breakdown_json ?? null,
+      record.noise_band_state ?? 0
     );
   }
 
@@ -1334,6 +1406,349 @@ export class ExecutionChaseLogsRepo {
       totalChases: Number(row?.totalChases ?? 0),
       successfulChases: Number(row?.successfulChases ?? 0),
     };
+  }
+}
+
+export type FactorHorizonExcursionPatch = Partial<
+  Pick<
+    FactorTelemetryDbRecord,
+    | 'post_1m_mfe'
+    | 'post_1m_mae'
+    | 'post_5m_mfe'
+    | 'post_5m_mae'
+    | 'post_15m_mfe'
+    | 'post_15m_mae'
+    | 'post_1h_mfe'
+    | 'post_1h_mae'
+    | 'status'
+    | 'settle_timestamp'
+  >
+>;
+
+const HORIZON_PATCH_COLUMNS: ReadonlyArray<keyof FactorHorizonExcursionPatch> = [
+  'post_1m_mfe',
+  'post_1m_mae',
+  'post_5m_mfe',
+  'post_5m_mae',
+  'post_15m_mfe',
+  'post_15m_mae',
+  'post_1h_mfe',
+  'post_1h_mae',
+  'status',
+  'settle_timestamp',
+];
+
+interface PendingFactorDbRow {
+  factorId: string;
+  rawAlpha: number;
+  orthogonalAlpha: number;
+  effectiveWeight: number;
+  isCollinear: number;
+  confidence: number;
+  summaryText: string | null;
+}
+
+function deriveConvictionArchetype(compositeScore: number): QuantConvictionArchetype {
+  if (compositeScore >= 95) return 'A_PLUS_INSTITUTIONAL';
+  if (compositeScore >= 85) return 'HIGH_CONVICTION_CORE';
+  if (compositeScore >= 75) return 'STANDARD_INSTITUTIONAL';
+  if (compositeScore >= 70) return 'EXPLORATORY_PROBE';
+  return 'SUB_THRESHOLD';
+}
+
+function buildFactorRows(event: FactorTelemetryEvent): PendingFactorDbRow[] {
+  const rows: PendingFactorDbRow[] = [];
+  const activeFactors = event.activeFactors ?? [];
+  const collinearFactors = event.collinearFactors ?? [];
+
+  for (const factor of activeFactors) {
+    rows.push({
+      factorId: factor.factorId,
+      rawAlpha: factor.rawAlpha,
+      orthogonalAlpha: factor.orthogonalAlpha,
+      effectiveWeight: factor.effectiveWeight,
+      isCollinear: factor.isCollinear ? 1 : 0,
+      confidence: factor.confidence ?? 0,
+      summaryText: factor.summaryText ?? null,
+    });
+  }
+
+  for (const collinearEntry of collinearFactors) {
+    const alreadyInActive = activeFactors.some(
+      (f) => f.isCollinear && (f.factorId === collinearEntry || f.name === collinearEntry)
+    );
+    if (!alreadyInActive) {
+      rows.push({
+        factorId: collinearEntry,
+        rawAlpha: 0,
+        orthogonalAlpha: 0,
+        effectiveWeight: 0,
+        isCollinear: 1,
+        confidence: 0,
+        summaryText: 'Collinear suppressed',
+      });
+    }
+  }
+
+  if (rows.length === 0) {
+    rows.push({
+      factorId: 'COMPOSITE',
+      rawAlpha: 0,
+      orthogonalAlpha: 0,
+      effectiveWeight: 1,
+      isCollinear: 0,
+      confidence: 0,
+      summaryText: null,
+    });
+  }
+
+  return rows;
+}
+
+function reconstructEventFromRows(rows: FactorTelemetryDbRecord[]): FactorTelemetryEvent {
+  const primaryRow = rows.find((r) => r.telemetry_payload_json != null) ?? rows[0]!;
+  if (primaryRow.telemetry_payload_json) {
+    try {
+      const parsed = JSON.parse(primaryRow.telemetry_payload_json) as FactorTelemetryEvent;
+      return {
+        ...parsed,
+        id: primaryRow.id,
+        eventId: primaryRow.event_id,
+      };
+    } catch {
+      // Fall back to row-level reconstruction if payload JSON is malformed
+    }
+  }
+
+  const activeFactors: FactorStateDetail[] = [];
+  const collinearFactors: string[] = [];
+
+  for (const row of rows) {
+    if (row.is_collinear === 1) {
+      collinearFactors.push(row.factor_id);
+      continue;
+    }
+    if (row.factor_id === 'COMPOSITE') {
+      continue;
+    }
+    const bias: FactorStateDetail['bias'] =
+      row.orthogonal_alpha > 0 ? 'BULLISH' : row.orthogonal_alpha < 0 ? 'BEARISH' : 'NEUTRAL';
+    activeFactors.push({
+      factorId: row.factor_id,
+      name: row.factor_id,
+      bias,
+      rawAlpha: row.raw_alpha,
+      orthogonalAlpha: row.orthogonal_alpha,
+      effectiveWeight: row.effective_weight,
+      isCollinear: false,
+      confidence: row.confidence,
+      summaryText: row.summary_text ?? '',
+    });
+  }
+
+  return {
+    id: primaryRow.id,
+    eventId: primaryRow.event_id,
+    timestamp: primaryRow.timestamp,
+    symbol: primaryRow.symbol,
+    triggerType: primaryRow.trigger_type as FactorTelemetryTriggerType,
+    markPrice: primaryRow.entry_price,
+    compositeScore: primaryRow.composite_score,
+    convictionArchetype: deriveConvictionArchetype(primaryRow.composite_score),
+    consensusSide: primaryRow.consensus_side,
+    noiseBandActive: false,
+    macroVetoActive: false,
+    activeFactors,
+    collinearFactors,
+  };
+}
+
+/**
+ * Repository for Next-Gen orthogonal factor telemetry records and horizon outcome tracking.
+ */
+export class FactorTelemetryRecordsRepo {
+  constructor(private db: DatabaseSync) {}
+
+  /**
+   * Atomically persists a FactorTelemetryEvent as factor-level evaluation rows
+   * with nullable decision_log_id and full payload JSON on the primary row.
+   */
+  public insertEventBatch(
+    event: FactorTelemetryEvent,
+    decisionLogId?: string | null
+  ): number[] {
+    const eventId = event.eventId && event.eventId.length > 0 ? event.eventId : randomUUID();
+    const resolvedDecisionLogId = decisionLogId ?? null;
+    const factorRows = buildFactorRows(event);
+    const payloadJson = JSON.stringify({ ...event, eventId });
+
+    return runTransaction(this.db, () => {
+      const stmt = this.db.prepare(`
+        INSERT INTO factor_telemetry_records (
+          decision_log_id, event_id, trigger_type, timestamp, symbol,
+          consensus_side, entry_price, composite_score, factor_id,
+          raw_alpha, orthogonal_alpha, effective_weight, is_collinear,
+          confidence, summary_text, telemetry_payload_json, status
+        ) VALUES (
+          ?, ?, ?, ?, ?,
+          ?, ?, ?, ?,
+          ?, ?, ?, ?,
+          ?, ?, ?, 'EVALUATING'
+        )
+      `);
+
+      const insertedIds: number[] = [];
+      for (let i = 0; i < factorRows.length; i++) {
+        const row = factorRows[i]!;
+        const info = stmt.run(
+          resolvedDecisionLogId,
+          eventId,
+          event.triggerType,
+          event.timestamp,
+          event.symbol,
+          event.consensusSide,
+          event.markPrice,
+          event.compositeScore,
+          row.factorId,
+          row.rawAlpha,
+          row.orthogonalAlpha,
+          row.effectiveWeight,
+          row.isCollinear,
+          row.confidence,
+          row.summaryText,
+          i === 0 ? payloadJson : null
+        );
+        insertedIds.push(Number(info.lastInsertRowid));
+      }
+      return insertedIds;
+    });
+  }
+
+  /**
+   * Lists all factor telemetry records awaiting post-trade horizon settlement.
+   */
+  public getPendingEvaluations(symbol?: string): FactorTelemetryDbRecord[] {
+    if (symbol) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM factor_telemetry_records
+        WHERE status = 'EVALUATING' AND symbol = ?
+        ORDER BY timestamp ASC, id ASC
+      `);
+      return stmt.all(symbol) as unknown as FactorTelemetryDbRecord[];
+    }
+    const stmt = this.db.prepare(`
+      SELECT * FROM factor_telemetry_records
+      WHERE status = 'EVALUATING'
+      ORDER BY timestamp ASC, id ASC
+    `);
+    return stmt.all() as unknown as FactorTelemetryDbRecord[];
+  }
+
+  /**
+   * Updates post-trade horizon MFE/MAE excursions and settlement state for a factor record.
+   */
+  public updateHorizonExcursions(id: number, patch: FactorHorizonExcursionPatch): void {
+    const clauses: string[] = [];
+    const values: Array<string | number | null> = [];
+
+    for (const col of HORIZON_PATCH_COLUMNS) {
+      const val = patch[col];
+      if (val !== undefined) {
+        clauses.push(`${col} = ?`);
+        values.push(val);
+      }
+    }
+
+    if (clauses.length === 0) return;
+
+    const stmt = this.db.prepare(
+      `UPDATE factor_telemetry_records SET ${clauses.join(', ')} WHERE id = ?`
+    );
+    stmt.run(...values, id);
+  }
+
+  /**
+   * Retrieves the most recent settled factor records for IC/IR attribution queries.
+   */
+  public getSettledByFactor(factorId: string, limit: number = 60): FactorTelemetryDbRecord[] {
+    const safeLimit = Math.max(0, Math.floor(limit));
+    if (safeLimit === 0) return [];
+
+    const stmt = this.db.prepare(`
+      SELECT * FROM factor_telemetry_records
+      WHERE factor_id = ? AND status = 'SETTLED'
+      ORDER BY timestamp DESC, id DESC
+      LIMIT ?
+    `);
+    return stmt.all(factorId, safeLimit) as unknown as FactorTelemetryDbRecord[];
+  }
+
+  /**
+   * Reconstructs distinct FactorTelemetryEvent objects ordered newest-first with pagination.
+   */
+  public listRecentEvents(
+    sinceMs: number,
+    limit: number = 50,
+    offset: number = 0
+  ): FactorTelemetryEvent[] {
+    const safeLimit = Math.max(0, Math.floor(limit));
+    const safeOffset = Math.max(0, Math.floor(offset));
+    if (safeLimit === 0) return [];
+
+    const eventKeys = this.db
+      .prepare(`
+        SELECT event_id, MAX(timestamp) AS max_ts, MIN(id) AS min_id
+        FROM factor_telemetry_records
+        WHERE timestamp >= ?
+        GROUP BY event_id
+        ORDER BY max_ts DESC, min_id DESC
+        LIMIT ? OFFSET ?
+      `)
+      .all(sinceMs, safeLimit, safeOffset) as Array<{ event_id: string }>;
+
+    if (eventKeys.length === 0) return [];
+
+    const placeholders = eventKeys.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(`
+        SELECT * FROM factor_telemetry_records
+        WHERE event_id IN (${placeholders})
+        ORDER BY id ASC
+      `)
+      .all(...eventKeys.map((k) => k.event_id)) as unknown as FactorTelemetryDbRecord[];
+
+    const grouped = new Map<string, FactorTelemetryDbRecord[]>();
+    for (const row of rows) {
+      let bucket = grouped.get(row.event_id);
+      if (!bucket) {
+        bucket = [];
+        grouped.set(row.event_id, bucket);
+      }
+      bucket.push(row);
+    }
+
+    const events: FactorTelemetryEvent[] = [];
+    for (const { event_id } of eventKeys) {
+      const eventRows = grouped.get(event_id);
+      if (eventRows && eventRows.length > 0) {
+        events.push(reconstructEventFromRows(eventRows));
+      }
+    }
+    return events;
+  }
+
+  /**
+   * Deletes expired SUB_THRESHOLD_IMPULSE rows older than retentionDays while
+   * preserving executed and confirmed trade telemetry indefinitely.
+   */
+  public pruneOldSubThresholdImpulses(retentionDays: number = 7): number {
+    const cutoffMs = Date.now() - retentionDays * 86_400_000;
+    const stmt = this.db.prepare(`
+      DELETE FROM factor_telemetry_records
+      WHERE trigger_type = 'SUB_THRESHOLD_IMPULSE' AND timestamp < ?
+    `);
+    const result = stmt.run(cutoffMs) as { changes?: number | bigint };
+    return Number(result.changes ?? 0);
   }
 }
 

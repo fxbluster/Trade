@@ -15,6 +15,9 @@ import type {
   FactorDetail,
   FactorEvaluationContext,
   NoiseBandTelemetry,
+  QuantConvictionArchetype,
+  FactorStateDetail,
+  FactorTelemetryEvent,
 } from '@tradeos/shared';
 import { calculateCompositeConfluenceScore, EMPIRICAL_CONFLUENCE_WEIGHTS } from '@tradeos/shared';
 import { HierarchicalMtfManager } from './hierarchicalMtfManager.js';
@@ -345,6 +348,27 @@ export class ConfluenceEngine {
       },
     }));
 
+    const macroVetoReason = macroVetoActive
+      ? p1Macro.valueText || `Macro Regime: ${macroRegime}`
+      : eventBlackoutActive
+        ? gateCheck.details
+        : undefined;
+
+    const telemetryEvent = synthesizeTelemetryEvent({
+      timestamp: now,
+      symbol: symbol.toUpperCase(),
+      markPrice: currentPrice,
+      compositeScore,
+      consensusBias,
+      mathBias,
+      consensusMet,
+      noiseBandActive,
+      macroVetoActive,
+      macroVetoReason,
+      alphaDetails: alphaEval?.details,
+      pillars,
+    });
+
     const snapshot: ConfluenceSnapshot = {
       symbol: symbol.toUpperCase(),
       pillars,
@@ -367,6 +391,7 @@ export class ConfluenceEngine {
       noiseBand: noiseBandTelemetry,
       factorOutputs,
       factorDetails,
+      telemetryEvent,
     };
 
     this.latestSnapshot = snapshot;
@@ -501,4 +526,107 @@ export class ConfluenceEngine {
       }
     }
   }
+}
+
+export function mapConvictionArchetype(compositeScore: number): QuantConvictionArchetype {
+  if (compositeScore >= 95) return 'A_PLUS_INSTITUTIONAL';
+  if (compositeScore >= 85) return 'HIGH_CONVICTION_CORE';
+  if (compositeScore >= 75) return 'STANDARD_INSTITUTIONAL';
+  if (compositeScore >= 70) return 'EXPLORATORY_PROBE';
+  return 'SUB_THRESHOLD';
+}
+
+export function synthesizeTelemetryEvent(params: {
+  timestamp: number;
+  symbol: string;
+  markPrice: number;
+  compositeScore: number;
+  consensusBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  mathBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  consensusMet: boolean;
+  noiseBandActive: boolean;
+  macroVetoActive: boolean;
+  macroVetoReason?: string;
+  alphaDetails?: FactorDetail[];
+  pillars: PillarEvaluation[];
+}): FactorTelemetryEvent {
+  const {
+    timestamp,
+    symbol,
+    markPrice,
+    compositeScore,
+    consensusBias,
+    mathBias,
+    consensusMet,
+    noiseBandActive,
+    macroVetoActive,
+    macroVetoReason,
+    alphaDetails,
+    pillars,
+  } = params;
+
+  const effectiveBias = consensusBias !== 'NEUTRAL' ? consensusBias : mathBias;
+  const consensusSide: FactorTelemetryEvent['consensusSide'] =
+    effectiveBias === 'BULLISH' ? 'BUY' : effectiveBias === 'BEARISH' ? 'SELL' : 'NEUTRAL';
+
+  let activeFactors: FactorStateDetail[];
+  let collinearFactors: string[];
+
+  if (alphaDetails && alphaDetails.length > 0) {
+    activeFactors = alphaDetails
+      .filter((d) => !d.isCollinear)
+      .map((d) => {
+        const matchedPillar = pillars.find((p) => p.id === d.factorId);
+        const summaryText = matchedPillar?.valueText
+          ? `${matchedPillar.valueText} (IR ${d.informationRatio.toFixed(2)})`
+          : `${d.bias} α=${d.orthogonalAlpha.toFixed(2)} (IR ${d.informationRatio.toFixed(2)})`;
+        return {
+          factorId: d.factorId,
+          name: d.name,
+          bias: d.bias,
+          rawAlpha: d.rawAlpha,
+          orthogonalAlpha: d.orthogonalAlpha,
+          effectiveWeight: d.posteriorWeight,
+          isCollinear: false,
+          confidence: d.confidence,
+          summaryText,
+        };
+      });
+    collinearFactors = alphaDetails.filter((d) => d.isCollinear).map((d) => d.name);
+  } else {
+    const rawWeights = pillars.map((p) => EMPIRICAL_CONFLUENCE_WEIGHTS[p.id] ?? 1 / Math.max(1, pillars.length));
+    const totalWeight = rawWeights.reduce((sum, w) => sum + w, 0) || 1;
+    activeFactors = pillars.map((p, idx) => {
+      const signedMag = Math.max(0, Math.min(1, Math.abs(p.score - 50) / 50));
+      const signedAlpha =
+        p.bias === 'BULLISH' ? signedMag : p.bias === 'BEARISH' ? -signedMag : 0;
+      return {
+        factorId: p.id,
+        name: p.title,
+        bias: p.bias,
+        rawAlpha: Number(signedAlpha.toFixed(4)),
+        orthogonalAlpha: Number(signedAlpha.toFixed(4)),
+        effectiveWeight: Number(((rawWeights[idx] ?? 0) / totalWeight).toFixed(4)),
+        isCollinear: false,
+        confidence: Number(Math.max(0, Math.min(1, p.score / 100)).toFixed(4)),
+        summaryText: p.valueText || p.subText || p.title,
+      };
+    });
+    collinearFactors = [];
+  }
+
+  return {
+    timestamp,
+    symbol,
+    triggerType: compositeScore >= 70 && consensusMet ? 'SIGNAL_CONFIRMED' : 'SUB_THRESHOLD_IMPULSE',
+    markPrice,
+    compositeScore,
+    convictionArchetype: mapConvictionArchetype(compositeScore),
+    consensusSide,
+    noiseBandActive,
+    macroVetoActive,
+    ...(macroVetoReason ? { macroVetoReason } : {}),
+    activeFactors,
+    collinearFactors,
+  };
 }

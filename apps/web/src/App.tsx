@@ -74,6 +74,9 @@ export const App: React.FC = () => {
       onAutoPilotStatus: (status) => {
         useMarketStore.getState().setAutoPilotStatus(status);
       },
+      onFactorTelemetry: (ev) => {
+        useMarketStore.getState().addTelemetryEvent(ev);
+      },
       onStatusChange: (status) => {
         useMarketStore.getState().setWsStatus(status);
       },

@@ -11,11 +11,12 @@
  * - Worker messaging, VaR 95%, and Max Drawdown confidence intervals
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   StrategyDecayEngine,
   type FactorDecayState,
 } from '../src/quant/strategyDecayEngine.js';
+import { AlphaRegistry } from '../src/quant/alphaRegistry.js';
 
 describe('StrategyDecayEngine & CUSUM Change-Point Detection', () => {
   let engine: StrategyDecayEngine;
@@ -269,6 +270,96 @@ describe('StrategyDecayEngine & CUSUM Change-Point Detection', () => {
 
       expect(response.success).toBe(false);
       expect(response.error).toContain('Empty or invalid returns');
+    });
+  });
+
+  describe('IDLE Synchronization Barrier', () => {
+    it('queues decayed factor weights on CUSUM trigger and blocks application during LIMIT_CHASING and POSITION_OPEN until IDLE', () => {
+      engine.registerFactor('ORDER_FLOW_L2', 0.40, {
+        mu0: 0.0,
+        sigma: 1.0,
+        minWeightFloor: 0.05,
+      });
+
+      // Trigger CUSUM decay: (5.0 - 0.0) - 0.5 = 4.5 > 4.0 -> 0.40 * 0.5 = 0.20
+      const res = engine.updateFactor('ORDER_FLOW_L2', 5.0);
+      expect(res.triggered).toBe(true);
+      expect(res.currentWeight).toBeCloseTo(0.20, 4);
+      expect(engine.getPendingWeightUpdates()).toEqual({ ORDER_FLOW_L2: 0.20 });
+
+      const applyFn = vi.fn();
+
+      // Blocked during active chasing or open position
+      expect(engine.flushPendingWeightsIfIdle('LIMIT_CHASING', applyFn)).toBe(false);
+      expect(applyFn).not.toHaveBeenCalled();
+      expect(engine.getPendingWeightUpdates()).toEqual({ ORDER_FLOW_L2: 0.20 });
+
+      expect(engine.flushPendingWeightsIfIdle('POSITION_OPEN', applyFn)).toBe(false);
+      expect(applyFn).not.toHaveBeenCalled();
+      expect(engine.getPendingWeightUpdates()).toEqual({ ORDER_FLOW_L2: 0.20 });
+
+      // Applied when AutoPilot transitions to IDLE and queue is cleared
+      expect(engine.flushPendingWeightsIfIdle('IDLE', applyFn)).toBe(true);
+      expect(applyFn).toHaveBeenCalledTimes(1);
+      expect(applyFn).toHaveBeenCalledWith({ ORDER_FLOW_L2: 0.20 });
+      expect(engine.getPendingWeightUpdates()).toEqual({});
+
+      // Subsequent IDLE flush with empty queue returns false and does not re-apply
+      expect(engine.flushPendingWeightsIfIdle('IDLE', applyFn)).toBe(false);
+      expect(applyFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not queue pending updates when CUSUM update does not trigger decay', () => {
+      engine.registerFactor('MACRO_REGIME', 0.25, { mu0: 0.0, sigma: 1.0 });
+
+      const res = engine.updateFactor('MACRO_REGIME', 0.2);
+      expect(res.triggered).toBe(false);
+      expect(engine.getPendingWeightUpdates()).toEqual({});
+
+      const applyFn = vi.fn();
+      expect(engine.flushPendingWeightsIfIdle('IDLE', applyFn)).toBe(false);
+      expect(applyFn).not.toHaveBeenCalled();
+    });
+
+    it('queues manual setFactorWeight changes (clamped to floor) and syncs with AlphaRegistry at IDLE', () => {
+      const registry = new AlphaRegistry();
+      registry.registerFactor({
+        id: 'CVD_ABSORPTION',
+        name: 'CVD Absorption',
+        defaultWeight: 0.30,
+        initialize: async () => {},
+        warmup: () => {},
+        computeFactor: () => ({
+          factorId: 'CVD_ABSORPTION',
+          bias: 'NEUTRAL',
+          rawAlpha: 0,
+          confidence: 0.5,
+          uncertainty: 0.5,
+          halfLifeMs: 60_000,
+          metadata: {},
+        }),
+        onCandleClosed: () => {},
+        teardown: async () => {},
+      });
+
+      engine.registerFactor('CVD_ABSORPTION', 0.30, { minWeightFloor: 0.05 });
+      engine.setFactorWeight('CVD_ABSORPTION', 0.01);
+
+      expect(engine.getPendingWeightUpdates()).toEqual({ CVD_ABSORPTION: 0.05 });
+      expect(
+        engine.flushPendingWeightsIfIdle('EVALUATING', (w) =>
+          registry.applyCalibratedWeights(w)
+        )
+      ).toBe(false);
+      expect(registry.getCalibratedWeight('CVD_ABSORPTION')).toBeCloseTo(0.30, 6);
+
+      expect(
+        engine.flushPendingWeightsIfIdle('IDLE', (w) =>
+          registry.applyCalibratedWeights(w)
+        )
+      ).toBe(true);
+      expect(registry.getCalibratedWeight('CVD_ABSORPTION')).toBeCloseTo(0.05, 6);
+      expect(engine.getPendingWeightUpdates()).toEqual({});
     });
   });
 });

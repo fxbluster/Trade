@@ -11,6 +11,12 @@ import type {
   SizingBreakdown,
   ChasingOrderState,
   AutoPilotState,
+  FactorTelemetryEvent,
+  FactorStateDetail,
+  QuantConvictionArchetype,
+  ChasingTelemetrySnapshot,
+  SizingTelemetrySnapshot,
+  MacroRegime,
 } from '@tradeos/shared';
 import { calculateLiquidationPrice } from '@tradeos/shared';
 import { TradesRepo, SettingsRepo, ExecutionChaseLogsRepo } from '../db/sqlite.js';
@@ -22,6 +28,27 @@ import type { ChasingExecutionEngine } from './chasingExecutionEngine.js';
 import type { TwapExecutionSlicer } from './twapExecutionSlicer.js';
 
 export type { AutoPilotState };
+
+export interface AutoPilotOrderDispatchEvent {
+  symbol: string;
+  side: TradeSide;
+  action: 'EXECUTED' | 'FAILED';
+  price: number;
+  marginUsd: number;
+  leverage: number;
+  atr: number;
+  tradeId?: string;
+  errorMessage?: string;
+  compositeScore?: number;
+  pillarsJson?: string;
+  macroRegime?: MacroRegime;
+  macroVetoActive?: boolean;
+  vetoReasonsJson?: string;
+  factorTelemetryJson?: string | null;
+  executionChaseJson?: string | null;
+  sizingBreakdownJson?: string | null;
+  noiseBandState?: number | boolean;
+}
 
 export interface AutoPilotManagerOptions {
   db: DatabaseSync;
@@ -36,17 +63,9 @@ export interface AutoPilotManagerOptions {
   chasingExecutionEngine?: ChasingExecutionEngine;
   twapExecutionSlicer?: TwapExecutionSlicer;
   executionChaseLogsRepo?: ExecutionChaseLogsRepo;
-  onOrderDispatched?: (event: {
-    symbol: string;
-    side: TradeSide;
-    action: 'EXECUTED' | 'FAILED';
-    price: number;
-    marginUsd: number;
-    leverage: number;
-    atr: number;
-    tradeId?: string;
-    errorMessage?: string;
-  }) => void;
+  onOrderDispatched?: (event: AutoPilotOrderDispatchEvent) => void;
+  onTelemetryEvent?: (event: FactorTelemetryEvent) => void;
+  onStateTransition?: (newState: AutoPilotState | string) => void;
 }
 
 /**
@@ -70,17 +89,9 @@ export class AutoPilotManager {
   private getMarkPriceFn: (symbol: string) => number;
   private getAtrFn?: (symbol: string) => number;
   private broadcastWsFn?: (msg: WsServerMessage) => void;
-  private onOrderDispatched?: (event: {
-    symbol: string;
-    side: TradeSide;
-    action: 'EXECUTED' | 'FAILED';
-    price: number;
-    marginUsd: number;
-    leverage: number;
-    atr: number;
-    tradeId?: string;
-    errorMessage?: string;
-  }) => void;
+  private onOrderDispatched?: (event: AutoPilotOrderDispatchEvent) => void;
+  private onTelemetryEvent?: (event: FactorTelemetryEvent) => void;
+  private onStateTransition?: (newState: AutoPilotState | string) => void;
 
   private tradesRepo: TradesRepo;
   private settingsRepo: SettingsRepo;
@@ -90,6 +101,15 @@ export class AutoPilotManager {
   public readonly twapExecutionSlicer?: TwapExecutionSlicer;
   private latestSizingBreakdown: SizingBreakdown | null = null;
   private latestChasingState: ChasingOrderState | null = null;
+  private activeEntryContext: {
+    symbol: string;
+    side: TradeSide;
+    markPrice: number;
+    notionalUsd: number;
+    snapshot: ConfluenceSnapshot | null;
+    sizing: SizingTelemetrySnapshot;
+  } | null = null;
+  private lastEmittedChaseKey: string | null = null;
 
   private state: AutoPilotState = 'IDLE';
   private blockReason: BlockReason | null = null;
@@ -126,6 +146,8 @@ export class AutoPilotManager {
     this.getAtrFn = options.getAtr;
     this.broadcastWsFn = options.broadcastWs;
     this.onOrderDispatched = options.onOrderDispatched;
+    this.onTelemetryEvent = options.onTelemetryEvent;
+    this.onStateTransition = options.onStateTransition;
     this.adaptiveSizingEngine = options.adaptiveSizingEngine;
     this.chasingExecutionEngine = options.chasingExecutionEngine;
     this.twapExecutionSlicer = options.twapExecutionSlicer;
@@ -136,9 +158,39 @@ export class AutoPilotManager {
     this.settingsRepo = new SettingsRepo(this.db);
 
     if (this.chasingExecutionEngine) {
-      this.chasingExecutionEngine.setOnStateUpdate((state) => {
-        this.latestChasingState = state;
+      this.chasingExecutionEngine.setOnStateUpdate((chaseState) => {
+        this.latestChasingState = chaseState;
         this.broadcastStatus();
+
+        if (chaseState.status !== 'FILLED') {
+          const isRedundantPostAmend =
+            chaseState.status === 'CHASING' &&
+            chaseState.amendCount > 0 &&
+            this.lastEmittedChaseKey === `${chaseState.orderId ?? ''}:${chaseState.amendCount}`;
+          if (isRedundantPostAmend) {
+            return;
+          }
+          if (chaseState.status === 'AMENDING') {
+            this.lastEmittedChaseKey = `${chaseState.orderId ?? ''}:${chaseState.amendCount}`;
+          }
+
+          const ctx = this.activeEntryContext;
+          const notionalUsd = ctx?.notionalUsd ?? 0;
+          const chasingTelemetry = this.buildChasingTelemetry(chaseState, notionalUsd);
+          const snap = ctx?.snapshot ?? this.confluenceEngine.getSnapshot(chaseState.symbol);
+          const ev = this.buildTelemetryEvent(
+            'ORDER_AMENDED',
+            chaseState.symbol,
+            chaseState.anchorPrice || ctx?.markPrice || this.getMarkPriceFn(chaseState.symbol),
+            chaseState.side,
+            snap,
+            {
+              chasingTelemetry,
+              sizingTelemetry: ctx?.sizing,
+            }
+          );
+          this.emitTelemetry(ev);
+        }
       });
     }
 
@@ -219,6 +271,7 @@ export class AutoPilotManager {
   }
 
   public setEnabled(enabled: boolean): void {
+    const prevState = this.state;
     this.config.enabled = enabled;
     if (!enabled && this.state === 'COOLDOWN_ACTIVE') {
       // Keep cooldown state intact
@@ -231,6 +284,9 @@ export class AutoPilotManager {
     } catch {}
 
     this.broadcastStatus();
+    if (prevState !== this.state) {
+      this.emitStateTransition(this.state);
+    }
   }
 
   public setActiveSymbol(symbol: string): void {
@@ -246,12 +302,16 @@ export class AutoPilotManager {
     this.cooldownUntil = 0;
     this.consecutiveLosses = 0;
     this.settingsRepo.delete('autopilot_cooldown_until');
+    const prevState = this.state;
     if (this.state === 'COOLDOWN_ACTIVE') {
       this.state = 'IDLE';
       this.blockReason = null;
       this.statusMessage = null;
     }
     this.broadcastStatus();
+    if (prevState !== this.state) {
+      this.emitStateTransition(this.state);
+    }
   }
 
   public getCooldownRemainingSec(): number {
@@ -290,8 +350,154 @@ export class AutoPilotManager {
       if (this.state === 'COOLDOWN_ACTIVE') {
         this.state = 'IDLE';
         this.broadcastStatus();
+        this.emitStateTransition('IDLE');
       }
     }
+  }
+
+  private emitStateTransition(newState: AutoPilotState): void {
+    try {
+      this.onStateTransition?.(newState);
+    } catch {
+      // Tolerated listener failure
+    }
+  }
+
+  private emitTelemetry(event: FactorTelemetryEvent): void {
+    try {
+      this.onTelemetryEvent?.(event);
+    } catch {
+      // Tolerated listener failure
+    }
+  }
+
+  private mapConvictionArchetype(score: number): QuantConvictionArchetype {
+    if (score >= 95) return 'A_PLUS_INSTITUTIONAL';
+    if (score >= 85) return 'HIGH_CONVICTION_CORE';
+    if (score >= 75) return 'STANDARD_INSTITUTIONAL';
+    if (score >= 70) return 'EXPLORATORY_PROBE';
+    return 'SUB_THRESHOLD';
+  }
+
+  private mapChasingStatus(status: ChasingOrderState['status']): ChasingTelemetrySnapshot['status'] {
+    switch (status) {
+      case 'FILLED':
+        return 'FILLED';
+      case 'CANCELLED':
+        return 'CANCELED';
+      case 'TIMEOUT':
+      case 'FAILED':
+        return 'ABORTED';
+      case 'CHASING':
+      case 'AMENDING':
+        return 'AMENDING';
+      default:
+        return 'PENDING';
+    }
+  }
+
+  private buildChasingTelemetry(
+    chaseState: ChasingOrderState,
+    notionalUsd: number,
+    overrides: Partial<ChasingTelemetrySnapshot> = {}
+  ): ChasingTelemetrySnapshot {
+    const tickSize = this.chasingExecutionEngine?.getTickSize?.() ?? 0.01;
+    const spreadPennyJumps =
+      tickSize > 0
+        ? Math.max(0, Math.round(Math.abs(chaseState.currentLimitPrice - chaseState.anchorPrice) / tickSize))
+        : 0;
+    const defaultFee = Number((notionalUsd * 0.0002).toFixed(4));
+    const defaultSaved = Number((notionalUsd * 0.0003).toFixed(4));
+
+    return {
+      orderId: chaseState.orderId ?? undefined,
+      status: this.mapChasingStatus(chaseState.status),
+      anchorMarkPrice: chaseState.anchorPrice,
+      currentLimitPrice: chaseState.currentLimitPrice,
+      spreadPennyJumps,
+      amendmentCount: chaseState.amendCount,
+      durationMs: Math.max(0, Date.now() - chaseState.startTime),
+      realizedFeeUsd: defaultFee,
+      feeSavedVsTakerUsd: chaseState.feeSavedUsd > 0 ? chaseState.feeSavedUsd : defaultSaved,
+      ...overrides,
+    };
+  }
+
+  private buildSizingTelemetry(
+    sizing: SizingBreakdown | null,
+    marginUsd: number,
+    marginAllocationPct: number
+  ): SizingTelemetrySnapshot {
+    if (sizing) {
+      return {
+        allocatedMarginUsd: sizing.marginUsd,
+        allocatedMarginPct: Number((sizing.finalMarginPct * 100).toFixed(2)),
+        baseConvictionMargin: sizing.rawMarginPct,
+        quarterKellyMultiplier: sizing.kellyDampener,
+        volatilityParityMultiplier: sizing.volatilityParity,
+        circuitBreakerMultiplier: sizing.circuitMultiplier,
+        solvencyAirbagOk: sizing.solvencyAirbagOk,
+      };
+    }
+    return {
+      allocatedMarginUsd: marginUsd,
+      allocatedMarginPct: Number(marginAllocationPct.toFixed(2)),
+      baseConvictionMargin: Number((marginAllocationPct / 100).toFixed(4)),
+      quarterKellyMultiplier: 1,
+      volatilityParityMultiplier: 1,
+      circuitBreakerMultiplier: 1,
+      solvencyAirbagOk: true,
+    };
+  }
+
+  private buildTelemetryEvent(
+    triggerType: FactorTelemetryEvent['triggerType'],
+    symbol: string,
+    markPrice: number,
+    side: TradeSide | 'NEUTRAL',
+    snapshot: ConfluenceSnapshot | null | undefined,
+    extra: {
+      chasingTelemetry?: ChasingTelemetrySnapshot;
+      sizingTelemetry?: SizingTelemetrySnapshot;
+    } = {}
+  ): FactorTelemetryEvent {
+    const base = snapshot?.telemetryEvent;
+    const compositeScore = base?.compositeScore ?? snapshot?.compositeScore ?? 75;
+    const activeFactors: FactorStateDetail[] = base?.activeFactors
+      ? base.activeFactors.map((f) => ({ ...f }))
+      : (snapshot?.factorDetails ?? [])
+          .filter((d) => !d.isCollinear)
+          .map((d) => ({
+            factorId: d.factorId,
+            name: d.name,
+            bias: d.bias,
+            rawAlpha: d.rawAlpha,
+            orthogonalAlpha: d.orthogonalAlpha,
+            effectiveWeight: d.posteriorWeight,
+            isCollinear: false,
+            confidence: d.confidence,
+            summaryText: `${d.bias} α=${d.orthogonalAlpha.toFixed(2)}`,
+          }));
+    const collinearFactors: string[] = base?.collinearFactors
+      ? [...base.collinearFactors]
+      : (snapshot?.factorDetails ?? []).filter((d) => d.isCollinear).map((d) => d.name);
+
+    return {
+      timestamp: Date.now(),
+      symbol: symbol.toUpperCase(),
+      triggerType,
+      markPrice,
+      compositeScore,
+      convictionArchetype: base?.convictionArchetype ?? this.mapConvictionArchetype(compositeScore),
+      consensusSide: side,
+      noiseBandActive: Boolean(base?.noiseBandActive ?? snapshot?.noiseBandActive ?? snapshot?.noiseBand?.active),
+      macroVetoActive: Boolean(base?.macroVetoActive ?? snapshot?.macroVetoActive),
+      ...(base?.macroVetoReason ? { macroVetoReason: base.macroVetoReason } : {}),
+      activeFactors,
+      collinearFactors,
+      ...(extra.chasingTelemetry ? { chasingTelemetry: extra.chasingTelemetry } : {}),
+      ...(extra.sizingTelemetry ? { sizingTelemetry: extra.sizingTelemetry } : {}),
+    };
   }
 
   private broadcastStatus(): void {
@@ -560,6 +766,35 @@ export class AutoPilotManager {
       const targetQty = Number((notionalUsd / markPrice).toFixed(4));
       const refPrice = this.chasingExecutionEngine ? markPrice : limitPrice;
 
+      const sizingTelemetry = this.buildSizingTelemetry(
+        this.adaptiveSizingEngine ? this.latestSizingBreakdown : null,
+        marginUsd,
+        marginAllocationPct
+      );
+      this.activeEntryContext = {
+        symbol,
+        side,
+        markPrice,
+        notionalUsd,
+        snapshot: snapshot ?? null,
+        sizing: sizingTelemetry,
+      };
+      this.lastEmittedChaseKey = null;
+
+      const signalConfirmedEvent = this.buildTelemetryEvent(
+        'SIGNAL_CONFIRMED',
+        symbol,
+        markPrice,
+        side,
+        snapshot,
+        { sizingTelemetry }
+      );
+      this.emitTelemetry(signalConfirmedEvent);
+
+      const serializedFactorTelemetry = JSON.stringify(signalConfirmedEvent.activeFactors);
+      const serializedSizingBreakdown = JSON.stringify(sizingTelemetry);
+      const noiseBandState = signalConfirmedEvent.noiseBandActive ? 1 : 0;
+
       // Dead-SL Armor Clamping:
       const estLiq = calculateLiquidationPrice(side, refPrice, leverage, 0.005);
       const rawSl = side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr;
@@ -701,23 +936,50 @@ export class AutoPilotManager {
         }
 
         const feeSavedUsd = Number((notionalUsd * 0.0003).toFixed(4));
+        const chaseDurationMs = Date.now() - startTime;
 
         this.executionChaseLogsRepo.insert({
           trade_id: tradeId,
           symbol,
           anchor_price: markPrice,
           amend_count: amendCount,
-          duration_ms: Date.now() - startTime,
+          duration_ms: chaseDurationMs,
           final_status: finalStatus,
           effective_price: effectivePrice,
           fee_saved_usd: finalStatus === 'FILLED' ? feeSavedUsd : 0,
           created_at: Date.now(),
         });
 
+        const tickSize = this.chasingExecutionEngine.getTickSize?.() ?? 0.01;
+        const spreadPennyJumps =
+          tickSize > 0
+            ? Math.max(0, Math.round(Math.abs(effectivePrice - markPrice) / tickSize))
+            : 0;
+        const realizedFeeUsd = Number((notionalUsd * 0.0002).toFixed(4));
+        const finalChasingTelemetry: ChasingTelemetrySnapshot = {
+          orderId: this.latestChasingState?.orderId ?? tradeId,
+          status:
+            finalStatus === 'FILLED'
+              ? 'FILLED'
+              : finalStatus === 'CANCELLED'
+                ? 'CANCELED'
+                : 'ABORTED',
+          anchorMarkPrice: markPrice,
+          currentLimitPrice: effectivePrice,
+          spreadPennyJumps,
+          amendmentCount: amendCount,
+          durationMs: chaseDurationMs,
+          realizedFeeUsd: finalStatus === 'FILLED' ? realizedFeeUsd : 0,
+          feeSavedVsTakerUsd: finalStatus === 'FILLED' ? feeSavedUsd : 0,
+        };
+        const serializedChaseTelemetry = JSON.stringify(finalChasingTelemetry);
+
         if (finalStatus !== 'FILLED' && executedQty <= 0) {
           this.state = 'IDLE';
           this.openTradeId = null;
+          this.activeEntryContext = null;
           this.broadcastStatus();
+          this.emitStateTransition('IDLE');
           this.onOrderDispatched?.({
             symbol,
             side,
@@ -727,6 +989,14 @@ export class AutoPilotManager {
             leverage,
             atr,
             errorMessage: `Maker Limit Chasing ended with status: ${finalStatus}`,
+            compositeScore: snapshot?.compositeScore,
+            pillarsJson: snapshot?.pillars ? JSON.stringify(snapshot.pillars) : undefined,
+            macroRegime: snapshot?.macroRegime,
+            macroVetoActive: snapshot?.macroVetoActive,
+            factorTelemetryJson: serializedFactorTelemetry,
+            executionChaseJson: serializedChaseTelemetry,
+            sizingBreakdownJson: serializedSizingBreakdown,
+            noiseBandState,
           });
           return;
         }
@@ -835,6 +1105,20 @@ export class AutoPilotManager {
         this.state = 'POSITION_OPEN';
         this.oppositeConsensusTickCount = 0;
         this.broadcastStatus();
+        this.emitStateTransition('POSITION_OPEN');
+
+        const enteredEvent = this.buildTelemetryEvent(
+          'POSITION_ENTERED',
+          symbol,
+          effectivePrice,
+          side,
+          snapshot,
+          {
+            chasingTelemetry: finalChasingTelemetry,
+            sizingTelemetry,
+          }
+        );
+        this.emitTelemetry(enteredEvent);
 
         this.onOrderDispatched?.({
           symbol,
@@ -845,6 +1129,14 @@ export class AutoPilotManager {
           leverage,
           atr,
           tradeId,
+          compositeScore: snapshot?.compositeScore,
+          pillarsJson: snapshot?.pillars ? JSON.stringify(snapshot.pillars) : undefined,
+          macroRegime: snapshot?.macroRegime,
+          macroVetoActive: snapshot?.macroVetoActive,
+          factorTelemetryJson: serializedFactorTelemetry,
+          executionChaseJson: serializedChaseTelemetry,
+          sizingBreakdownJson: serializedSizingBreakdown,
+          noiseBandState,
         });
       } else {
         const limitPrice = Number(
@@ -874,6 +1166,17 @@ export class AutoPilotManager {
         this.state = 'POSITION_OPEN';
         this.oppositeConsensusTickCount = 0;
         this.broadcastStatus();
+        this.emitStateTransition('POSITION_OPEN');
+
+        const enteredEvent = this.buildTelemetryEvent(
+          'POSITION_ENTERED',
+          symbol,
+          limitPrice,
+          side,
+          snapshot,
+          { sizingTelemetry }
+        );
+        this.emitTelemetry(enteredEvent);
 
         this.onOrderDispatched?.({
           symbol,
@@ -884,14 +1187,25 @@ export class AutoPilotManager {
           leverage,
           atr,
           tradeId: trade.id,
+          compositeScore: snapshot?.compositeScore,
+          pillarsJson: snapshot?.pillars ? JSON.stringify(snapshot.pillars) : undefined,
+          macroRegime: snapshot?.macroRegime,
+          macroVetoActive: snapshot?.macroVetoActive,
+          factorTelemetryJson: serializedFactorTelemetry,
+          executionChaseJson: null,
+          sizingBreakdownJson: serializedSizingBreakdown,
+          noiseBandState,
         });
       }
     } catch (err: any) {
       this.state = 'IDLE';
       this.openTradeId = null;
+      this.activeEntryContext = null;
       this.broadcastStatus();
+      this.emitStateTransition('IDLE');
 
       const errorMessage = err instanceof Error ? err.message : String(err);
+      const snap = this.confluenceEngine.getSnapshot(symbol);
       this.onOrderDispatched?.({
         symbol,
         side,
@@ -901,6 +1215,17 @@ export class AutoPilotManager {
         leverage,
         atr,
         errorMessage,
+        compositeScore: snap?.compositeScore,
+        pillarsJson: snap?.pillars ? JSON.stringify(snap.pillars) : undefined,
+        macroRegime: snap?.macroRegime,
+        macroVetoActive: snap?.macroVetoActive,
+        factorTelemetryJson: snap?.telemetryEvent?.activeFactors
+          ? JSON.stringify(snap.telemetryEvent.activeFactors)
+          : null,
+        sizingBreakdownJson: this.latestSizingBreakdown
+          ? JSON.stringify(this.buildSizingTelemetry(this.latestSizingBreakdown, marginUsd, marginAllocationPct))
+          : null,
+        noiseBandState: snap?.noiseBandActive || snap?.noiseBand?.active ? 1 : 0,
       });
     }
   }
@@ -1147,6 +1472,24 @@ export class AutoPilotManager {
       this.state = 'IDLE';
     }
 
+    const sym = trade?.symbol ?? this.activeEntryContext?.symbol ?? this.activeSymbol;
+    const exitPrice = trade?.exit_price ?? this.getMarkPriceFn(sym);
+    const side = trade?.side ?? this.activeEntryContext?.side ?? 'NEUTRAL';
+    const snap = this.activeEntryContext?.snapshot ?? this.confluenceEngine.getSnapshot(sym);
+    const exitedEvent = this.buildTelemetryEvent(
+      'POSITION_EXITED',
+      sym,
+      exitPrice,
+      side,
+      snap,
+      {
+        sizingTelemetry: this.activeEntryContext?.sizing,
+      }
+    );
+    this.emitTelemetry(exitedEvent);
+
+    this.activeEntryContext = null;
+    this.lastEmittedChaseKey = null;
     this.lastExitTime = Date.now();
     if (this.openTradeId) {
       this.peakPriceByTrade.delete(this.openTradeId);
@@ -1157,5 +1500,6 @@ export class AutoPilotManager {
     this.openTradeId = null;
     this.oppositeConsensusTickCount = 0;
     this.broadcastStatus();
+    this.emitStateTransition(this.state);
   }
 }

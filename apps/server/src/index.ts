@@ -26,9 +26,10 @@ import {
   DecisionLogsRepo,
   PillarTelemetryRepo,
   FactorTelemetryRepo,
+  FactorTelemetryRecordsRepo,
   ExecutionChaseLogsRepo,
 } from './db/sqlite.js';
-import { DecisionAuditService } from './services/decisionAuditService.js';
+import { DecisionAuditService, computeSpearmanIC } from './services/decisionAuditService.js';
 import { PillarAttributionService } from './services/pillarAttributionService.js';
 import { BinanceClient } from './exchange/binanceClient.js';
 import { BinanceStreamsManager } from './exchange/binanceStreams.js';
@@ -112,8 +113,14 @@ export async function bootstrapServer(): Promise<{
   const decisionLogsRepo = new DecisionLogsRepo(db);
   const pillarRepo = new PillarTelemetryRepo(db);
   const factorTelemetryRepo = new FactorTelemetryRepo(db);
+  const factorTelemetryRecordsRepo = new FactorTelemetryRecordsRepo(db);
   const executionChaseLogsRepo = new ExecutionChaseLogsRepo(db);
-  const decisionAuditService = new DecisionAuditService(decisionLogsRepo, pillarRepo);
+  let wsHub: WsHub | null = null;
+  const decisionAuditService = new DecisionAuditService(decisionLogsRepo, pillarRepo, {
+    factorTelemetryRecordsRepo,
+    executionChaseLogsRepo,
+    onTelemetryEvent: (ev) => wsHub?.broadcastFactorTelemetry(ev),
+  });
   const pillarAttributionService = new PillarAttributionService(pillarRepo);
 
   // 2. Initialize Binance REST Client & Adapters
@@ -275,7 +282,7 @@ export async function bootstrapServer(): Promise<{
   });
 
   // 7b. Initialize WebSocket Hub on /ws
-  const wsHub = new WsHub({
+  const createdWsHub = new WsHub({
     server,
     path: '/ws',
     sessionToken: SESSION_TOKEN,
@@ -340,6 +347,7 @@ export async function bootstrapServer(): Promise<{
       }).catch(() => {});
     },
   });
+  wsHub = createdWsHub;
 
   // 8. Initialize TradeManager Atomic Orchestrator
   const tradeManager = new TradeManager({
@@ -347,7 +355,7 @@ export async function bootstrapServer(): Promise<{
     broker: activeBroker,
     brokerMode: activeBroker.mode,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
-    broadcastWs: (msg) => wsHub.broadcast(msg),
+    broadcastWs: (msg) => wsHub?.broadcast(msg),
   });
 
   // Next-Gen Execution & Sizing Engines
@@ -371,8 +379,18 @@ export async function bootstrapServer(): Promise<{
       const ind = calculateIndicators(candles, 0.01);
       return ind?.atr14 || (markPriceMap.get(sym) || 100) * 0.005;
     },
-    broadcastWs: (msg) => wsHub.broadcast(msg),
+    broadcastWs: (msg) => wsHub?.broadcast(msg),
     onOrderDispatched: (event) => decisionAuditService.recordExecution(event),
+    onTelemetryEvent: (ev) => {
+      decisionAuditService.recordFactorTelemetry(ev);
+    },
+    onStateTransition: (newState) => {
+      if (newState === 'IDLE') {
+        strategyDecayEngine.flushPendingWeightsIfIdle(newState, (w) =>
+          alphaRegistry.applyCalibratedWeights(w)
+        );
+      }
+    },
   });
 
   // 8c. Initialize Multi-Period PnL Performance Service
@@ -386,6 +404,8 @@ export async function bootstrapServer(): Promise<{
       getAccount: () => activeBroker.getAccount(),
     })
   );
+
+  const lastTickTelemetryAt = new Map<string, number>();
 
   // 9. Wire Stream Events to TradeManager, CvdEngine, and WsHub
   streamsManager.onMarkPrice((event) => {
@@ -432,7 +452,7 @@ export async function bootstrapServer(): Promise<{
           : (activePos.entry_price - event.markPrice) * activePos.remaining_qty;
     }
 
-    wsHub.broadcastTick({
+    createdWsHub.broadcastTick({
       symbol: event.symbol,
       markPrice: event.markPrice,
       candle: latestCandle,
@@ -462,10 +482,26 @@ export async function bootstrapServer(): Promise<{
       candle15m,
       vwap: rollingVwap15m,
     });
-    wsHub.broadcastConfluence(confluenceSnapshot);
+    createdWsHub.broadcastConfluence(confluenceSnapshot);
 
     const atr = ind?.atr14 || (markPriceMap.get(event.symbol) || event.markPrice || 100) * 0.005;
     decisionAuditService.evaluateSnapshot(confluenceSnapshot, atr, event.markPrice);
+    if (confluenceSnapshot.telemetryEvent) {
+      const te = confluenceSnapshot.telemetryEvent;
+      if (te.compositeScore < 70) {
+        decisionAuditService.recordFactorTelemetry({
+          ...te,
+          triggerType: 'SUB_THRESHOLD_IMPULSE',
+        });
+      } else if (!autoPilotManager.getConfig().enabled || !confluenceSnapshot.consensusMet) {
+        const key = `${te.symbol}:${te.consensusSide}`;
+        const nowTs = Date.now();
+        if (nowTs - (lastTickTelemetryAt.get(key) ?? 0) >= 180_000) {
+          lastTickTelemetryAt.set(key, nowTs);
+          decisionAuditService.recordFactorTelemetry(te);
+        }
+      }
+    }
     pillarAttributionService.evaluateTick(
       event.symbol,
       event.markPrice,
@@ -540,11 +576,41 @@ export async function bootstrapServer(): Promise<{
 
         const candleReturnSign = event.candle.close >= event.candle.open ? 1 : -1;
         for (const f of latestSnapshot.factorDetails) {
-          const observation = f.orthogonalAlpha * candleReturnSign;
+          let observation = f.orthogonalAlpha * candleReturnSign;
+          try {
+            const settled = factorTelemetryRecordsRepo.getSettledByFactor(f.factorId, 60);
+            if (settled.length >= 2) {
+              const predictions: number[] = [];
+              const outcomes: number[] = [];
+              for (const row of settled) {
+                const sideSign = row.consensus_side === 'SELL' ? -1 : 1;
+                const mfe =
+                  row.post_1h_mfe ??
+                  row.post_15m_mfe ??
+                  row.post_5m_mfe ??
+                  row.post_1m_mfe ??
+                  0;
+                const mae =
+                  row.post_1h_mae ??
+                  row.post_15m_mae ??
+                  row.post_5m_mae ??
+                  row.post_1m_mae ??
+                  0;
+                predictions.push(sideSign * row.orthogonal_alpha);
+                outcomes.push(mfe - Math.abs(mae));
+              }
+              observation = computeSpearmanIC(predictions, outcomes);
+            }
+          } catch {}
+
           try {
             strategyDecayEngine.updateFactor(f.factorId, observation);
           } catch {}
         }
+
+        strategyDecayEngine.flushPendingWeightsIfIdle(autoPilotManager.getState(), (w) =>
+          alphaRegistry.applyCalibratedWeights(w)
+        );
       }
     }
   });
@@ -830,8 +896,22 @@ export async function bootstrapServer(): Promise<{
   economicEventGuard.startCron();
   console.log(`[BOOT] EconomicEventGuard loaded. ${economicEventGuard.getUpcomingEvents(168).length} events tracked.`);
 
+  // Schedule hourly 7-day sub-threshold impulse pruning
+  const impulsePruneTimer = setInterval(() => {
+    try {
+      decisionAuditService.pruneExpiredImpulses(7);
+    } catch {}
+  }, 3_600_000);
+  if (typeof impulsePruneTimer.unref === 'function') {
+    impulsePruneTimer.unref();
+  }
+
   // Graceful shutdown helper
   const close = async () => {
+    clearInterval(impulsePruneTimer);
+    try {
+      decisionAuditService.dispose();
+    } catch {}
     try {
       await strategyDecayEngine.dispose();
     } catch {}
@@ -851,7 +931,7 @@ export async function bootstrapServer(): Promise<{
       await streamsManager.stop();
     } catch {}
     try {
-      await wsHub.close();
+      await createdWsHub.close();
     } catch {}
     try {
       db.close();
@@ -863,7 +943,7 @@ export async function bootstrapServer(): Promise<{
 
   return {
     server,
-    wsHub,
+    wsHub: createdWsHub,
     tradeManager,
     db,
     streamsManager,

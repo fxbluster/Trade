@@ -18,9 +18,32 @@ import type {
   FairValueGap,
   OrderBlock,
   LiquiditySweep,
+  FactorTelemetryEvent,
 } from '@tradeos/shared';
 import type { WsStatus, TickData, AnalysisData, PositionEventData, AutoPilotStatusData } from '../lib/wsClient';
 import { apiClient } from '../lib/apiClient';
+
+const MAX_TELEMETRY_EVENTS = 50;
+
+function isValidFactorTelemetryEvent(event: unknown): event is FactorTelemetryEvent {
+  if (!event || typeof event !== 'object') return false;
+  const ev = event as Partial<FactorTelemetryEvent>;
+  if (typeof ev.symbol !== 'string' || ev.symbol.trim().length === 0) return false;
+  if (typeof ev.timestamp !== 'number' || !Number.isFinite(ev.timestamp)) return false;
+  if (typeof ev.compositeScore !== 'number' || !Number.isFinite(ev.compositeScore)) return false;
+  if (!Array.isArray(ev.activeFactors)) return false;
+  return true;
+}
+
+function normalizeFactorTelemetryEvent(ev: FactorTelemetryEvent): FactorTelemetryEvent {
+  return {
+    ...ev,
+    markPrice: typeof ev.markPrice === 'number' && Number.isFinite(ev.markPrice) ? ev.markPrice : 0,
+    collinearFactors: Array.isArray(ev.collinearFactors) ? ev.collinearFactors : [],
+    noiseBandActive: Boolean(ev.noiseBandActive),
+    macroVetoActive: Boolean(ev.macroVetoActive),
+  };
+}
 
 export interface MarketStoreState {
   symbol: string;
@@ -56,6 +79,9 @@ export interface MarketStoreState {
   latestSweep: LiquiditySweep | null;
   showSmcOverlay: boolean;
 
+  // Next-Gen Orthogonal Quant Telemetry Stream (bounded 50-item sliding window)
+  telemetryEvents: FactorTelemetryEvent[];
+
   // Actions
   setSymbol: (symbol: string) => Promise<void>;
   setCandleInterval: (interval: '1m' | '5m' | '15m' | '1h') => Promise<void>;
@@ -79,6 +105,8 @@ export interface MarketStoreState {
   setCachedScannerItems: (items: ScannerItem[]) => void;
   setShowSmcOverlay: (show: boolean) => void;
   toggleShowSmcOverlay: () => void;
+  setTelemetryEvents: (events: FactorTelemetryEvent[]) => void;
+  addTelemetryEvent: (event: FactorTelemetryEvent) => void;
 }
 
 const defaultAccount: AccountInfo = {
@@ -153,6 +181,9 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   activeOrderBlocks: [],
   latestSweep: null,
   showSmcOverlay: true,
+
+  // Next-Gen Orthogonal Quant Telemetry Stream
+  telemetryEvents: [],
 
   setSymbol: async (symbol: string) => {
     const sym = symbol.toUpperCase();
@@ -361,5 +392,28 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     } catch {
       // Confluence engine may not be online yet in test/dev
     }
+  },
+
+  setTelemetryEvents: (events: FactorTelemetryEvent[]) => {
+    if (!Array.isArray(events)) {
+      set({ telemetryEvents: [] });
+      return;
+    }
+    const sanitized = events
+      .filter(isValidFactorTelemetryEvent)
+      .map(normalizeFactorTelemetryEvent)
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, MAX_TELEMETRY_EVENTS);
+    set({ telemetryEvents: sanitized });
+  },
+
+  addTelemetryEvent: (event: FactorTelemetryEvent) => {
+    if (!isValidFactorTelemetryEvent(event)) {
+      return;
+    }
+    const normalized = normalizeFactorTelemetryEvent(event);
+    set((state) => ({
+      telemetryEvents: [normalized, ...state.telemetryEvents].slice(0, MAX_TELEMETRY_EVENTS),
+    }));
   },
 }));

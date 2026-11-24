@@ -97,6 +97,7 @@ export interface ConfluenceSnapshot {
   chasingOrder?: ChasingOrderState;
   factorOutputs?: FactorOutput[];
   factorDetails?: FactorDetail[];
+  telemetryEvent?: FactorTelemetryEvent;
 }
 
 export interface AutoPilotConfig {
@@ -273,6 +274,10 @@ export interface DecisionLogRecord {
   shadow_closed_at: number | null;
   error_message: string | null;
   created_at: number;
+  factor_telemetry_json?: string | null;
+  execution_chase_json?: string | null;
+  sizing_breakdown_json?: string | null;
+  noise_band_state?: number;
 }
 
 export interface DailyAuditSummary {
@@ -285,6 +290,13 @@ export interface DailyAuditSummary {
   expired_pnl_usd: number;
   net_risk_value_usd: number;
   veto_breakdown: Record<string, number>;
+  total_trades?: number;
+  successful_trades?: number;
+  failed_trades?: number;
+  win_rate?: number;
+  gross_pnl_usd?: number;
+  maker_fee_savings_usd?: number;
+  net_pnl_usd?: number;
 }
 
 export interface DailyAuditResponse {
@@ -292,6 +304,14 @@ export interface DailyAuditResponse {
   records: DecisionLogRecord[];
   sub_threshold_impulses?: PillarTelemetryRecord[];
   generated_at: number;
+  date?: string;
+  factor_telemetry_events?: FactorTelemetryEvent[];
+  factor_attribution_summary?: FactorAttributionSummaryItem[];
+  execution_chase_summary?: {
+    totalFeeSavedUsd: number;
+    totalChases: number;
+    successfulChases: number;
+  };
 }
 
 // ----------------------------------------------------------------------------
@@ -468,6 +488,10 @@ export type WsServerMessage =
         chasingOrder?: ChasingOrderState;
         sizingBreakdown?: SizingBreakdown;
       };
+    }
+  | {
+      type: 'FACTOR_TELEMETRY';
+      data: FactorTelemetryEvent;
     };
 
 // ----------------------------------------------------------------------------
@@ -738,6 +762,115 @@ export interface NoiseBandTelemetry {
   currentPrice: number;
   vwap: number;
   vwapDistancePct: number;
+}
+
+export type QuantConvictionArchetype =
+  | 'SUB_THRESHOLD'
+  | 'EXPLORATORY_PROBE'
+  | 'STANDARD_INSTITUTIONAL'
+  | 'HIGH_CONVICTION_CORE'
+  | 'A_PLUS_INSTITUTIONAL';
+
+export interface FactorStateDetail {
+  factorId: string;
+  name: string;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  rawAlpha: number;
+  orthogonalAlpha: number;
+  effectiveWeight: number;
+  isCollinear: boolean;
+  confidence: number;
+  summaryText: string;
+}
+
+export interface ChasingTelemetrySnapshot {
+  orderId?: string;
+  status: 'PENDING' | 'AMENDING' | 'FILLED' | 'CANCELED' | 'ABORTED';
+  anchorMarkPrice: number;
+  currentLimitPrice: number;
+  spreadPennyJumps: number;
+  amendmentCount: number;
+  durationMs: number;
+  realizedFeeUsd: number;
+  feeSavedVsTakerUsd: number;
+}
+
+export interface SizingTelemetrySnapshot {
+  allocatedMarginUsd: number;
+  allocatedMarginPct: number;
+  baseConvictionMargin: number;
+  quarterKellyMultiplier: number;
+  volatilityParityMultiplier: number;
+  circuitBreakerMultiplier: number;
+  solvencyAirbagOk: boolean;
+}
+
+export type FactorTelemetryTriggerType =
+  | 'SUB_THRESHOLD_IMPULSE'
+  | 'SIGNAL_CONFIRMED'
+  | 'ORDER_AMENDED'
+  | 'POSITION_ENTERED'
+  | 'POSITION_EXITED';
+
+export interface FactorTelemetryEvent {
+  id?: number;
+  eventId?: string;
+  timestamp: number;
+  symbol: string;
+  triggerType: FactorTelemetryTriggerType;
+  markPrice: number;
+  compositeScore: number;
+  convictionArchetype: QuantConvictionArchetype;
+  consensusSide: 'BUY' | 'SELL' | 'NEUTRAL';
+  noiseBandActive: boolean;
+  macroVetoActive: boolean;
+  macroVetoReason?: string;
+  activeFactors: FactorStateDetail[];
+  collinearFactors: string[];
+  chasingTelemetry?: ChasingTelemetrySnapshot;
+  sizingTelemetry?: SizingTelemetrySnapshot;
+}
+
+export interface FactorAttributionSummaryItem {
+  factorId: string;
+  name: string;
+  empiricalHitRate: number;
+  informationRatio: number;
+  informationCoefficient: number;
+  effectiveWeight: number;
+  sampleSize: number;
+}
+
+export type FactorTelemetryRecordStatus = 'EVALUATING' | 'SETTLED' | 'INCOMPLETE_FEED';
+
+export interface FactorTelemetryDbRecord {
+  id?: number;
+  decision_log_id: string | null;
+  event_id: string;
+  trigger_type: FactorTelemetryTriggerType | string;
+  timestamp: number;
+  symbol: string;
+  consensus_side: 'BUY' | 'SELL' | 'NEUTRAL';
+  entry_price: number;
+  composite_score: number;
+  factor_id: string;
+  raw_alpha: number;
+  orthogonal_alpha: number;
+  effective_weight: number;
+  is_collinear: number;
+  confidence: number;
+  summary_text: string | null;
+  telemetry_payload_json: string | null;
+  status: FactorTelemetryRecordStatus;
+  settle_timestamp: number | null;
+  post_1m_mfe: number | null;
+  post_1m_mae: number | null;
+  post_5m_mfe: number | null;
+  post_5m_mae: number | null;
+  post_15m_mfe: number | null;
+  post_15m_mae: number | null;
+  post_1h_mfe: number | null;
+  post_1h_mae: number | null;
 }
 
 export type {

@@ -5,7 +5,7 @@
 
 ## 1. Tamamlananlar (Faktiki Sübutlu)
 - [x] **Dizayn və Spesifikasiya:** `docs/designs/next-gen-modular-quant-architecture.md` təsdiqləndi.
-- [x] **Shared Müqavilələri və Tiplər (`packages/shared`, commit `37387d4`):**
+- [x] **Shared Müqavilələri və Tiplər (`packages/shared`, commit `a2300f6`):**
   - `FactorOutput`, `FactorEvaluationContext`, `AlphaFactorMetadata`, `ChasingOrderState`, `SizingBreakdown`, `NoiseBandTelemetry`.
   - `BlockReason` (`BLOCKED_NOISE_BAND`, `BLOCKED_EVENT_BLACKOUT`, `BLOCKED_SESSION_TRADE_CAP`, `BLOCKED_CHASING_TIMEOUT`, `BLOCKED_AIRBAG_VIOLATION`), `ExitReason` (`TRAILING_GIVEBACK_HALF`, `EVENT_BLACKOUT_UNWIND`), `AutoPilotState` (`LIMIT_CHASING`).
   - AST / regex audit ilə `packages/shared`-də 0 Node.js native asılılığı təsdiqləndi.
@@ -44,3 +44,10 @@
 
 ## 2. Cari Addım
 - Bütün Next-Gen Quant memarlığı icra olundu, sınaqdan keçirildi və Port 3400 üzərində canlı yayımlandı.
+
+- [x] **Təcili Stop-Loss və Mühafizə Düzəlişi (Audit Rəyi, commit `a2300f6`):**
+  - `autoPilotManager.ts`: `placeBracketOrders` daxilində SL algo order xəta verərsə dərhal `closePosition(symbol, 'SL_PLACEMENT_FAILED_EMERGENCY_UNWIND')` ilə pozisiyanı bazar qiyməti ilə ləğv edir.
+  - `autoPilotManager.ts`: `manageOpenPosition` daxilində ehtiyat `WATCHDOG_STOP_LOSS` əlavə edildi (Long `markPrice <= SL`, Short `markPrice >= SL` olduqda dərhal emergency exit).
+  - `tradeManager.ts`: `handleOrderTradeUpdate` daxilində `sl`, `be`, `tp1`, `tp2` fill-ləri zamanı kumulyativ `realized_pnl` və `fees_usd` hesablanaraq `tradesRepo.update`-ə yazılır.
+  - `packages/shared/src/types.ts`: `ExitReason` tipləri genişləndirildi.
+  - 49 test faylı, 471/471 test 100% PASS.

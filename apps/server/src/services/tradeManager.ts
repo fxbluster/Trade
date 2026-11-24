@@ -1011,6 +1011,9 @@ export class TradeManager {
     });
 
     // OCO Leg Handling & State Transitions
+    const totalFees = (trade.fees_usd || 0) + commission;
+    const totalPnl = (trade.realized_pnl || 0) + Number(realizedPnl.toFixed(4));
+
     if (leg === 'tp1') {
       const newRemaining = Math.max(0, Number((trade.remaining_qty - qty).toFixed(4)));
 
@@ -1019,6 +1022,8 @@ export class TradeManager {
         this.tradesRepo.update(trade.id, {
           status: 'PARTIALLY_CLOSED',
           remaining_qty: newRemaining,
+          realized_pnl: Number(totalPnl.toFixed(4)),
+          fees_usd: Number(totalFees.toFixed(4)),
         });
 
         // OCO clean-up: adjust opposite SL algo order to new remaining quantity
@@ -1054,6 +1059,8 @@ export class TradeManager {
           status: 'CLOSED',
           exit_price: price,
           remaining_qty: 0,
+          realized_pnl: Number(totalPnl.toFixed(4)),
+          fees_usd: Number(totalFees.toFixed(4)),
           exit_reason: 'TAKE_PROFIT_1',
           closed_at: filledAt,
         });
@@ -1071,6 +1078,8 @@ export class TradeManager {
         status: 'CLOSED',
         exit_price: price,
         remaining_qty: 0,
+        realized_pnl: Number(totalPnl.toFixed(4)),
+        fees_usd: Number(totalFees.toFixed(4)),
         exit_reason: 'TAKE_PROFIT_2',
         closed_at: filledAt,
       });
@@ -1093,6 +1102,8 @@ export class TradeManager {
         status: 'CLOSED',
         exit_price: price,
         remaining_qty: 0,
+        realized_pnl: Number(totalPnl.toFixed(4)),
+        fees_usd: Number(totalFees.toFixed(4)),
         exit_reason: exitReason,
         closed_at: filledAt,
       });

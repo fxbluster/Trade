@@ -717,51 +717,6 @@ export class AutoPilotManager {
         }
 
         const oppositeSide: TradeSide = side === 'BUY' ? 'SELL' : 'BUY';
-        let slAlgoId: string | null = null;
-        let tp1AlgoId: string | null = null;
-        let tp2AlgoId: string | null = null;
-
-        try {
-          const slRes = await this.broker.createAlgoOrder({
-            symbol,
-            side: oppositeSide,
-            type: 'STOP_MARKET',
-            triggerPrice: stopLoss,
-            quantity: executedQty,
-            clientAlgoId: `tos_${tradeId}_sl`,
-            reduceOnly: true,
-          });
-          slAlgoId = slRes.algoId;
-        } catch (slErr) {
-          console.warn('[AutoPilot] SL Algo creation failed:', slErr);
-        }
-
-        try {
-          const tp1Res = await this.broker.createAlgoOrder({
-            symbol,
-            side: oppositeSide,
-            type: 'TAKE_PROFIT_MARKET',
-            triggerPrice: tp1,
-            quantity: Number((executedQty * 0.5).toFixed(4)),
-            clientAlgoId: `tos_${tradeId}_tp1`,
-            reduceOnly: true,
-          });
-          tp1AlgoId = tp1Res.algoId;
-        } catch {}
-
-        try {
-          const tp2Res = await this.broker.createAlgoOrder({
-            symbol,
-            side: oppositeSide,
-            type: 'TAKE_PROFIT_MARKET',
-            triggerPrice: tp2,
-            quantity: Number((executedQty * 0.5).toFixed(4)),
-            clientAlgoId: `tos_${tradeId}_tp2`,
-            reduceOnly: true,
-          });
-          tp2AlgoId = tp2Res.algoId;
-        } catch {}
-
         const bePrice = Number(
           (side === 'BUY' ? effectivePrice * 1.0015 : effectivePrice * 0.9985).toFixed(4)
         );
@@ -791,9 +746,9 @@ export class AutoPilotManager {
           client_tp1_id: `tos_${tradeId}_tp1`,
           client_tp2_id: `tos_${tradeId}_tp2`,
           entry_order_id: tradeId,
-          sl_algo_id: slAlgoId,
-          tp1_algo_id: tp1AlgoId,
-          tp2_algo_id: tp2AlgoId,
+          sl_algo_id: null,
+          tp1_algo_id: null,
+          tp2_algo_id: null,
           realized_pnl: 0,
           fees_usd: Number((notionalUsd * 0.0002).toFixed(4)),
           exit_reason: null,
@@ -803,6 +758,65 @@ export class AutoPilotManager {
 
         this.tradesRepo.insert(tradeRecord);
         this.openTradeId = tradeId;
+
+        let slAlgoId: string | null = null;
+        let tp1AlgoId: string | null = null;
+        let tp2AlgoId: string | null = null;
+
+        try {
+          const slRes = await this.broker.createAlgoOrder({
+            symbol,
+            side: oppositeSide,
+            type: 'STOP_MARKET',
+            triggerPrice: stopLoss,
+            quantity: executedQty,
+            clientAlgoId: `tos_${tradeId}_sl`,
+            reduceOnly: true,
+          });
+          slAlgoId = slRes.algoId;
+          this.tradesRepo.update(tradeId, { sl_algo_id: slAlgoId });
+        } catch (slErr) {
+          console.warn('[AutoPilot] Critical: SL Algo creation failed, emergency unwinding position:', slErr);
+          this.state = 'CLOSING';
+          this.tradesRepo.update(tradeId, { status: 'CLOSING_IN_PROGRESS' });
+          this.broadcastStatus();
+          try {
+            await this.tradeManager.closePosition(symbol, 'SL_PLACEMENT_FAILED_EMERGENCY_UNWIND');
+          } finally {
+            const updated = this.tradesRepo.getById(tradeId);
+            this.handlePositionClosed(updated);
+          }
+          return;
+        }
+
+        try {
+          const tp1Res = await this.broker.createAlgoOrder({
+            symbol,
+            side: oppositeSide,
+            type: 'TAKE_PROFIT_MARKET',
+            triggerPrice: tp1,
+            quantity: Number((executedQty * 0.5).toFixed(4)),
+            clientAlgoId: `tos_${tradeId}_tp1`,
+            reduceOnly: true,
+          });
+          tp1AlgoId = tp1Res.algoId;
+          this.tradesRepo.update(tradeId, { tp1_algo_id: tp1AlgoId });
+        } catch {}
+
+        try {
+          const tp2Res = await this.broker.createAlgoOrder({
+            symbol,
+            side: oppositeSide,
+            type: 'TAKE_PROFIT_MARKET',
+            triggerPrice: tp2,
+            quantity: Number((executedQty * 0.5).toFixed(4)),
+            clientAlgoId: `tos_${tradeId}_tp2`,
+            reduceOnly: true,
+          });
+          tp2AlgoId = tp2Res.algoId;
+          this.tradesRepo.update(tradeId, { tp2_algo_id: tp2AlgoId });
+        } catch {}
+
         this.state = 'POSITION_OPEN';
         this.oppositeConsensusTickCount = 0;
         this.broadcastStatus();
@@ -888,6 +902,35 @@ export class AutoPilotManager {
     if (!trade || trade.status === 'CLOSED') {
       this.handlePositionClosed(trade);
       return;
+    }
+
+    if (trade.stop_loss && trade.stop_loss > 0) {
+      if (trade.side === 'BUY' && markPrice <= trade.stop_loss) {
+        console.warn(`[AutoPilot Watchdog] Long markPrice ${markPrice} <= SL ${trade.stop_loss}. Emergency closing.`);
+        this.state = 'CLOSING';
+        this.tradesRepo.update(trade.id, { status: 'CLOSING_IN_PROGRESS' });
+        this.broadcastStatus();
+        try {
+          await this.tradeManager.closePosition(symbol, 'WATCHDOG_STOP_LOSS');
+        } finally {
+          const updated = this.tradesRepo.getById(this.openTradeId);
+          this.handlePositionClosed(updated);
+        }
+        return;
+      }
+      if (trade.side === 'SELL' && markPrice >= trade.stop_loss) {
+        console.warn(`[AutoPilot Watchdog] Short markPrice ${markPrice} >= SL ${trade.stop_loss}. Emergency closing.`);
+        this.state = 'CLOSING';
+        this.tradesRepo.update(trade.id, { status: 'CLOSING_IN_PROGRESS' });
+        this.broadcastStatus();
+        try {
+          await this.tradeManager.closePosition(symbol, 'WATCHDOG_STOP_LOSS');
+        } finally {
+          const updated = this.tradesRepo.getById(this.openTradeId);
+          this.handlePositionClosed(updated);
+        }
+        return;
+      }
     }
 
     // Case 2: Auto-Breakeven migration at Math.max(1.5 * ATR, 0.25% profit)
@@ -1012,7 +1055,7 @@ export class AutoPilotManager {
 
     const trackedExtreme = this.peakPriceByTrade.get(trade.id) ?? markPrice;
 
-    if (trade.status === 'PARTIALLY_CLOSED' || profitPerUnit >= 2.0 * atr) {
+    if (!trailingActive && (trade.status === 'PARTIALLY_CLOSED' || profitPerUnit >= 2.0 * atr)) {
       const trailDist = 1.0 * atr;
       if (trade.side === 'BUY') {
         const candidateSl = Number((trackedExtreme - trailDist).toFixed(2));

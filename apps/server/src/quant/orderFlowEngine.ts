@@ -73,6 +73,21 @@ export class OrderFlowEngine {
     this.lastUpdate = Date.now();
   }
 
+  public getBids(): DepthLevel[] {
+    return [...this.bids];
+  }
+
+  public getAsks(): DepthLevel[] {
+    return [...this.asks];
+  }
+
+  public getDepth(): { bids: DepthLevel[]; asks: DepthLevel[] } {
+    return {
+      bids: [...this.bids],
+      asks: [...this.asks],
+    };
+  }
+
   /**
    * Records a raw aggTrade for rolling 60-second trade flow imbalance,
    * 15-minute sliding CVD absorption sample, and Volume Profile.

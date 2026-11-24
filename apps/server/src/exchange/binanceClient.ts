@@ -680,4 +680,42 @@ export class BinanceClient {
       params: { listenKey },
     });
   }
+
+  /**
+   * Amends an in-flight limit order (PUT /fapi/v1/order) with HMAC signature.
+   * Returns -5022 Post-Only rejection error when order would trigger as taker.
+   */
+  async modifyOrder(
+    symbol: string,
+    orderId: string | number,
+    price: number,
+    quantity: number
+  ): Promise<any> {
+    const sym = symbol.toUpperCase();
+    try {
+      return await this.request<any>('/fapi/v1/order', {
+        method: 'PUT',
+        signed: true,
+        priority: 'P1',
+        params: {
+          symbol: sym,
+          orderId: String(orderId),
+          price,
+          quantity,
+        },
+      });
+    } catch (err: any) {
+      // Surface -5022 (Post-Only would trigger as taker) explicitly
+      if (err?.code === -5022 || (typeof err?.message === 'string' && err.message.includes('-5022'))) {
+        const e = new BinanceApiError(
+          err.message || 'Post Only order would immediately trigger as taker order.',
+          err.statusCode ?? 400,
+          -5022,
+          false
+        );
+        throw e;
+      }
+      throw err;
+    }
+  }
 }

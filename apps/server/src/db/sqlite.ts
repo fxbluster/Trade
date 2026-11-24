@@ -69,6 +69,41 @@ export function initializeDatabase(dbPath: string): DatabaseSync {
       CREATE INDEX IF NOT EXISTS idx_economic_events_ts ON economic_events(timestamp);
     `);
   } catch {}
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS factor_telemetry (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp INTEGER NOT NULL,
+        symbol TEXT NOT NULL,
+        factor_id TEXT NOT NULL,
+        raw_alpha REAL NOT NULL,
+        orthogonal_alpha REAL NOT NULL,
+        confidence REAL NOT NULL,
+        uncertainty REAL NOT NULL,
+        weight REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_factor_telemetry_sym_factor ON factor_telemetry(symbol, factor_id, timestamp);
+      CREATE INDEX IF NOT EXISTS idx_factor_telemetry_ts ON factor_telemetry(timestamp);
+    `);
+  } catch {}
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS execution_chase_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_id TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        anchor_price REAL NOT NULL,
+        amend_count INTEGER NOT NULL,
+        duration_ms INTEGER NOT NULL,
+        final_status TEXT NOT NULL,
+        effective_price REAL NOT NULL,
+        fee_saved_usd REAL NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_execution_chase_trade_id ON execution_chase_logs(trade_id);
+      CREATE INDEX IF NOT EXISTS idx_execution_chase_sym_ts ON execution_chase_logs(symbol, created_at);
+    `);
+  } catch {}
 
   return db;
 }
@@ -1060,6 +1095,240 @@ export class EconomicEventsRepo {
       ORDER BY timestamp ASC
     `);
     return stmt.all() as unknown as EconomicEvent[];
+  }
+}
+
+/**
+ * Record representing factor telemetry data stored in SQLite.
+ */
+export interface FactorTelemetryRecord {
+  id?: number;
+  timestamp: number;
+  symbol: string;
+  factor_id: string;
+  raw_alpha: number;
+  orthogonal_alpha: number;
+  confidence: number;
+  uncertainty: number;
+  weight: number;
+}
+
+/**
+ * Repository for factor_telemetry table.
+ */
+export class FactorTelemetryRepo {
+  constructor(private db: DatabaseSync) {}
+
+  public insert(record: FactorTelemetryRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO factor_telemetry (
+        timestamp, symbol, factor_id, raw_alpha, orthogonal_alpha, confidence, uncertainty, weight
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      record.timestamp,
+      record.symbol,
+      record.factor_id,
+      record.raw_alpha,
+      record.orthogonal_alpha,
+      record.confidence,
+      record.uncertainty,
+      record.weight
+    );
+  }
+
+  public insertBatch(records: FactorTelemetryRecord[]): void {
+    if (records.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT INTO factor_telemetry (
+        timestamp, symbol, factor_id, raw_alpha, orthogonal_alpha, confidence, uncertainty, weight
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    runTransaction(this.db, () => {
+      for (const rec of records) {
+        stmt.run(
+          rec.timestamp,
+          rec.symbol,
+          rec.factor_id,
+          rec.raw_alpha,
+          rec.orthogonal_alpha,
+          rec.confidence,
+          rec.uncertainty,
+          rec.weight
+        );
+      }
+    });
+  }
+
+  public getRecentByFactor(symbol: string, factorId: string, limit: number = 100): FactorTelemetryRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT id, timestamp, symbol, factor_id, raw_alpha, orthogonal_alpha, confidence, uncertainty, weight
+      FROM factor_telemetry
+      WHERE symbol = ? AND factor_id = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `);
+    return stmt.all(symbol, factorId, limit) as unknown as FactorTelemetryRecord[];
+  }
+
+  public getRecent(symbol: string, limit: number = 100): FactorTelemetryRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT id, timestamp, symbol, factor_id, raw_alpha, orthogonal_alpha, confidence, uncertainty, weight
+      FROM factor_telemetry
+      WHERE symbol = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `);
+    return stmt.all(symbol, limit) as unknown as FactorTelemetryRecord[];
+  }
+
+  public getByTimeRange(
+    symbol: string,
+    factorId: string,
+    startTime: number,
+    endTime: number
+  ): FactorTelemetryRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT id, timestamp, symbol, factor_id, raw_alpha, orthogonal_alpha, confidence, uncertainty, weight
+      FROM factor_telemetry
+      WHERE symbol = ? AND factor_id = ? AND timestamp >= ? AND timestamp <= ?
+      ORDER BY timestamp ASC
+    `);
+    return stmt.all(symbol, factorId, startTime, endTime) as unknown as FactorTelemetryRecord[];
+  }
+
+  public pruneOlderThan(retentionDays: number = 30): number {
+    const cutoffMs = Date.now() - retentionDays * 86_400_000;
+    const stmt = this.db.prepare('DELETE FROM factor_telemetry WHERE timestamp < ?');
+    const result = stmt.run(cutoffMs) as { changes?: number | bigint };
+    return Number(result.changes ?? 0);
+  }
+}
+
+/**
+ * Record representing maker limit chasing telemetry stored in SQLite.
+ */
+export interface ExecutionChaseLogRecord {
+  id?: number;
+  trade_id: string;
+  symbol: string;
+  anchor_price: number;
+  amend_count: number;
+  duration_ms: number;
+  final_status: string;
+  effective_price: number;
+  fee_saved_usd: number;
+  created_at: number;
+}
+
+/**
+ * Repository for execution_chase_logs table.
+ */
+export class ExecutionChaseLogsRepo {
+  constructor(private db: DatabaseSync) {}
+
+  public insert(record: ExecutionChaseLogRecord): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO execution_chase_logs (
+        trade_id, symbol, anchor_price, amend_count, duration_ms,
+        final_status, effective_price, fee_saved_usd, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    stmt.run(
+      record.trade_id,
+      record.symbol,
+      record.anchor_price,
+      record.amend_count,
+      record.duration_ms,
+      record.final_status,
+      record.effective_price,
+      record.fee_saved_usd,
+      record.created_at
+    );
+  }
+
+  public insertBatch(records: ExecutionChaseLogRecord[]): void {
+    if (records.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT INTO execution_chase_logs (
+        trade_id, symbol, anchor_price, amend_count, duration_ms,
+        final_status, effective_price, fee_saved_usd, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    runTransaction(this.db, () => {
+      for (const rec of records) {
+        stmt.run(
+          rec.trade_id,
+          rec.symbol,
+          rec.anchor_price,
+          rec.amend_count,
+          rec.duration_ms,
+          rec.final_status,
+          rec.effective_price,
+          rec.fee_saved_usd,
+          rec.created_at
+        );
+      }
+    });
+  }
+
+  public getRecent(symbol: string, limit: number = 100): ExecutionChaseLogRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT id, trade_id, symbol, anchor_price, amend_count, duration_ms,
+             final_status, effective_price, fee_saved_usd, created_at
+      FROM execution_chase_logs
+      WHERE symbol = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `);
+    return stmt.all(symbol, limit) as unknown as ExecutionChaseLogRecord[];
+  }
+
+  public getByTradeId(tradeId: string): ExecutionChaseLogRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT id, trade_id, symbol, anchor_price, amend_count, duration_ms,
+             final_status, effective_price, fee_saved_usd, created_at
+      FROM execution_chase_logs
+      WHERE trade_id = ?
+      ORDER BY created_at ASC
+    `);
+    return stmt.all(tradeId) as unknown as ExecutionChaseLogRecord[];
+  }
+
+  public getFeeSavings(
+    symbol?: string,
+    sinceTimestamp?: number
+  ): { totalFeeSavedUsd: number; totalChases: number; successfulChases: number } {
+    let query = `
+      SELECT
+        COALESCE(SUM(fee_saved_usd), 0) AS totalFeeSavedUsd,
+        COUNT(*) AS totalChases,
+        SUM(CASE WHEN final_status = 'FILLED' THEN 1 ELSE 0 END) AS successfulChases
+      FROM execution_chase_logs
+      WHERE 1=1
+    `;
+    const params: (string | number)[] = [];
+    if (symbol) {
+      query += ` AND symbol = ?`;
+      params.push(symbol);
+    }
+    if (sinceTimestamp !== undefined) {
+      query += ` AND created_at >= ?`;
+      params.push(sinceTimestamp);
+    }
+
+    const stmt = this.db.prepare(query);
+    const row = (params.length > 0 ? stmt.get(...params) : stmt.get()) as {
+      totalFeeSavedUsd: number;
+      totalChases: number;
+      successfulChases: number;
+    } | undefined;
+
+    return {
+      totalFeeSavedUsd: Number(row?.totalFeeSavedUsd ?? 0),
+      totalChases: Number(row?.totalChases ?? 0),
+      successfulChases: Number(row?.successfulChases ?? 0),
+    };
   }
 }
 

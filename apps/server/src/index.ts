@@ -19,7 +19,15 @@ import {
   BINANCE_DEMO_API_SECRET,
   CRYPTOPANIC_API_KEY,
 } from './config.js';
-import { initializeDatabase, TradesRepo, RiskStateRepo, DecisionLogsRepo, PillarTelemetryRepo } from './db/sqlite.js';
+import {
+  initializeDatabase,
+  TradesRepo,
+  RiskStateRepo,
+  DecisionLogsRepo,
+  PillarTelemetryRepo,
+  FactorTelemetryRepo,
+  ExecutionChaseLogsRepo,
+} from './db/sqlite.js';
 import { DecisionAuditService } from './services/decisionAuditService.js';
 import { PillarAttributionService } from './services/pillarAttributionService.js';
 import { BinanceClient } from './exchange/binanceClient.js';
@@ -34,6 +42,20 @@ import { NativeSmcEngine } from './quant/nativeSmcEngine.js';
 import { ConfluenceEngine } from './quant/confluenceEngine.js';
 import { EconomicEventGuard } from './quant/economicEventGuard.js';
 import { NoiseBandEngine } from './quant/noiseBandEngine.js';
+import { AlphaRegistry } from './quant/alphaRegistry.js';
+import {
+  OrderFlowFactor,
+  NativeSmcFactor,
+  CvdAbsorptionFactor,
+  MacroRegimeFactor,
+  FundingArbitrageFactor,
+  CrossExchangeSweepFactor,
+  LiqClustersFactor,
+} from './quant/factors/index.js';
+import { AdaptiveSizingEngine } from './quant/adaptiveSizingEngine.js';
+import { ChasingExecutionEngine } from './services/chasingExecutionEngine.js';
+import { TwapExecutionSlicer } from './services/twapExecutionSlicer.js';
+import { StrategyDecayEngine } from './quant/strategyDecayEngine.js';
 import { TradeManager } from './services/tradeManager.js';
 import { AutoPilotManager } from './services/autoPilotManager.js';
 import { PnlService } from './services/pnlService.js';
@@ -74,6 +96,13 @@ export async function bootstrapServer(): Promise<{
   pillarAttributionService: PillarAttributionService;
   economicEventGuard: EconomicEventGuard;
   noiseBandEngine: NoiseBandEngine;
+  alphaRegistry?: AlphaRegistry;
+  adaptiveSizingEngine?: AdaptiveSizingEngine;
+  chasingExecutionEngine?: ChasingExecutionEngine;
+  twapExecutionSlicer?: TwapExecutionSlicer;
+  strategyDecayEngine?: StrategyDecayEngine;
+  factorTelemetryRepo?: FactorTelemetryRepo;
+  executionChaseLogsRepo?: ExecutionChaseLogsRepo;
   close: () => Promise<void>;
 }> {
   // 1. Initialize SQLite WAL Database Engine
@@ -82,6 +111,8 @@ export async function bootstrapServer(): Promise<{
   const riskRepo = new RiskStateRepo(db);
   const decisionLogsRepo = new DecisionLogsRepo(db);
   const pillarRepo = new PillarTelemetryRepo(db);
+  const factorTelemetryRepo = new FactorTelemetryRepo(db);
+  const executionChaseLogsRepo = new ExecutionChaseLogsRepo(db);
   const decisionAuditService = new DecisionAuditService(decisionLogsRepo, pillarRepo);
   const pillarAttributionService = new PillarAttributionService(pillarRepo);
 
@@ -213,12 +244,34 @@ export async function bootstrapServer(): Promise<{
   const economicEventGuard = new EconomicEventGuard(db);
   const noiseBandEngine = new NoiseBandEngine();
 
+  // Next-Gen Modular Quant Architecture: AlphaRegistry & 7 Orthogonal Alpha Factors
+  const alphaRegistry = new AlphaRegistry();
+  alphaRegistry.registerFactor(new OrderFlowFactor());
+  alphaRegistry.registerFactor(new NativeSmcFactor());
+  alphaRegistry.registerFactor(new CvdAbsorptionFactor());
+  alphaRegistry.registerFactor(new MacroRegimeFactor());
+  alphaRegistry.registerFactor(new FundingArbitrageFactor());
+  alphaRegistry.registerFactor(new CrossExchangeSweepFactor());
+  alphaRegistry.registerFactor(new LiqClustersFactor());
+  await alphaRegistry.initialize(db);
+
+  // Strategy Decay Engine & CUSUM drift detection
+  const strategyDecayEngine = new StrategyDecayEngine();
+  strategyDecayEngine.registerFactor('ORDER_FLOW_L2', 0.20);
+  strategyDecayEngine.registerFactor('NATIVE_SMC', 0.20);
+  strategyDecayEngine.registerFactor('CVD_ABSORPTION', 0.15);
+  strategyDecayEngine.registerFactor('MACRO_REGIME', 0.18);
+  strategyDecayEngine.registerFactor('FUNDING_ARBITRAGE', 0.10);
+  strategyDecayEngine.registerFactor('CROSS_EXCHANGE_SWEEP', 0.09);
+  strategyDecayEngine.registerFactor('LIQ_CLUSTERS', 0.08);
+
   const confluenceEngine = new ConfluenceEngine({
     mtfManager,
     smcEngine,
     sentimentHarvester,
     economicEventGuard,
     noiseBandEngine,
+    alphaRegistry,
   });
 
   // 7b. Initialize WebSocket Hub on /ws
@@ -248,6 +301,7 @@ export async function bootstrapServer(): Promise<{
           }));
           candleHistoryMap.set(activeSymbol, klines);
           mtfManager.setInitialCandles(activeSymbol, '1m', klines);
+          alphaRegistry.warmup(klines);
         }
       }).catch(() => {});
 
@@ -265,6 +319,7 @@ export async function bootstrapServer(): Promise<{
           mtfManager.setInitialCandles(activeSymbol, '15m', klines);
           smcEngine.onCandleClosed(activeSymbol, '15m', klines);
           noiseBandEngine.loadKlines(klines);
+          alphaRegistry.warmup(klines);
         }
       }).catch(() => {});
 
@@ -280,6 +335,7 @@ export async function bootstrapServer(): Promise<{
             volume: Number(k[5]),
           }));
           mtfManager.setInitialCandles(activeSymbol, '1h', klines);
+          alphaRegistry.warmup(klines);
         }
       }).catch(() => {});
     },
@@ -294,12 +350,21 @@ export async function bootstrapServer(): Promise<{
     broadcastWs: (msg) => wsHub.broadcast(msg),
   });
 
+  // Next-Gen Execution & Sizing Engines
+  const adaptiveSizingEngine = new AdaptiveSizingEngine();
+  const chasingExecutionEngine = new ChasingExecutionEngine(activeBroker);
+  const twapExecutionSlicer = new TwapExecutionSlicer(chasingExecutionEngine);
+
   // 8b. Initialize Autonomous Auto-Pilot Manager
   const autoPilotManager = new AutoPilotManager({
     db,
     tradeManager,
     broker: activeBroker,
     confluenceEngine,
+    adaptiveSizingEngine,
+    chasingExecutionEngine,
+    twapExecutionSlicer,
+    executionChaseLogsRepo,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
     getAtr: (sym) => {
       const candles = candleHistoryMap.get(sym) || [];
@@ -422,6 +487,10 @@ export async function bootstrapServer(): Promise<{
       mtfManager.updateCandle(sym, interval as any, event.candle, event.isFinal);
     }
 
+    if (event.isFinal) {
+      alphaRegistry.onCandleClosed(event.candle, interval);
+    }
+
     if (interval === '1m') {
       const existing = candleHistoryMap.get(sym) || [];
       if (existing.length === 0) {
@@ -450,6 +519,33 @@ export async function bootstrapServer(): Promise<{
     if (event.isFinal && interval === '1m') {
       decisionAuditService.onCandleClose(sym, event.candle);
       pillarAttributionService.onClosedCandle(sym, event.candle);
+
+      const latestSnapshot = confluenceEngine.getLatestSnapshot();
+      if (latestSnapshot && latestSnapshot.factorDetails && latestSnapshot.factorDetails.length > 0) {
+        const records = latestSnapshot.factorDetails.map((f) => ({
+          timestamp: Date.now(),
+          symbol: sym,
+          factor_id: f.factorId,
+          raw_alpha: f.rawAlpha,
+          orthogonal_alpha: f.orthogonalAlpha,
+          confidence: f.confidence,
+          uncertainty: Number((1 - f.confidence).toFixed(4)),
+          weight: f.posteriorWeight,
+        }));
+        try {
+          factorTelemetryRepo.insertBatch(records);
+        } catch (err) {
+          logger.error({ err }, 'Failed to persist factor telemetry batch');
+        }
+
+        const candleReturnSign = event.candle.close >= event.candle.open ? 1 : -1;
+        for (const f of latestSnapshot.factorDetails) {
+          const observation = f.orthogonalAlpha * candleReturnSign;
+          try {
+            strategyDecayEngine.updateFactor(f.factorId, observation);
+          } catch {}
+        }
+      }
     }
   });
 
@@ -690,6 +786,7 @@ export async function bootstrapServer(): Promise<{
     if (candles1m.length > 0) {
       candleHistoryMap.set(activeSymbol, candles1m);
       mtfManager.setInitialCandles(activeSymbol, '1m', candles1m);
+      alphaRegistry.warmup(candles1m);
       console.log(`[BOOT] Preloaded ${candles1m.length} 1m candles for ${activeSymbol}. Indicators fully warmed up!`);
     }
 
@@ -698,12 +795,14 @@ export async function bootstrapServer(): Promise<{
       mtfManager.setInitialCandles(activeSymbol, '15m', candles15m);
       smcEngine.onCandleClosed(activeSymbol, '15m', candles15m);
       noiseBandEngine.loadKlines(candles15m);
+      alphaRegistry.warmup(candles15m);
       console.log(`[BOOT] Preloaded ${candles15m.length} 15m candles for ${activeSymbol}. Native SMC & NoiseBandEngine initialized!`);
     }
 
     const candles1h = await fetchBootKlines(activeSymbol, '1h', 200);
     if (candles1h.length > 0) {
       mtfManager.setInitialCandles(activeSymbol, '1h', candles1h);
+      alphaRegistry.warmup(candles1h);
       console.log(`[BOOT] Preloaded ${candles1h.length} 1h candles for ${activeSymbol}. Macro Regime & ADX initialized!`);
     }
   } catch (err: any) {
@@ -733,6 +832,12 @@ export async function bootstrapServer(): Promise<{
 
   // Graceful shutdown helper
   const close = async () => {
+    try {
+      await strategyDecayEngine.dispose();
+    } catch {}
+    try {
+      await alphaRegistry.teardown();
+    } catch {}
     try {
       economicEventGuard.stopCron();
     } catch {}
@@ -771,6 +876,13 @@ export async function bootstrapServer(): Promise<{
     pillarAttributionService,
     economicEventGuard,
     noiseBandEngine,
+    alphaRegistry,
+    adaptiveSizingEngine,
+    chasingExecutionEngine,
+    twapExecutionSlicer,
+    strategyDecayEngine,
+    factorTelemetryRepo,
+    executionChaseLogsRepo,
     close,
   };
 }

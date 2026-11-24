@@ -68,6 +68,8 @@ export const AutoPilotControls: React.FC = () => {
 
   const stateBadgeColor = () => {
     switch (apState) {
+      case 'LIMIT_CHASING':
+        return 'bg-[#f0b90b]/20 text-[#f0b90b] border-[#f0b90b]/50 animate-pulse font-bold';
       case 'POSITION_OPEN':
         return 'bg-[#0ecb81]/20 text-[#0ecb81] border-[#0ecb81]/50 animate-pulse';
       case 'PLACING_ORDER':
@@ -102,6 +104,8 @@ export const AutoPilotControls: React.FC = () => {
         <span className={`px-2 py-0.5 rounded text-[10px] font-bold border uppercase ${stateBadgeColor()}`}>
           {!isEnabled
             ? 'STANDBY (MANUAL)'
+            : apState === 'LIMIT_CHASING'
+            ? `MAKER CHASING (${autoPilot.chasingOrder?.amendCount || 0}/10 AMENDS)`
             : apState === 'BLOCKED_SESSION_TRADE_CAP'
             ? `SESSION CAP REACHED (${autoPilot.filledToday || 0}/${config.maxDailyTrades || 5})`
             : apState === 'COOLDOWN_ACTIVE' && autoPilot.blockReason === 'BLOCKED_DAILY_MAX_LOSS'
@@ -113,6 +117,82 @@ export const AutoPilotControls: React.FC = () => {
       {errorMsg && (
         <div className="p-1.5 rounded bg-[#f6465d]/10 border border-[#f6465d]/30 text-[#f6465d] text-[11px]">
           {errorMsg}
+        </div>
+      )}
+
+      {/* Maker Limit Chasing Telemetry Card */}
+      {(apState === 'LIMIT_CHASING' || autoPilot.chasingOrder) && (
+        <div
+          data-testid="maker-chasing-card"
+          className="p-2.5 rounded bg-[#f0b90b]/10 border border-[#f0b90b]/40 text-[#f0b90b] space-y-1.5 animate-pulse"
+        >
+          <div className="flex items-center justify-between font-bold text-[11px]">
+            <div className="flex items-center space-x-1.5">
+              <RefreshCw className="w-3.5 h-3.5 text-[#f0b90b] animate-spin" />
+              <span>Maker Limit Chasing (Post-Only GTX)</span>
+            </div>
+            <span className="px-1.5 py-0.5 rounded text-[9px] bg-[#f0b90b]/20 border border-[#f0b90b]/50">
+              {autoPilot.chasingOrder?.status || 'CHASING'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1 text-[10px] text-[#e6edf3]">
+            <div>
+              <span className="text-[#7d8590] block text-[9px]">Target Price</span>
+              <span className="font-bold tabular-nums">
+                {autoPilot.chasingOrder?.currentLimitPrice ? `$${autoPilot.chasingOrder.currentLimitPrice.toFixed(2)}` : 'BBO Penny-Jump'}
+              </span>
+            </div>
+            <div>
+              <span className="text-[#7d8590] block text-[9px]">Amendments</span>
+              <span className="font-bold tabular-nums">
+                {autoPilot.chasingOrder?.amendCount ?? 0} / 10
+              </span>
+            </div>
+            <div>
+              <span className="text-[#7d8590] block text-[9px]">Fee Savings</span>
+              <span className="font-bold tabular-nums text-[#0ecb81]">
+                {autoPilot.chasingOrder?.feeSavedUsd !== undefined
+                  ? `+$${autoPilot.chasingOrder.feeSavedUsd.toFixed(3)}`
+                  : 'Maker Rebate (+0.03%)'}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dynamic Sizing Breakdown Badge */}
+      {autoPilot.sizingBreakdown && (
+        <div
+          data-testid="dynamic-sizing-badge"
+          className="p-2.5 rounded bg-[#020305] border border-[#151d2c] space-y-1.5"
+        >
+          <div className="flex items-center justify-between text-[11px]">
+            <div className="flex items-center space-x-1.5">
+              <Sliders className="w-3.5 h-3.5 text-[#0ecb81]" />
+              <span className="font-bold text-[#e6edf3]">Adaptive Margin Allocation:</span>
+            </div>
+            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#0ecb81]/15 text-[#0ecb81] border border-[#0ecb81]/30 tabular-nums">
+              {(autoPilot.sizingBreakdown.finalMarginPct * 100).toFixed(1)}% (${autoPilot.sizingBreakdown.marginUsd.toFixed(2)})
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] text-[#7d8590]">
+            <span>Archetype: <span className="font-semibold text-[#e6edf3]">{autoPilot.sizingBreakdown.archetype}</span></span>
+            <span className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${
+              autoPilot.sizingBreakdown.solvencyAirbagOk
+                ? 'bg-[#0ecb81]/10 text-[#0ecb81] border-[#0ecb81]/30'
+                : 'bg-[#f6465d]/10 text-[#f6465d] border-[#f6465d]/30'
+            }`}>
+              Airbag: {autoPilot.sizingBreakdown.solvencyAirbagOk ? 'SECURE' : 'VIOLATION'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1 pt-1 border-t border-[#151d2c]/60 text-[9px] text-[#7d8590]">
+            <div>Kelly: <span className="text-[#e6edf3] font-semibold">{(autoPilot.sizingBreakdown.kellyDampener ?? 1).toFixed(2)}x</span></div>
+            <div>Vol Parity: <span className="text-[#e6edf3] font-semibold">{(autoPilot.sizingBreakdown.volatilityParity ?? 1).toFixed(2)}x</span></div>
+            <div>Circuit: <span className="text-[#e6edf3] font-semibold">{(autoPilot.sizingBreakdown.circuitMultiplier ?? 1).toFixed(2)}x</span></div>
+          </div>
         </div>
       )}
 

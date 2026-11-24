@@ -229,4 +229,109 @@ describe('ConfluenceHUD & Institutional SMC State Slices', () => {
     expect(banner).toBeNull();
     root.unmount();
   });
+
+  it('renders dynamic alpha factors panel when factorDetails are present', () => {
+    useMarketStore.setState({
+      confluence: {
+        symbol: 'BTCUSDT',
+        macroVetoActive: false,
+        macroRegime: 'MACRO_BULLISH',
+        pillars: [],
+        bullishCount: 5,
+        bearishCount: 0,
+        neutralCount: 2,
+        consensusBias: 'BULLISH',
+        consensusMet: true,
+        threshold: 4,
+        compositeScore: 82,
+        recommendedAction: 'STRONG_BUY',
+        activeFvgs: [],
+        activeOrderBlocks: [],
+        latestSweep: null,
+        factorDetails: [
+          {
+            factorId: 'ORDER_FLOW_L2',
+            name: 'Order Flow L2',
+            rawAlpha: 0.85,
+            orthogonalAlpha: 0.62,
+            posteriorWeight: 0.22,
+            bias: 'BULLISH',
+            confidence: 0.90,
+            isCollinear: false,
+            informationRatio: 1.4,
+          },
+          {
+            factorId: 'NATIVE_SMC',
+            name: 'Native SMC',
+            rawAlpha: 0.70,
+            orthogonalAlpha: 0.35,
+            posteriorWeight: 0.18,
+            bias: 'BULLISH',
+            confidence: 0.80,
+            isCollinear: true,
+            informationRatio: 1.1,
+          },
+        ],
+      },
+    });
+
+    const root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ConfluenceHUD));
+    });
+
+    const panel = container.querySelector('[data-testid="alpha-factors-panel"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.textContent).toContain('Orthogonal Alpha Matrix');
+    expect(panel?.textContent).toContain('Order Flow L2');
+    expect(panel?.textContent).toContain('Native SMC');
+    expect(panel?.textContent).toContain('COLLINEAR');
+    expect(panel?.textContent).toContain('ORTHO');
+    root.unmount();
+  });
+
+  it('renders noise band telemetry details in banner when noiseBandActive is true', () => {
+    useMarketStore.setState({
+      confluence: {
+        symbol: 'BTCUSDT',
+        macroVetoActive: false,
+        noiseBandActive: true,
+        noiseBand: {
+          active: true,
+          currentTrueRange15m: 1.20,
+          meanTrueRange20d: 1.50,
+          noiseThreshold: 1.875,
+          isNoise: true,
+          currentPrice: 100,
+          vwap: 99.8,
+          vwapDistancePct: 0.002,
+        },
+        macroRegime: 'MACRO_BULLISH',
+        pillars: [],
+        bullishCount: 2,
+        bearishCount: 1,
+        neutralCount: 4,
+        consensusBias: 'NEUTRAL',
+        consensusMet: false,
+        threshold: 4,
+        compositeScore: 55,
+        recommendedAction: 'WAIT',
+        activeFvgs: [],
+        activeOrderBlocks: [],
+        latestSweep: null,
+      },
+    });
+
+    const root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ConfluenceHUD));
+    });
+
+    const banner = container.querySelector('[data-testid="noise-band-banner"]');
+    expect(banner).not.toBeNull();
+    expect(banner?.textContent).toContain('NOISE BAND ACTIVE');
+    expect(banner?.textContent).toContain('TR: $1.20');
+    expect(banner?.textContent).toContain('Threshold: $1.88');
+    root.unmount();
+  });
 });

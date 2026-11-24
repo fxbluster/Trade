@@ -21,7 +21,19 @@ export type BlockReason =
   | 'BLOCKED_EVENT_BLACKOUT'
   | 'BLOCKED_SESSION_TRADE_CAP'
   | 'BLOCKED_DAILY_MAX_LOSS'
-  | 'BLOCKED_MACRO_VETO';
+  | 'BLOCKED_MACRO_VETO'
+  | 'BLOCKED_CHASING_TIMEOUT'
+  | 'BLOCKED_AIRBAG_VIOLATION';
+
+export type AutoPilotState =
+  | 'IDLE'
+  | 'EVALUATING'
+  | 'PLACING_ORDER'
+  | 'LIMIT_CHASING'
+  | 'POSITION_OPEN'
+  | 'CLOSING'
+  | 'COOLDOWN_ACTIVE'
+  | 'BLOCKED_SESSION_TRADE_CAP';
 
 export interface TrailingStopState {
   enabled: boolean;

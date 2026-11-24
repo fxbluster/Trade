@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type {
   AutoPilotConfig,
@@ -7,21 +8,20 @@ import type {
   TradeSide,
   TrailingStopState,
   BlockReason,
+  SizingBreakdown,
+  ChasingOrderState,
+  AutoPilotState,
 } from '@tradeos/shared';
 import { calculateLiquidationPrice } from '@tradeos/shared';
-import { TradesRepo, SettingsRepo } from '../db/sqlite.js';
+import { TradesRepo, SettingsRepo, ExecutionChaseLogsRepo } from '../db/sqlite.js';
 import { TradeManager } from './tradeManager.js';
 import type { BrokerAdapter } from '../exchange/broker.js';
 import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
+import type { AdaptiveSizingEngine } from '../quant/adaptiveSizingEngine.js';
+import type { ChasingExecutionEngine } from './chasingExecutionEngine.js';
+import type { TwapExecutionSlicer } from './twapExecutionSlicer.js';
 
-export type AutoPilotState =
-  | 'IDLE'
-  | 'EVALUATING'
-  | 'PLACING_ORDER'
-  | 'POSITION_OPEN'
-  | 'CLOSING'
-  | 'COOLDOWN_ACTIVE'
-  | 'BLOCKED_SESSION_TRADE_CAP';
+export type { AutoPilotState };
 
 export interface AutoPilotManagerOptions {
   db: DatabaseSync;
@@ -32,6 +32,10 @@ export interface AutoPilotManagerOptions {
   getAtr?: (symbol: string) => number;
   broadcastWs?: (msg: WsServerMessage) => void;
   config?: Partial<AutoPilotConfig>;
+  adaptiveSizingEngine?: AdaptiveSizingEngine;
+  chasingExecutionEngine?: ChasingExecutionEngine;
+  twapExecutionSlicer?: TwapExecutionSlicer;
+  executionChaseLogsRepo?: ExecutionChaseLogsRepo;
   onOrderDispatched?: (event: {
     symbol: string;
     side: TradeSide;
@@ -80,6 +84,12 @@ export class AutoPilotManager {
 
   private tradesRepo: TradesRepo;
   private settingsRepo: SettingsRepo;
+  public readonly executionChaseLogsRepo: ExecutionChaseLogsRepo;
+  public readonly adaptiveSizingEngine?: AdaptiveSizingEngine;
+  public readonly chasingExecutionEngine?: ChasingExecutionEngine;
+  public readonly twapExecutionSlicer?: TwapExecutionSlicer;
+  private latestSizingBreakdown: SizingBreakdown | null = null;
+  private latestChasingState: ChasingOrderState | null = null;
 
   private state: AutoPilotState = 'IDLE';
   private blockReason: BlockReason | null = null;
@@ -116,9 +126,21 @@ export class AutoPilotManager {
     this.getAtrFn = options.getAtr;
     this.broadcastWsFn = options.broadcastWs;
     this.onOrderDispatched = options.onOrderDispatched;
+    this.adaptiveSizingEngine = options.adaptiveSizingEngine;
+    this.chasingExecutionEngine = options.chasingExecutionEngine;
+    this.twapExecutionSlicer = options.twapExecutionSlicer;
+    this.executionChaseLogsRepo =
+      options.executionChaseLogsRepo || new ExecutionChaseLogsRepo(this.db);
 
     this.tradesRepo = new TradesRepo(this.db);
     this.settingsRepo = new SettingsRepo(this.db);
+
+    if (this.chasingExecutionEngine) {
+      this.chasingExecutionEngine.setOnStateUpdate((state) => {
+        this.latestChasingState = state;
+        this.broadcastStatus();
+      });
+    }
 
     // Restore persisted Auto-Pilot config (including enabled state & margin cap) from SQLite
     const persistedConfig = this.settingsRepo.get<AutoPilotConfig>('autopilot_config');
@@ -271,6 +293,8 @@ export class AutoPilotManager {
           message: this.statusMessage ?? undefined,
           filledToday: this.filledToday,
           maxDailyTrades: this.config.maxDailyTrades ?? 5,
+          chasingOrder: this.latestChasingState ?? undefined,
+          sizingBreakdown: this.latestSizingBreakdown ?? undefined,
         },
       } as any);
     } catch {
@@ -289,8 +313,21 @@ export class AutoPilotManager {
     if (!this.config.enabled) return;
     if (this.isCooldownActive()) return;
 
-    // Position Management Branch: when position is open
-    if (this.state === 'POSITION_OPEN' && this.openTradeId) {
+    // Position Management Branch: when position is open or while in LIMIT_CHASING
+    if (this.openTradeId) {
+      await this.manageOpenPosition(sym, markPrice);
+      if (this.state === 'POSITION_OPEN') {
+        return;
+      }
+    }
+
+    // Check if an active position already exists in SQLite for this symbol
+    const existing = this.tradesRepo.getActivePosition(this.broker.mode, sym);
+    if (existing) {
+      this.openTradeId = existing.id;
+      if (this.state !== 'LIMIT_CHASING') {
+        this.state = 'POSITION_OPEN';
+      }
       await this.manageOpenPosition(sym, markPrice);
       return;
     }
@@ -302,14 +339,6 @@ export class AutoPilotManager {
 
     // Re-entry lockout check (180s mandatory cooldown after position exit)
     if (Date.now() - this.lastExitTime < 180_000) {
-      return;
-    }
-
-    // Check if an active position already exists in SQLite for this symbol
-    const existing = this.tradesRepo.getActivePosition(this.broker.mode, sym);
-    if (existing) {
-      this.openTradeId = existing.id;
-      this.state = 'POSITION_OPEN';
       return;
     }
 
@@ -382,15 +411,16 @@ export class AutoPilotManager {
   }
 
   /**
-   * Executes algorithmic bracket entry with IOC marketable limit pricing (0.10% slippage ceiling).
+   * Executes algorithmic bracket entry with IOC marketable limit pricing or Maker Limit Chasing.
    */
   private async executeAutoEntry(symbol: string, side: TradeSide, markPrice: number): Promise<void> {
     const leverage = this.config.leverage || 10;
+    const atr = this.getAtrFn ? this.getAtrFn(symbol) : markPrice * 0.005;
     const limitPrice = Number(
       (side === 'BUY' ? markPrice * 1.0010 : markPrice * 0.9990).toFixed(2)
     );
-    const atr = this.getAtrFn ? this.getAtrFn(symbol) : markPrice * 0.005;
     let marginUsd = 0;
+    let marginAllocationPct = this.config.marginAllocationPct;
 
     try {
       const account = await this.broker.getAccount();
@@ -439,50 +469,103 @@ export class AutoPilotManager {
         return;
       }
 
-      // Strictly enforce 10% maximum margin allocation
-      const marginAllocationPct = Math.min(10.0, this.config.marginAllocationPct);
-      const targetMarginUsd = Number(((balance * marginAllocationPct) / 100).toFixed(2));
-      marginUsd = Math.min(targetMarginUsd, account.availableBalance);
+      const snapshot = this.confluenceEngine.getSnapshot(symbol);
+      const score = snapshot?.compositeScore ?? 75;
 
-      if (marginUsd < 5.0) {
-        this.state = 'IDLE';
-        this.onOrderDispatched?.({
-          symbol,
-          side,
-          action: 'FAILED',
-          price: limitPrice,
-          marginUsd,
+      if (this.adaptiveSizingEngine) {
+        const sizing = this.adaptiveSizingEngine.calculateSizing({
+          confluenceScore: score,
+          walletBalance: balance,
+          availableBalance: account.availableBalance,
           leverage,
-          atr,
-          errorMessage: `Calculated margin ${marginUsd} USD below minimum 5.0 USD threshold`,
+          atr14: atr,
+          consecutiveLosses: this.consecutiveLosses,
         });
-        return;
+        this.latestSizingBreakdown = sizing;
+
+        if (!sizing.solvencyAirbagOk) {
+          this.state = 'IDLE';
+          this.blockReason = 'BLOCKED_AIRBAG_VIOLATION';
+          this.statusMessage = 'Hard Solvency Airbag: Available balance < 20% of wallet equity';
+          this.broadcastStatus();
+          this.onOrderDispatched?.({
+            symbol,
+            side,
+            action: 'FAILED',
+            price: limitPrice,
+            marginUsd: 0,
+            leverage,
+            atr,
+            errorMessage: 'BLOCKED_AIRBAG_VIOLATION: Available balance below 20% wallet equity reserve',
+          });
+          return;
+        }
+
+        if (sizing.finalMarginPct <= 0 || sizing.marginUsd < 5.0) {
+          this.state = 'IDLE';
+          this.onOrderDispatched?.({
+            symbol,
+            side,
+            action: 'FAILED',
+            price: limitPrice,
+            marginUsd: sizing.marginUsd,
+            leverage,
+            atr,
+            errorMessage: `Calculated margin ${sizing.marginUsd} USD below minimum 5.0 USD threshold or sub-threshold score`,
+          });
+          return;
+        }
+
+        marginUsd = sizing.marginUsd;
+        marginAllocationPct = Number((sizing.finalMarginPct * 100).toFixed(2));
+      } else {
+        // Strictly enforce 10% maximum margin allocation
+        const maxMarginPct = Math.min(10.0, this.config.marginAllocationPct);
+        const targetMarginUsd = Number(((balance * maxMarginPct) / 100).toFixed(2));
+        marginUsd = Math.min(targetMarginUsd, account.availableBalance);
+        marginAllocationPct = maxMarginPct;
+
+        if (marginUsd < 5.0) {
+          this.state = 'IDLE';
+          this.onOrderDispatched?.({
+            symbol,
+            side,
+            action: 'FAILED',
+            price: limitPrice,
+            marginUsd,
+            leverage,
+            atr,
+            errorMessage: `Calculated margin ${marginUsd} USD below minimum 5.0 USD threshold`,
+          });
+          return;
+        }
       }
 
+      const notionalUsd = marginUsd * leverage;
+      const targetQty = Number((notionalUsd / markPrice).toFixed(4));
+      const refPrice = this.chasingExecutionEngine ? markPrice : limitPrice;
+
       // Dead-SL Armor Clamping:
-      // Raw SL at 1.5x ATR, strictly clamped to safe side of isolated liquidation:
-      // stopLoss = side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)
-      const estLiq = calculateLiquidationPrice(side, limitPrice, leverage, 0.005);
+      const estLiq = calculateLiquidationPrice(side, refPrice, leverage, 0.005);
       const rawSl = side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr;
       const stopLoss = Number(
         (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(2)
       );
 
       // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
-      const risk = Math.abs(limitPrice - stopLoss);
-      const snapshot = this.confluenceEngine.getSnapshot(symbol);
-      const clusters = this.confluenceEngine.liquidationEngine.projectClusters(limitPrice, 100_000_000);
+      const risk = Math.abs(refPrice - stopLoss);
+      const clusters = this.confluenceEngine.liquidationEngine.projectClusters(refPrice, 100_000_000);
 
       let clusterTp1: number | null = null;
       if (snapshot?.macroRegime) {
         if (side === 'BUY') {
           const shortClusters = clusters
-            .filter((c) => c.side === 'SHORT_LIQ' && c.price > limitPrice)
+            .filter((c) => c.side === 'SHORT_LIQ' && c.price > refPrice)
             .sort((a, b) => a.price - b.price);
 
           for (const sc of shortClusters) {
-            const reward = sc.price - limitPrice;
-            const distPct = reward / limitPrice;
+            const reward = sc.price - refPrice;
+            const distPct = reward / refPrice;
             const rr = risk > 0 ? reward / risk : 0;
             if (distPct >= 0.005 && rr >= 1.5) {
               clusterTp1 = sc.price;
@@ -491,12 +574,12 @@ export class AutoPilotManager {
           }
         } else {
           const longClusters = clusters
-            .filter((c) => c.side === 'LONG_LIQ' && c.price < limitPrice)
+            .filter((c) => c.side === 'LONG_LIQ' && c.price < refPrice)
             .sort((a, b) => b.price - a.price);
 
           for (const lc of longClusters) {
-            const reward = limitPrice - lc.price;
-            const distPct = reward / limitPrice;
+            const reward = refPrice - lc.price;
+            const distPct = reward / refPrice;
             const rr = risk > 0 ? reward / risk : 0;
             if (distPct >= 0.005 && rr >= 1.5) {
               clusterTp1 = lc.price;
@@ -514,7 +597,7 @@ export class AutoPilotManager {
           ? Math.max(2.0 * atr, risk * 1.5)
           : markPrice * 0.025;
         tp1 = Number(
-          (side === 'BUY' ? markPrice + fallbackReward : markPrice - fallbackReward).toFixed(2)
+          (side === 'BUY' ? refPrice + fallbackReward : refPrice - fallbackReward).toFixed(2)
         );
       }
 
@@ -526,40 +609,254 @@ export class AutoPilotManager {
         (side === 'BUY' ? markPrice + tp2Reward : markPrice - tp2Reward).toFixed(2)
       );
 
-      const trade = await this.tradeManager.openPosition({
-        symbol,
-        side,
-        orderType: 'LIMIT',
-        limitPrice,
-        marginUsd,
-        leverage,
-        stopLoss,
-        tp1,
-        tp2,
-        marginAllocationPct,
-      });
+      if (this.chasingExecutionEngine) {
+        this.state = 'LIMIT_CHASING';
+        this.broadcastStatus();
 
-      this.tradesRepo.update(trade.id, {
-        peak_price: limitPrice,
-        peak_mfe: 0,
-        trailing_stop_active: 0,
-      });
+        const tradeId = crypto.randomUUID();
+        const startTime = Date.now();
+        let executedQty = 0;
+        let effectivePrice = markPrice;
+        let amendCount = 0;
+        let finalStatus = 'FILLED';
 
-      this.openTradeId = trade.id;
-      this.state = 'POSITION_OPEN';
-      this.oppositeConsensusTickCount = 0;
-      this.broadcastStatus();
+        const getDepth = async () => {
+          const bids = this.confluenceEngine.orderFlowEngine.getBids();
+          const asks = this.confluenceEngine.orderFlowEngine.getAsks();
+          if (bids.length > 0 && asks.length > 0) {
+            return { bestBid: bids[0].price, bestAsk: asks[0].price };
+          }
+          return { bestBid: markPrice - 0.01, bestAsk: markPrice + 0.01 };
+        };
 
-      this.onOrderDispatched?.({
-        symbol,
-        side,
-        action: 'EXECUTED',
-        price: limitPrice,
-        marginUsd,
-        leverage,
-        atr,
-        tradeId: trade.id,
-      });
+        const checkFill = async (orderId: string) => {
+          const openOrders = await this.broker.getOpenOrders(symbol);
+          const found = openOrders.find((o) => o.orderId === orderId);
+          if (!found) {
+            return { fillPrice: effectivePrice, fillQty: targetQty };
+          }
+          if (found.executedQty && found.executedQty >= found.origQty) {
+            return { fillPrice: found.price, fillQty: found.executedQty };
+          }
+          return null;
+        };
+
+        const placeOrder = async (price: number, qty?: number) => {
+          effectivePrice = price;
+          const orderQty = qty ?? targetQty;
+          const res = await this.broker.openOrder({
+            symbol,
+            side,
+            orderType: 'LIMIT',
+            limitPrice: price,
+            marginUsd: (orderQty * price) / leverage,
+            leverage,
+            quantity: orderQty,
+          });
+          return res.orderId;
+        };
+
+        if (notionalUsd >= 5000 && this.twapExecutionSlicer) {
+          const twapResult = await this.twapExecutionSlicer.execute({
+            symbol,
+            side,
+            totalQty: targetQty,
+            anchorPrice: markPrice,
+            getDepth,
+            checkFill,
+            placeOrder,
+          });
+          executedQty = twapResult.filledQty;
+          finalStatus = twapResult.status === 'COMPLETED' ? 'FILLED' : twapResult.status;
+          amendCount = twapResult.slices.length;
+        } else {
+          const chaseResult = await this.chasingExecutionEngine.chase({
+            symbol,
+            side,
+            quantity: targetQty,
+            anchorPrice: markPrice,
+            getDepth,
+            checkFill,
+            placeOrder: (price) => placeOrder(price, targetQty),
+          });
+          finalStatus = chaseResult.status;
+          amendCount = chaseResult.amendCount;
+          executedQty = chaseResult.fillQty ?? (chaseResult.status === 'FILLED' ? targetQty : 0);
+          if (chaseResult.fillPrice) effectivePrice = chaseResult.fillPrice;
+        }
+
+        const feeSavedUsd = Number((notionalUsd * 0.0003).toFixed(4));
+
+        this.executionChaseLogsRepo.insert({
+          trade_id: tradeId,
+          symbol,
+          anchor_price: markPrice,
+          amend_count: amendCount,
+          duration_ms: Date.now() - startTime,
+          final_status: finalStatus,
+          effective_price: effectivePrice,
+          fee_saved_usd: finalStatus === 'FILLED' ? feeSavedUsd : 0,
+          created_at: Date.now(),
+        });
+
+        if (finalStatus !== 'FILLED' && executedQty <= 0) {
+          this.state = 'IDLE';
+          this.openTradeId = null;
+          this.broadcastStatus();
+          this.onOrderDispatched?.({
+            symbol,
+            side,
+            action: 'FAILED',
+            price: effectivePrice,
+            marginUsd,
+            leverage,
+            atr,
+            errorMessage: `Maker Limit Chasing ended with status: ${finalStatus}`,
+          });
+          return;
+        }
+
+        const oppositeSide: TradeSide = side === 'BUY' ? 'SELL' : 'BUY';
+        let slAlgoId: string | null = null;
+        let tp1AlgoId: string | null = null;
+        let tp2AlgoId: string | null = null;
+
+        try {
+          const slRes = await this.broker.createAlgoOrder({
+            symbol,
+            side: oppositeSide,
+            type: 'STOP_MARKET',
+            triggerPrice: stopLoss,
+            quantity: executedQty,
+            clientAlgoId: `tos_${tradeId}_sl`,
+            reduceOnly: true,
+          });
+          slAlgoId = slRes.algoId;
+        } catch (slErr) {
+          console.warn('[AutoPilot] SL Algo creation failed:', slErr);
+        }
+
+        try {
+          const tp1Res = await this.broker.createAlgoOrder({
+            symbol,
+            side: oppositeSide,
+            type: 'TAKE_PROFIT_MARKET',
+            triggerPrice: tp1,
+            quantity: Number((executedQty * 0.5).toFixed(4)),
+            clientAlgoId: `tos_${tradeId}_tp1`,
+            reduceOnly: true,
+          });
+          tp1AlgoId = tp1Res.algoId;
+        } catch {}
+
+        try {
+          const tp2Res = await this.broker.createAlgoOrder({
+            symbol,
+            side: oppositeSide,
+            type: 'TAKE_PROFIT_MARKET',
+            triggerPrice: tp2,
+            quantity: Number((executedQty * 0.5).toFixed(4)),
+            clientAlgoId: `tos_${tradeId}_tp2`,
+            reduceOnly: true,
+          });
+          tp2AlgoId = tp2Res.algoId;
+        } catch {}
+
+        const bePrice = Number(
+          (side === 'BUY' ? effectivePrice * 1.0015 : effectivePrice * 0.9985).toFixed(4)
+        );
+
+        const tradeRecord: TradeRecord = {
+          id: tradeId,
+          symbol,
+          broker_mode: this.broker.mode,
+          side,
+          status: 'OPEN',
+          entry_price: effectivePrice,
+          exit_price: null,
+          quantity: executedQty,
+          remaining_qty: executedQty,
+          leverage,
+          margin_usd: marginUsd,
+          stop_loss: stopLoss,
+          tp1,
+          tp2,
+          be_price: bePrice,
+          is_breakeven: 0,
+          peak_price: effectivePrice,
+          peak_mfe: 0,
+          trailing_stop_active: 0,
+          client_order_id: `tos_${tradeId}_ent`,
+          client_sl_id: `tos_${tradeId}_sl`,
+          client_tp1_id: `tos_${tradeId}_tp1`,
+          client_tp2_id: `tos_${tradeId}_tp2`,
+          entry_order_id: tradeId,
+          sl_algo_id: slAlgoId,
+          tp1_algo_id: tp1AlgoId,
+          tp2_algo_id: tp2AlgoId,
+          realized_pnl: 0,
+          fees_usd: Number((notionalUsd * 0.0002).toFixed(4)),
+          exit_reason: null,
+          opened_at: Date.now(),
+          closed_at: null,
+        };
+
+        this.tradesRepo.insert(tradeRecord);
+        this.openTradeId = tradeId;
+        this.state = 'POSITION_OPEN';
+        this.oppositeConsensusTickCount = 0;
+        this.broadcastStatus();
+
+        this.onOrderDispatched?.({
+          symbol,
+          side,
+          action: 'EXECUTED',
+          price: effectivePrice,
+          marginUsd,
+          leverage,
+          atr,
+          tradeId,
+        });
+      } else {
+        const limitPrice = Number(
+          (side === 'BUY' ? markPrice * 1.0010 : markPrice * 0.9990).toFixed(2)
+        );
+
+        const trade = await this.tradeManager.openPosition({
+          symbol,
+          side,
+          orderType: 'LIMIT',
+          limitPrice,
+          marginUsd,
+          leverage,
+          stopLoss,
+          tp1,
+          tp2,
+          marginAllocationPct,
+        });
+
+        this.tradesRepo.update(trade.id, {
+          peak_price: limitPrice,
+          peak_mfe: 0,
+          trailing_stop_active: 0,
+        });
+
+        this.openTradeId = trade.id;
+        this.state = 'POSITION_OPEN';
+        this.oppositeConsensusTickCount = 0;
+        this.broadcastStatus();
+
+        this.onOrderDispatched?.({
+          symbol,
+          side,
+          action: 'EXECUTED',
+          price: limitPrice,
+          marginUsd,
+          leverage,
+          atr,
+          tradeId: trade.id,
+        });
+      }
     } catch (err: any) {
       this.state = 'IDLE';
       this.openTradeId = null;
@@ -570,7 +867,7 @@ export class AutoPilotManager {
         symbol,
         side,
         action: 'FAILED',
-        price: limitPrice,
+        price: markPrice,
         marginUsd,
         leverage,
         atr,

@@ -470,4 +470,17 @@ export class BinanceDemoAdapter implements BrokerAdapter {
       );
     }
   }
+
+  /**
+   * Amends an in-flight order on Binance Demo via PUT /fapi/v1/order.
+   * Delegates to binanceClient.modifyOrder; propagates -5022 Post-Only rejection.
+   */
+  async modifyOrder(
+    symbol: string,
+    orderId: string | number,
+    price: number,
+    quantity: number
+  ): Promise<any> {
+    return this.client.modifyOrder(symbol, orderId, price, quantity);
+  }
 }

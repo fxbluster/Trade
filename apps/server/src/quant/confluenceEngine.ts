@@ -11,6 +11,10 @@ import type {
   CvdSnapshot,
   KlineCandle,
   BlockReason,
+  FactorOutput,
+  FactorDetail,
+  FactorEvaluationContext,
+  NoiseBandTelemetry,
 } from '@tradeos/shared';
 import { calculateCompositeConfluenceScore, EMPIRICAL_CONFLUENCE_WEIGHTS } from '@tradeos/shared';
 import { HierarchicalMtfManager } from './hierarchicalMtfManager.js';
@@ -20,6 +24,7 @@ import { SentimentHarvester } from './sentimentHarvester.js';
 import { LiquidationEngine } from './liquidationEngine.js';
 import { NoiseBandEngine, noiseBandEngine } from './noiseBandEngine.js';
 import { EconomicEventGuard, economicEventGuard } from './economicEventGuard.js';
+import type { AlphaRegistry, CompositeFactorEvaluation } from './alphaRegistry.js';
 
 export interface ConfluenceMarketData {
   symbol: string;
@@ -29,8 +34,10 @@ export interface ConfluenceMarketData {
   recentHigh?: number;
   recentLow?: number;
   candle15m?: KlineCandle;
+  candles?: KlineCandle[];
   vwap?: number;
   timestamp?: number;
+  depth?: { bids: DepthLevel[]; asks: DepthLevel[] };
 }
 
 interface StoredPineAlert {
@@ -46,6 +53,7 @@ export interface ConfluenceEngineOptions {
   liquidationEngine?: LiquidationEngine;
   noiseBandEngine?: NoiseBandEngine;
   economicEventGuard?: EconomicEventGuard;
+  alphaRegistry?: AlphaRegistry;
 }
 
 /**
@@ -68,6 +76,7 @@ export class ConfluenceEngine {
   public readonly liquidationEngine: LiquidationEngine;
   public readonly noiseBandEngine: NoiseBandEngine;
   public readonly economicEventGuard: EconomicEventGuard;
+  public alphaRegistry: AlphaRegistry | null = null;
 
   private latestPineAlert: StoredPineAlert | null = null;
   private readonly alertNonceCache: Map<string, number> = new Map(); // alert_id -> timestamp (60s LRU)
@@ -84,6 +93,7 @@ export class ConfluenceEngine {
       this.liquidationEngine = new LiquidationEngine();
       this.noiseBandEngine = noiseBandEngine;
       this.economicEventGuard = economicEventGuard;
+      this.alphaRegistry = null;
     } else {
       const opts = (options as ConfluenceEngineOptions) || {};
       this.mtfManager = opts.mtfManager || new HierarchicalMtfManager();
@@ -93,7 +103,16 @@ export class ConfluenceEngine {
       this.liquidationEngine = opts.liquidationEngine || new LiquidationEngine();
       this.noiseBandEngine = opts.noiseBandEngine || noiseBandEngine;
       this.economicEventGuard = opts.economicEventGuard || economicEventGuard;
+      this.alphaRegistry = opts.alphaRegistry || null;
     }
+  }
+
+  public setAlphaRegistry(registry: AlphaRegistry): void {
+    this.alphaRegistry = registry;
+  }
+
+  public getAlphaRegistry(): AlphaRegistry | null {
+    return this.alphaRegistry;
   }
 
   public setConsensusThreshold(threshold: number): void {
@@ -210,21 +229,6 @@ export class ConfluenceEngine {
       }
     }
 
-    const { compositeScore, bias: mathBias, recommendedAction } =
-      calculateCompositeConfluenceScore(pillars, macroVetoActive, EMPIRICAL_CONFLUENCE_WEIGHTS);
-
-    // Institutional consensus rule:
-    // 1. Either compositeScore >= 75 (STRONG signal)
-    // 2. OR compositeScore >= 60 AND active directional pillars >= this.consensusThreshold (standard institutional consensus)
-    // 3. No macro veto is active
-    const directionalCount = mathBias === 'BULLISH' ? bullishCount : mathBias === 'BEARISH' ? bearishCount : 0;
-    const thresholdMet = directionalCount >= this.consensusThreshold;
-    const isActionable =
-      recommendedAction === 'BUY' ||
-      recommendedAction === 'STRONG_BUY' ||
-      recommendedAction === 'SELL' ||
-      recommendedAction === 'STRONG_SELL';
-
     // Pre-consensus gates: Economic Event Blackout & Noise Band Filter
     const gateCheck = this.checkPreTradeGates(
       symbol,
@@ -238,12 +242,108 @@ export class ConfluenceEngine {
     const eventBlackoutActive = gateCheck.reason === 'BLOCKED_EVENT_BLACKOUT';
     const noiseBandActive = gateCheck.reason === 'BLOCKED_NOISE_BAND';
 
+    const noiseBandTelemetry: NoiseBandTelemetry | undefined =
+      data.candle15m && data.vwap !== undefined
+        ? {
+            active: noiseBandActive,
+            currentTrueRange15m: Number((data.candle15m.high - data.candle15m.low).toFixed(4)),
+            meanTrueRange20d: this.noiseBandEngine.getThreshold(new Date(now).getUTCHours()) / 1.25,
+            noiseThreshold: this.noiseBandEngine.getThreshold(new Date(now).getUTCHours()),
+            isNoise: noiseBandActive,
+            currentPrice,
+            vwap: data.vwap,
+            vwapDistancePct:
+              data.vwap > 0
+                ? Number((Math.abs(currentPrice - data.vwap) / data.vwap).toFixed(6))
+                : 0,
+          }
+        : undefined;
+
+    // Quantitative factor evaluation via AlphaRegistry (invoked if pre-trade gates pass)
+    let alphaEval: CompositeFactorEvaluation | null = null;
+    if (!eventBlackoutActive && this.alphaRegistry) {
+      const candles =
+        data.candles ||
+        (data.candle15m ? [data.candle15m] : this.mtfManager.getCandles(symbol, '1m'));
+      const depth = data.depth || this.orderFlowEngine.getDepth();
+      const context: FactorEvaluationContext = {
+        symbol,
+        currentPrice,
+        depth,
+        cvd: cvd ?? undefined,
+        candles,
+        indicators: indicators ?? undefined,
+        timestamp: now,
+      };
+      try {
+        alphaEval = this.alphaRegistry.evaluate(context);
+      } catch (err) {
+        console.warn('[ConfluenceEngine] AlphaRegistry evaluation error:', err);
+      }
+    }
+
+    let compositeScore: number;
+    let mathBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    let baseRecommendedAction: 'STRONG_BUY' | 'BUY' | 'WAIT' | 'SELL' | 'STRONG_SELL' = 'WAIT';
+
+    if (alphaEval && alphaEval.details && alphaEval.details.length > 0) {
+      compositeScore = alphaEval.compositeScore;
+      mathBias = alphaEval.compositeBias;
+      if (macroVetoActive) {
+        baseRecommendedAction = 'WAIT';
+      } else if (mathBias === 'BULLISH') {
+        baseRecommendedAction = compositeScore >= 75 ? 'STRONG_BUY' : compositeScore >= 60 ? 'BUY' : 'WAIT';
+      } else if (mathBias === 'BEARISH') {
+        baseRecommendedAction = compositeScore >= 75 ? 'STRONG_SELL' : compositeScore >= 60 ? 'SELL' : 'WAIT';
+      } else {
+        baseRecommendedAction = 'WAIT';
+      }
+    } else {
+      const legacyResult = calculateCompositeConfluenceScore(
+        pillars,
+        macroVetoActive,
+        EMPIRICAL_CONFLUENCE_WEIGHTS
+      );
+      compositeScore = legacyResult.compositeScore;
+      mathBias = legacyResult.bias;
+      baseRecommendedAction = legacyResult.recommendedAction;
+    }
+
+    // Institutional consensus rule:
+    // 1. Either compositeScore >= 75 (STRONG signal)
+    // 2. OR compositeScore >= 60 AND active directional pillars >= this.consensusThreshold (standard institutional consensus)
+    // 3. No macro veto is active
+    const directionalCount = mathBias === 'BULLISH' ? bullishCount : mathBias === 'BEARISH' ? bearishCount : 0;
+    const thresholdMet = directionalCount >= this.consensusThreshold;
+    const isActionable =
+      baseRecommendedAction === 'BUY' ||
+      baseRecommendedAction === 'STRONG_BUY' ||
+      baseRecommendedAction === 'SELL' ||
+      baseRecommendedAction === 'STRONG_SELL';
+
     const consensusMet =
       !gateCheck.blocked &&
       !macroVetoActive &&
       (compositeScore >= 75 || (compositeScore >= 60 && thresholdMet && isActionable));
     const consensusBias = consensusMet ? mathBias : 'NEUTRAL';
-    const finalRecommendedAction = gateCheck.blocked ? 'WAIT' : recommendedAction;
+    const finalRecommendedAction = gateCheck.blocked ? 'WAIT' : baseRecommendedAction;
+
+    const factorDetails: FactorDetail[] | undefined = alphaEval?.details;
+    const factorOutputs: FactorOutput[] | undefined = alphaEval?.details?.map((d) => ({
+      factorId: d.factorId,
+      bias: d.bias,
+      rawAlpha: d.rawAlpha,
+      confidence: d.confidence,
+      uncertainty: Number((1 - d.confidence).toFixed(4)),
+      halfLifeMs: 900_000,
+      metadata: {
+        name: d.name,
+        orthogonalAlpha: d.orthogonalAlpha,
+        posteriorWeight: d.posteriorWeight,
+        isCollinear: d.isCollinear,
+        informationRatio: d.informationRatio,
+      },
+    }));
 
     const snapshot: ConfluenceSnapshot = {
       symbol: symbol.toUpperCase(),
@@ -264,6 +364,9 @@ export class ConfluenceEngine {
       blockReason,
       eventBlackoutActive,
       noiseBandActive,
+      noiseBand: noiseBandTelemetry,
+      factorOutputs,
+      factorDetails,
     };
 
     this.latestSnapshot = snapshot;

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { LiquidationEngine } from '../liquidationEngine.js';
 import { ConfluenceEngine } from '../confluenceEngine.js';
 import type { TechnicalSummary, CvdSnapshot, KlineCandle } from '@tradeos/shared';
@@ -317,6 +317,75 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
       expect(snap.macroRegime).toBe('MACRO_BEARISH');
       expect(snap.macroVetoActive).toBe(true);
       expect(snap.recommendedAction).toBe('WAIT'); // Blocked by Macro Veto
+    });
+
+    it('delegates to AlphaRegistry when registered and pre-trade gates pass', () => {
+      const mockEvaluate = vi.fn().mockReturnValue({
+        compositeBias: 'BULLISH',
+        compositeScore: 91,
+        rawConviction: 0.82,
+        details: [
+          {
+            factorId: 'ORDER_FLOW_L2',
+            name: 'Order Flow L2',
+            rawAlpha: 0.85,
+            orthogonalAlpha: 0.85,
+            posteriorWeight: 0.25,
+            bias: 'BULLISH',
+            confidence: 0.9,
+            isCollinear: false,
+            informationRatio: 1.8,
+          },
+        ],
+        evaluatedAt: Date.now(),
+      });
+
+      const mockRegistry = {
+        evaluate: mockEvaluate,
+      } as any;
+
+      engine.setAlphaRegistry(mockRegistry);
+
+      const snap = engine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 100,
+        indicators: createMockIndicators(),
+        cvd: null,
+      });
+
+      expect(mockEvaluate).toHaveBeenCalled();
+      expect(snap.compositeScore).toBe(91);
+      expect(snap.factorDetails).toBeDefined();
+      expect(snap.factorDetails?.length).toBe(1);
+      expect(snap.factorDetails?.[0].factorId).toBe('ORDER_FLOW_L2');
+      expect(snap.factorOutputs).toBeDefined();
+      expect(snap.factorOutputs?.[0].rawAlpha).toBe(0.85);
+    });
+
+    it('blocks AlphaRegistry evaluation when EconomicEventGuard blackout is active', () => {
+      const mockEvaluate = vi.fn();
+      const mockRegistry = { evaluate: mockEvaluate } as any;
+      engine.setAlphaRegistry(mockRegistry);
+
+      engine.economicEventGuard.addEvent({
+        id: 'test_event_cpi',
+        name: 'US CPI Release',
+        timestamp: Date.now(),
+        impact: 'HIGH',
+        currency: 'USD',
+      });
+
+      const snap = engine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 100,
+        indicators: createMockIndicators(),
+        cvd: null,
+      });
+
+      expect(snap.blockReason).toBe('BLOCKED_EVENT_BLACKOUT');
+      expect(snap.eventBlackoutActive).toBe(true);
+      expect(snap.recommendedAction).toBe('WAIT');
+      expect(mockEvaluate).not.toHaveBeenCalled();
     });
   });
 });

@@ -11,6 +11,8 @@ import type {
   AlertLevel,
   ConfluenceSnapshot,
   AutoPilotConfig,
+  ChasingOrderState,
+  SizingBreakdown,
 } from '@tradeos/shared';
 import { getSessionToken, invalidateSessionToken } from './apiClient';
 
@@ -52,6 +54,8 @@ export type AutoPilotStatusData = {
   filledToday?: number;
   maxDailyTrades?: number;
   cooldownRemainingSec?: number;
+  chasingOrder?: ChasingOrderState;
+  sizingBreakdown?: SizingBreakdown;
 };
 
 type MessageHandlers = {

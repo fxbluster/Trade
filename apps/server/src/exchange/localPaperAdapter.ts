@@ -393,4 +393,30 @@ export class LocalPaperAdapter implements BrokerAdapter {
     }
     return leverage;
   }
+
+  /**
+   * In-memory modifyOrder: updates the simulated open order's price and quantity.
+   * Returns a synthetic amended order response (mirrors Binance shape).
+   */
+  async modifyOrder(
+    symbol: string,
+    orderId: string | number,
+    price: number,
+    quantity: number
+  ): Promise<any> {
+    const symUpper = symbol.toUpperCase();
+    const orderIdStr = String(orderId);
+    const ord = this.openOrders.get(orderIdStr);
+    if (ord && ord.symbol === symUpper) {
+      ord.price = price;
+      ord.quantity = quantity;
+    }
+    return {
+      orderId: orderIdStr,
+      symbol: symUpper,
+      price,
+      origQty: quantity,
+      status: 'NEW',
+    };
+  }
 }

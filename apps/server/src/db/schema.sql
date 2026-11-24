@@ -197,5 +197,36 @@ CREATE TABLE IF NOT EXISTS economic_events (
 
 CREATE INDEX IF NOT EXISTS idx_economic_events_ts ON economic_events(timestamp);
 
+CREATE TABLE IF NOT EXISTS factor_telemetry (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp INTEGER NOT NULL,
+  symbol TEXT NOT NULL,
+  factor_id TEXT NOT NULL,
+  raw_alpha REAL NOT NULL,
+  orthogonal_alpha REAL NOT NULL,
+  confidence REAL NOT NULL,
+  uncertainty REAL NOT NULL,
+  weight REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_factor_telemetry_sym_factor ON factor_telemetry(symbol, factor_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_factor_telemetry_ts ON factor_telemetry(timestamp);
+
+CREATE TABLE IF NOT EXISTS execution_chase_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trade_id TEXT NOT NULL,
+  symbol TEXT NOT NULL,
+  anchor_price REAL NOT NULL,
+  amend_count INTEGER NOT NULL,
+  duration_ms INTEGER NOT NULL,
+  final_status TEXT NOT NULL,
+  effective_price REAL NOT NULL,
+  fee_saved_usd REAL NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_chase_trade_id ON execution_chase_logs(trade_id);
+CREATE INDEX IF NOT EXISTS idx_execution_chase_sym_ts ON execution_chase_logs(symbol, created_at);
+
 
 

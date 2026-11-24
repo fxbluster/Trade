@@ -65,6 +65,7 @@ export interface BrokerAdapter {
   moveToBreakeven(symbol: string, bePrice: number, currentSlId?: string): Promise<{ newSlId: string }>;
   getOpenOrders(symbol?: string): Promise<OpenOrderInfo[]>;
   setLeverage?(symbol: string, leverage: number): Promise<number>;
+  modifyOrder?(symbol: string, orderId: string | number, price: number, quantity: number): Promise<any>;
 }
 
 export interface BrokerFactoryOptions {

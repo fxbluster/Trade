@@ -3,7 +3,7 @@
  * Single source of truth for backend (apps/server) and frontend (apps/web).
  */
 
-import type { BlockReason } from './types.js';
+import type { BlockReason, AutoPilotState } from './types.js';
 
 export type BrokerMode = 'BINANCE_DEMO' | 'LOCAL_PAPER';
 
@@ -92,6 +92,11 @@ export interface ConfluenceSnapshot {
   blockReason?: BlockReason | null;
   eventBlackoutActive?: boolean;
   noiseBandActive?: boolean;
+  noiseBand?: NoiseBandTelemetry;
+  sizingBreakdown?: SizingBreakdown;
+  chasingOrder?: ChasingOrderState;
+  factorOutputs?: FactorOutput[];
+  factorDetails?: FactorDetail[];
 }
 
 export interface AutoPilotConfig {
@@ -452,7 +457,7 @@ export type WsServerMessage =
   | {
       type: 'AUTOPILOT_STATUS';
       data: {
-        state: string;
+        state: AutoPilotState | string;
         config: AutoPilotConfig;
         openTradeId: string | null;
         message?: string;
@@ -460,6 +465,8 @@ export type WsServerMessage =
         filledToday?: number;
         maxDailyTrades?: number;
         cooldownRemainingSec?: number;
+        chasingOrder?: ChasingOrderState;
+        sizingBreakdown?: SizingBreakdown;
       };
     };
 
@@ -618,9 +625,125 @@ export interface PnlSummaryResponse {
   timestamp: number;
 }
 
+// ----------------------------------------------------------------------------
+// Next-Gen Modular Quantitative Architecture Contracts
+// ----------------------------------------------------------------------------
+
+export interface DepthLevel {
+  price: number;
+  qty: number;
+}
+
+export interface FactorOutput {
+  factorId: string;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  rawAlpha: number; // Continuous in [-1.0, +1.0]
+  confidence: number; // [0.0, 1.0]
+  uncertainty: number; // Variance of factor estimate
+  halfLifeMs: number; // Factor decay horizon
+  metadata: Record<string, unknown>;
+}
+
+export interface FactorDetail {
+  factorId: string;
+  name: string;
+  rawAlpha: number;
+  orthogonalAlpha: number;
+  posteriorWeight: number;
+  bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  confidence: number;
+  isCollinear: boolean;
+  informationRatio: number;
+}
+
+export interface FactorEvaluationContext {
+  symbol: string;
+  currentPrice: number;
+  depth?: { bids: DepthLevel[]; asks: DepthLevel[] };
+  cvd?: CvdSnapshot;
+  candles: KlineCandle[];
+  indicators?: TechnicalSummary;
+  timestamp: number;
+}
+
+export type AlphaFactorCategory =
+  | 'MICROSTRUCTURE'
+  | 'STRUCTURE'
+  | 'MOMENTUM'
+  | 'ARBITRAGE'
+  | 'VOLATILITY';
+
+export interface AlphaFactorMetadata {
+  id: string;
+  name: string;
+  category: AlphaFactorCategory;
+  defaultWeight: number;
+  currentWeight: number;
+  hitRate: number;
+  sharpeRatio: number;
+  isDecayed: boolean;
+}
+
+export type ChasingStatus =
+  | 'IDLE'
+  | 'PENDING'
+  | 'CHASING'
+  | 'AMENDING'
+  | 'FILLED'
+  | 'CANCELLED'
+  | 'TIMEOUT'
+  | 'FAILED';
+
+export interface ChasingOrderState {
+  active: boolean;
+  orderId: string | null;
+  symbol: string;
+  side: TradeSide;
+  anchorPrice: number;
+  currentLimitPrice: number;
+  amendCount: number;
+  startTime: number;
+  timeoutMs: number;
+  status: ChasingStatus;
+  feeSavedUsd: number;
+}
+
+export type SizingArchetype =
+  | 'Sub-Threshold'
+  | 'Exploratory Probe'
+  | 'Standard Institutional'
+  | 'High-Conviction Core'
+  | 'A+ Institutional Setup'
+  | string;
+
+export interface SizingBreakdown {
+  confluenceScore: number;
+  archetype: SizingArchetype;
+  rawMarginPct: number;
+  kellyDampener: number;
+  volatilityParity: number;
+  circuitMultiplier: number;
+  finalMarginPct: number;
+  marginUsd: number;
+  notionalUsd: number;
+  solvencyAirbagOk: boolean;
+}
+
+export interface NoiseBandTelemetry {
+  active: boolean;
+  currentTrueRange15m: number;
+  meanTrueRange20d: number;
+  noiseThreshold: number;
+  isNoise: boolean;
+  currentPrice: number;
+  vwap: number;
+  vwapDistancePct: number;
+}
+
 export type {
   ExitReason,
   BlockReason,
+  AutoPilotState,
   TrailingStopState,
   NoiseBandSnapshot,
   EconomicEvent,

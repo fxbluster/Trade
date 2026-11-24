@@ -5,7 +5,7 @@
 
 ## 1. Tamamlananlar (Faktiki Sübutlu)
 - [x] **Dizayn və Spesifikasiya:** `docs/designs/next-gen-modular-quant-architecture.md` təsdiqləndi.
-- [x] **Shared Müqavilələri və Tiplər (`packages/shared`, commit `a2300f6`):**
+- [x] **Shared Müqavilələri və Tiplər (`packages/shared`, commit `5277e1c`):**
   - `FactorOutput`, `FactorEvaluationContext`, `AlphaFactorMetadata`, `ChasingOrderState`, `SizingBreakdown`, `NoiseBandTelemetry`.
   - `BlockReason` (`BLOCKED_NOISE_BAND`, `BLOCKED_EVENT_BLACKOUT`, `BLOCKED_SESSION_TRADE_CAP`, `BLOCKED_CHASING_TIMEOUT`, `BLOCKED_AIRBAG_VIOLATION`), `ExitReason` (`TRAILING_GIVEBACK_HALF`, `EVENT_BLACKOUT_UNWIND`), `AutoPilotState` (`LIMIT_CHASING`).
   - AST / regex audit ilə `packages/shared`-də 0 Node.js native asılılığı təsdiqləndi.
@@ -45,9 +45,17 @@
 ## 2. Cari Addım
 - Bütün Next-Gen Quant memarlığı icra olundu, sınaqdan keçirildi və Port 3400 üzərində canlı yayımlandı.
 
-- [x] **Təcili Stop-Loss və Mühafizə Düzəlişi (Audit Rəyi, commit `a2300f6`):**
+- [x] **Təcili Stop-Loss və Mühafizə Düzəlişi (Audit Rəyi, commit `5277e1c`):**
   - `autoPilotManager.ts`: `placeBracketOrders` daxilində SL algo order xəta verərsə dərhal `closePosition(symbol, 'SL_PLACEMENT_FAILED_EMERGENCY_UNWIND')` ilə pozisiyanı bazar qiyməti ilə ləğv edir.
   - `autoPilotManager.ts`: `manageOpenPosition` daxilində ehtiyat `WATCHDOG_STOP_LOSS` əlavə edildi (Long `markPrice <= SL`, Short `markPrice >= SL` olduqda dərhal emergency exit).
   - `tradeManager.ts`: `handleOrderTradeUpdate` daxilində `sl`, `be`, `tp1`, `tp2` fill-ləri zamanı kumulyativ `realized_pnl` və `fees_usd` hesablanaraq `tradesRepo.update`-ə yazılır.
   - `packages/shared/src/types.ts`: `ExitReason` tipləri genişləndirildi.
   - 49 test faylı, 471/471 test 100% PASS.
+
+- [x] **Frontend Qalıqlarının Təmizlənməsi və Cooldown Sıfırlama (commit `5277e1c`):**
+  - `ConfluenceHUD.tsx`: Köhnə 7-pillar kartlar bloku tam silindi; başlıqda Next-Gen "Orthogonal Quant Conviction: Score: XX%" göstəricisi yerləşdirildi.
+  - `AutoPilotControls.tsx`: Köhnə "3/7, 4/7, 5/7, 6/7" düymələri "60%, 65%, 70%, 75%" kvant hədləri ilə əvəz olundu.
+  - `AutoPilotControls.tsx`: `COOLDOWN_ACTIVE` vəziyyətində dərhal sıfırlayan "Reset Cooldown" düyməsi əlavə edildi.
+  - `routes.ts` & `autoPilotManager.ts`: `POST /api/autopilot/reset-cooldown` endpoint-i və `resetCooldown()` metodu yazıldı.
+  - Monorepo Vitest: 49 test faylı, 475/475 test 100% PASS.
+  - Web Build: `dist/index.html` və assetlər yenidən yaradıldı və Port 3400-də yayımlandı.

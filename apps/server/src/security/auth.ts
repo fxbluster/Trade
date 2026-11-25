@@ -8,9 +8,23 @@ import {
 
 export const MAX_BODY_BYTES = 256 * 1024; // 256 KB limit
 
+function getNormalizedPublicDomainHostname(): string | null {
+  const raw = (process.env.PUBLIC_DOMAIN || '').trim().toLowerCase();
+  if (!raw) return null;
+  try {
+    if (raw.includes('://')) {
+      return new URL(raw).hostname.replace(/\.$/, '').toLowerCase();
+    }
+  } catch {
+    // Fall through to raw host normalization
+  }
+  return raw.replace(/\.$/, '').split(':')[0] || null;
+}
+
 /**
  * Validates Host header against DNS rebinding attacks.
- * Strictly permits only 127.0.0.1 and localhost on the configured port.
+ * Strictly permits only 127.0.0.1 and localhost on the configured port,
+ * or exact normalized hostname match against PUBLIC_DOMAIN.
  */
 export const validateHost: Middleware = (req: Request, res: Response, next: NextHandler) => {
   const rawHost = req.headers['host'];
@@ -23,13 +37,14 @@ export const validateHost: Middleware = (req: Request, res: Response, next: Next
 
   // Normalize host (strip trailing dot if present)
   const host = rawHost.replace(/\.$/, '').toLowerCase();
-  const isTunnel =
-    host.endsWith('.trycloudflare.com') ||
-    host.endsWith('.trycloudflare.com:443') ||
-    ALLOWED_HOSTS.has(host) ||
-    (Boolean(process.env.PUBLIC_DOMAIN) && host.startsWith(process.env.PUBLIC_DOMAIN!.toLowerCase()));
+  const hostWithoutPort = host.split(':')[0];
+  const publicHostname = getNormalizedPublicDomainHostname();
 
-  if (!isTunnel) {
+  const isAllowed =
+    ALLOWED_HOSTS.has(host) ||
+    (publicHostname !== null && hostWithoutPort === publicHostname);
+
+  if (!isAllowed) {
     res.statusCode = 403;
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ error: `Forbidden: Host '${host}' rejected by DNS rebinding guard` }));
@@ -42,7 +57,7 @@ export const validateHost: Middleware = (req: Request, res: Response, next: Next
 /**
  * Validates Origin header against strict allowlist.
  * Allows requests with no Origin (direct server-side / same-origin without header)
- * and verified Cloudflare Tunnel hostnames.
+ * and exact normalized PUBLIC_DOMAIN origin hostname.
  */
 export const validateOrigin: Middleware = (req: Request, res: Response, next: NextHandler) => {
   const origin = req.headers['origin'];
@@ -52,10 +67,8 @@ export const validateOrigin: Middleware = (req: Request, res: Response, next: Ne
     if (!isAllowed) {
       try {
         const u = new URL(origin);
-        if (
-          u.hostname.endsWith('.trycloudflare.com') ||
-          (Boolean(process.env.PUBLIC_DOMAIN) && u.hostname === process.env.PUBLIC_DOMAIN!.toLowerCase())
-        ) {
+        const publicHostname = getNormalizedPublicDomainHostname();
+        if (publicHostname !== null && u.hostname.replace(/\.$/, '').toLowerCase() === publicHostname) {
           isAllowed = true;
         }
       } catch {}
@@ -70,7 +83,7 @@ export const validateOrigin: Middleware = (req: Request, res: Response, next: Ne
 
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Operator-Pin');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
 

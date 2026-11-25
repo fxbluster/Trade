@@ -3,8 +3,15 @@ import type {
   AccountInfo,
   OpenOrderRequest,
   OpenOrderInfo,
+  TradeSide,
+  FillRecord,
 } from '@tradeos/shared';
-import { BinanceClient, ExchangeDegradedError } from './binanceClient.js';
+import {
+  BinanceClient,
+  BinanceApiError,
+  ExchangeBannedError,
+  ExchangeDegradedError,
+} from './binanceClient.js';
 import type {
   BrokerAdapter,
   PositionInfo,
@@ -196,7 +203,7 @@ export class BinanceDemoAdapter implements BrokerAdapter {
         quantity: qty,
         price: req.orderType === 'LIMIT' ? req.limitPrice : undefined,
         newClientOrderId: req.clientOrderId,
-        timeInForce: req.orderType === 'LIMIT' ? 'GTC' : undefined,
+        timeInForce: req.orderType === 'LIMIT' ? (req.timeInForce ?? 'GTC') : undefined,
       });
 
       const orderId = String(res.orderId ?? '');
@@ -242,10 +249,17 @@ export class BinanceDemoAdapter implements BrokerAdapter {
         orderId,
         clientOrderId,
         status,
-        executedQty: executedQty > 0 ? executedQty : qty,
+        executedQty: Number.isFinite(executedQty) ? executedQty : 0,
         avgPrice,
       };
     } catch (err: any) {
+      if (
+        err instanceof BinanceApiError ||
+        err instanceof ExchangeBannedError ||
+        err instanceof ExchangeDegradedError
+      ) {
+        throw err;
+      }
       throw new ExchangeDegradedError(
         `Failed to open order on Binance Demo (${symUpper}): ${err.message}`,
         err
@@ -472,6 +486,79 @@ export class BinanceDemoAdapter implements BrokerAdapter {
   }
 
   /**
+   * Queries a single order by orderId via GET /fapi/v1/order.
+   * Returns null ONLY on confirmed Binance -2013 ("Order does not exist");
+   * throws ExchangeDegradedError on 5xx/network errors.
+   */
+  async getOrder(symbol: string, orderId: string): Promise<OrderExecutionResult | null> {
+    const symUpper = symbol.toUpperCase();
+    try {
+      const res = await this.client.getOrder(symUpper, orderId);
+      if (!res) return null;
+
+      const executedQty = parseFloat(res.executedQty ?? '0');
+      let avgPrice = parseFloat(res.avgPrice ?? '0');
+      if (avgPrice === 0 && executedQty > 0 && res.cumQuote) {
+        avgPrice = parseFloat(res.cumQuote) / executedQty;
+      }
+      if (avgPrice === 0 && parseFloat(res.price ?? '0') > 0) {
+        avgPrice = parseFloat(res.price);
+      }
+
+      return {
+        orderId: String(res.orderId ?? orderId),
+        clientOrderId: String(res.clientOrderId ?? ''),
+        status: String(res.status ?? 'NEW'),
+        executedQty: Number.isFinite(executedQty) ? executedQty : 0,
+        avgPrice: Number.isFinite(avgPrice) ? avgPrice : 0,
+      };
+    } catch (err: any) {
+      if (err instanceof BinanceApiError && err.code === -2013) {
+        return null;
+      }
+      if (err instanceof ExchangeBannedError || err instanceof ExchangeDegradedError) {
+        throw err;
+      }
+      throw new ExchangeDegradedError(
+        `Failed to query order ${orderId} on Binance Demo (${symUpper}): ${err?.message ?? err}`,
+        err
+      );
+    }
+  }
+
+  /**
+   * Queries realized user fills for a symbol since startTimeMs (GET /fapi/v1/userTrades).
+   */
+  async getSymbolUserTrades(symbol: string, startTimeMs: number): Promise<FillRecord[]> {
+    const symUpper = symbol.toUpperCase();
+    try {
+      const trades = await this.client.getUserTrades(symUpper, startTimeMs);
+      if (!Array.isArray(trades)) return [];
+      return trades.map((t: any) => ({
+        binance_trade_id: String(t.id ?? ''),
+        trade_id: '',
+        order_id: String(t.orderId ?? ''),
+        symbol: String(t.symbol ?? symUpper),
+        side: String(t.side ?? ''),
+        price: parseFloat(t.price ?? '0') || 0,
+        qty: parseFloat(t.qty ?? '0') || 0,
+        realized_pnl: parseFloat(t.realizedPnl ?? '0') || 0,
+        commission: parseFloat(t.commission ?? '0') || 0,
+        commission_asset: t.commissionAsset ?? null,
+        filled_at: Number(t.time ?? 0),
+      }));
+    } catch (err: any) {
+      if (err instanceof ExchangeBannedError || err instanceof ExchangeDegradedError) {
+        throw err;
+      }
+      throw new ExchangeDegradedError(
+        `Failed to fetch user trades for ${symUpper} on Binance Demo: ${err?.message ?? err}`,
+        err
+      );
+    }
+  }
+
+  /**
    * Amends an in-flight order on Binance Demo via PUT /fapi/v1/order.
    * Delegates to binanceClient.modifyOrder; propagates -5022 Post-Only rejection.
    */
@@ -479,8 +566,12 @@ export class BinanceDemoAdapter implements BrokerAdapter {
     symbol: string,
     orderId: string | number,
     price: number,
-    quantity: number
+    quantity: number,
+    side?: TradeSide
   ): Promise<any> {
-    return this.client.modifyOrder(symbol, orderId, price, quantity);
+    if (!side) {
+      throw new BinanceApiError('side is required for BinanceDemoAdapter.modifyOrder', 400);
+    }
+    return this.client.modifyOrder(symbol, orderId, price, quantity, side);
   }
 }

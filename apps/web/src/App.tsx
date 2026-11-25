@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { TopBar } from './components/TopBar';
 import { WorkspaceNavBar } from './components/WorkspaceNavBar';
 import { PropFirmChallengeHUD } from './components/PropFirmChallengeHUD';
@@ -19,9 +19,15 @@ import { PnLSummaryModal } from './components/PnLSummaryModal';
 import { useMarketStore } from './store/useMarketStore';
 import { useUiStore } from './store/useUiStore';
 import { wsClient } from './lib/wsClient';
-import { apiClient } from './lib/apiClient';
+import {
+  apiClient,
+  getSessionToken,
+  isPinRequiredError,
+  onPinRequired,
+  setOperatorPin,
+} from './lib/apiClient';
 import { soundEffects } from './lib/audio';
-import { ShieldCheck, ListOrdered, BookOpen, Activity } from 'lucide-react';
+import { ShieldCheck, ListOrdered, BookOpen, Activity, Lock } from 'lucide-react';
 
 export const App: React.FC = () => {
   const activePosition = useMarketStore((s) => s.activePosition);
@@ -33,19 +39,59 @@ export const App: React.FC = () => {
   const setRightRailTab = useUiStore((s) => s.setRightRailTab);
   const activeWorkspaceView = useUiStore((s) => s.activeWorkspaceView);
 
-  // Initialize REST and WebSocket Connections
-  useEffect(() => {
+  const [isPinGateOpen, setIsPinGateOpen] = useState(false);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState<string | null>(null);
+  const [isVerifyingPin, setIsVerifyingPin] = useState(false);
+
+  const bootstrapCockpit = () => {
     const marketStore = useMarketStore.getState();
 
-    // 1. Initial State & Kline & Confluence fetch (state synced first to ensure matching symbol)
     marketStore
       .refreshState()
       .then(() => marketStore.refreshKlines())
-      .catch((err) => console.warn('Initial state/klines fetch error:', err));
-    marketStore.refreshConfluence().catch(() => {});
-    marketStore.refreshPropFirmStatus().catch(() => {});
+      .catch((err) => {
+        if (isPinRequiredError(err) || (err as { status?: number })?.status === 401) {
+          setIsPinGateOpen(true);
+          return;
+        }
+        console.warn('Initial state/klines fetch error:', err);
+      });
+    marketStore.refreshConfluence().catch((err) => {
+      if (isPinRequiredError(err) || (err as { status?: number })?.status === 401) {
+        setIsPinGateOpen(true);
+      }
+    });
+    marketStore.refreshPropFirmStatus().catch((err) => {
+      if (isPinRequiredError(err) || (err as { status?: number })?.status === 401) {
+        setIsPinGateOpen(true);
+      }
+    });
 
-    // 2. Configure WebSocket Handlers
+    wsClient.connect();
+
+    apiClient.getScanner()
+      .then((items: any) => {
+        if (Array.isArray(items) && items.length > 0) {
+          useMarketStore.getState().setCachedScannerItems(items);
+        }
+      })
+      .catch((err: any) => {
+        if (isPinRequiredError(err) || err?.status === 401) {
+          setIsPinGateOpen(true);
+          return;
+        }
+        console.warn('Background scanner pre-cache warning:', err);
+      });
+  };
+
+  // Initialize REST and WebSocket Connections
+  useEffect(() => {
+    const unsubscribePinRequired = onPinRequired(() => {
+      setIsPinGateOpen(true);
+    });
+
+    // 1. Configure WebSocket Handlers
     wsClient.setHandlers({
       onSnapshot: (snap) => {
         useMarketStore.getState().applySnapshot(snap);
@@ -89,22 +135,43 @@ export const App: React.FC = () => {
       },
     });
 
-    // 3. Connect WebSocket
-    wsClient.connect();
-
-    // 4. Pre-cache top-50 symbols for instant offline/tunnel resilient scanner
-    apiClient.getScanner()
-      .then((items: any) => {
-        if (Array.isArray(items) && items.length > 0) {
-          useMarketStore.getState().setCachedScannerItems(items);
-        }
-      })
-      .catch((err: any) => console.warn('Background scanner pre-cache warning:', err));
+    // 2. Initial State, Kline, Confluence & WebSocket bootstrap
+    bootstrapCockpit();
 
     return () => {
+      unsubscribePinRequired();
       wsClient.disconnect();
     };
   }, []);
+
+  const handlePinSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = pinInput.trim();
+    if (!trimmed) {
+      setPinError('Please enter your operator access PIN.');
+      return;
+    }
+
+    setIsVerifyingPin(true);
+    setPinError(null);
+    setOperatorPin(trimmed);
+
+    try {
+      await getSessionToken();
+      setIsPinGateOpen(false);
+      setPinInput('');
+      setPinError(null);
+      bootstrapCockpit();
+    } catch (err: any) {
+      if (isPinRequiredError(err) || err?.status === 401) {
+        setPinError('Invalid operator PIN. Please check OPERATOR_ACCESS_PIN and try again.');
+      } else {
+        setPinError(err?.message || 'Unable to verify operator PIN.');
+      }
+    } finally {
+      setIsVerifyingPin(false);
+    }
+  };
 
   return (
     <div className="flex flex-col h-screen w-screen bg-[#020305] text-[#e6edf3] font-sans overflow-hidden select-none">
@@ -295,6 +362,68 @@ export const App: React.FC = () => {
       <TimeMachineModal />
       <PillarScorecardModal />
       <PnLSummaryModal />
+
+      {isPinGateOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="pin-gate-title"
+          data-testid="pin-gate-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+        >
+          <form
+            onSubmit={handlePinSubmit}
+            className="w-full max-w-sm bg-[#080c14] border border-[#151d2c] rounded-lg p-5 space-y-4 font-mono shadow-2xl"
+          >
+            <div className="flex items-center space-x-2 text-[#e6edf3]">
+              <Lock className="w-4 h-4 text-[#2962ff]" />
+              <h2 id="pin-gate-title" className="text-sm font-bold uppercase tracking-wider">
+                Operator Authentication Required
+              </h2>
+            </div>
+
+            <p className="text-xs text-[#7d8590]">
+              Enter the server&apos;s <span className="text-[#e6edf3]">OPERATOR_ACCESS_PIN</span> to unlock this remote session.
+            </p>
+
+            <div className="space-y-1.5">
+              <label
+                htmlFor="operator-pin-input"
+                className="block text-[11px] text-[#7d8590] uppercase"
+              >
+                Operator Access PIN
+              </label>
+              <input
+                id="operator-pin-input"
+                type="password"
+                autoFocus
+                autoComplete="current-password"
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value)}
+                placeholder="Enter operator PIN"
+                className="w-full bg-[#020305] border border-[#151d2c] rounded px-3 py-2 text-xs text-[#e6edf3] focus:border-[#2962ff] focus:outline-none"
+              />
+            </div>
+
+            {pinError && (
+              <div
+                role="alert"
+                className="p-2 rounded bg-[#f6465d]/10 border border-[#f6465d]/30 text-[#f6465d] text-xs"
+              >
+                {pinError}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={isVerifyingPin}
+              className="w-full py-2 rounded bg-[#2962ff] hover:bg-[#1e53e5] disabled:opacity-50 text-white text-xs font-bold uppercase tracking-wider transition-colors"
+            >
+              {isVerifyingPin ? 'Verifying...' : 'Unlock Session'}
+            </button>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

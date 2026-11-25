@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { DatabaseSync } from 'node:sqlite';
 import { initializeDatabase, PropFirmRepo, TradesRepo } from '../../db/sqlite.js';
 import { PropFirmRiskGuard } from '../../quant/propFirmRiskGuard.js';
 import { ConfluenceEngine } from '../../quant/confluenceEngine.js';
-import { TradeManager } from '../tradeManager.js';
+import { ChasingExecutionEngine } from '../chasingExecutionEngine.js';
+import { TradeManager, TradeManagerError } from '../tradeManager.js';
 import { AutoPilotManager } from '../autoPilotManager.js';
 import type {
   BrokerAdapter,
@@ -200,8 +201,10 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
       db,
       broker: mockBroker,
       brokerMode: 'BINANCE_DEMO',
+      propFirmRiskGuard: guard,
       getMarkPrice: () => markPrice,
       onTradeClosed: (trade) => {
+        if (trade.broker_mode !== 'BINANCE_DEMO') return;
         const realizedNetPnlUsd = Number(
           ((trade.realized_pnl ?? 0) - (trade.fees_usd ?? 0)).toFixed(2)
         );
@@ -309,10 +312,10 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
   });
 
   it('tradeManager_manualCloseAndUserDataFillSyncPropFirmLedger', async () => {
-    // AutoPilot is disabled / absent from manual OrderTicket flow
+    // AutoPilot is disabled, but manual OrderTicket flow still enforces PropFirmRiskGuard in BINANCE_DEMO
     autoPilot.setEnabled(false);
 
-    // 1. Manual openPosition is NOT blocked or clamped to $250 risk
+    // 1. Manual openPosition is clamped to $250.00 max risk when PropFirmRiskGuard is wired
     mockBroker.account.walletBalance = 50_000;
     mockBroker.account.availableBalance = 50_000;
     markPrice = 100;
@@ -322,17 +325,18 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
       orderType: 'MARKET',
       marginUsd: 2_500,
       leverage: 10,
-      stopLoss: 95, // $5 stop distance * 250 qty = $1,250 risk (> $250 AutoPilot clamp, above liq $90.45)
+      stopLoss: 95, // $5 stop distance -> clamped from 250 qty to 50 qty ($250 risk, $500 margin)
       tp1: 115,
     });
-    expect(manual1.quantity).toBe(250);
+    expect(manual1.quantity).toBe(50);
+    expect(manual1.margin_usd).toBe(500);
 
     // Close via TradeManager.closePosition -> syncs realizedPnlUsd and tradesCount
     mockBroker.markPriceForClose = 102;
     await tradeManager.closePosition('SOLUSDT', 'MANUAL_CLOSE');
     let st = guard.getStatus(50_000);
     expect(st.cycle.tradesCount).toBe(1);
-    const expectedNet1 = Number(((102 - 100) * 250 - 102 * 250 * 0.0005).toFixed(2));
+    const expectedNet1 = Number(((102 - 100) * 50 - 102 * 50 * 0.0005).toFixed(2));
     expect(st.cycle.realizedPnlUsd).toBe(expectedNet1);
 
     // 2. UserData SL fill syncs ledger without AutoPilot
@@ -374,22 +378,26 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
     expect(st.cycle.tradesCount).toBe(3);
     expect(st.cycle.realizedPnlUsd).toBe(Number((expectedNet1 - 102.45 + 79).toFixed(2)));
 
-    // Manual openPosition still works even if PropFirmRiskGuard cycle is terminal
+    // Manual openPosition MUST be blocked (403) when PropFirmRiskGuard cycle is terminal
     guard.recordTradeClosed({
       tradeId: 'force_pass_for_manual_check',
       realizedNetPnlUsd: 3_000,
       liveWalletBalanceUsd: 50_000,
     });
     expect(guard.canOpenTrade().allowed).toBe(false);
-    const manualDuringTerminal = await tradeManager.openPosition({
-      symbol: 'SOLUSDT',
-      side: 'BUY',
-      orderType: 'MARKET',
-      marginUsd: 1_000,
-      leverage: 10,
-      stopLoss: 95,
+    await expect(
+      tradeManager.openPosition({
+        symbol: 'SOLUSDT',
+        side: 'BUY',
+        orderType: 'MARKET',
+        marginUsd: 1_000,
+        leverage: 10,
+        stopLoss: 95,
+      })
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CYCLE_TERMINAL',
     });
-    expect(manualDuringTerminal.status).toBe('OPEN');
   });
 
   it('autoPilot_cycle2AllowedImmediatelyOn4606WalletAfterClearPropFirmBlock', async () => {
@@ -472,5 +480,145 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
     (autoPilot as any).lastExitTime = Date.now() - 200_000;
     await autoPilot.onTick('SOLUSDT', 100);
     expect(mockBroker.openOrderCalls).toHaveLength(2);
+  });
+
+  it('autoPilot_chaserUses23CharIds_GTX_getOrderVerification_partialCancel_and_global1PosBlock', async () => {
+    const ordersById = new Map<string, OrderExecutionResult>();
+    const cancelSpy = vi.fn().mockResolvedValue(true);
+    const getOrderMock = vi.fn(async (_sym: string, orderId: string) => {
+      return ordersById.get(orderId) ?? null;
+    });
+
+    const chasedBroker: BrokerAdapter = {
+      mode: 'BINANCE_DEMO',
+      getAccount: async () => ({
+        walletBalance: 50_000,
+        equity: 50_000,
+        availableBalance: 50_000,
+        unrealizedPnl: 0,
+        currency: 'USDT',
+      }),
+      getPosition: async () => null,
+      openOrder: vi.fn(async (req: any) => {
+        const res: OrderExecutionResult = {
+          orderId: 'ex_ord_' + ordersById.size,
+          clientOrderId: req.clientOrderId,
+          status: 'NEW',
+          executedQty: 0,
+          avgPrice: req.limitPrice || 100,
+        };
+        ordersById.set(res.orderId, res);
+        return res;
+      }),
+      getOrder: getOrderMock,
+      createAlgoOrder: vi.fn(async (params: AlgoOrderParams) => ({
+        algoId: 'algo_1',
+        clientAlgoId: params.clientAlgoId,
+        symbol: params.symbol,
+        status: 'NEW',
+      })),
+      closePosition: vi.fn(async () => ({ orderId: 'close_1', status: 'FILLED' })),
+      cancelOrder: cancelSpy,
+      cancelAllOrders: vi.fn(async () => true),
+      moveToBreakeven: vi.fn(async () => ({ newSlId: 'be_1' })),
+      getOpenOrders: vi.fn(async () => []),
+      modifyOrder: vi.fn(async () => ({ status: 'MODIFIED' })),
+    };
+
+    const chasingEngine = new ChasingExecutionEngine(chasedBroker, {
+      debouncMs: 5000,
+      timeoutMs: 3000,
+      tickSize: 0.01,
+    });
+    const chasedAutoPilot = new AutoPilotManager({
+      db,
+      tradeManager,
+      broker: chasedBroker,
+      confluenceEngine,
+      propFirmRiskGuard: guard,
+      chasingExecutionEngine: chasingEngine,
+      getMarkPrice: () => 100,
+      getAtr: () => 2.0,
+      config: { enabled: true, consensusThreshold: 4, marginAllocationPct: 10, leverage: 10 },
+    });
+
+    setBuySnapshot(confluenceEngine);
+
+    // Case A: CANCELED order returns TERMINAL -> aborts without phantom SQLite position
+    getOrderMock.mockResolvedValueOnce({
+      orderId: 'ex_ord_0',
+      clientOrderId: 'tos_canceled',
+      status: 'CANCELED',
+      executedQty: 0,
+      avgPrice: 0,
+    });
+    await chasedAutoPilot.onTick('SOLUSDT', 100);
+    expect(tradesRepo.getActivePosition('BINANCE_DEMO')).toBeNull();
+    expect(chasedAutoPilot.getState()).toBe('IDLE');
+
+    // Verify GTX & <= 36-char clientOrderId on chased openOrder
+    const firstCall = (chasedBroker.openOrder as any).mock.calls[0][0];
+    expect(firstCall.timeInForce).toBe('GTX');
+    expect(firstCall.clientOrderId).toMatch(/^tos_[a-f0-9]{16}_ent$/);
+    expect(firstCall.clientOrderId.length).toBe(24);
+
+    // Case B: PARTIALLY_FILLED cancels remainder before returning FILLED and creating <=24 char SL algo
+    getOrderMock.mockResolvedValueOnce({
+      orderId: 'ex_ord_1',
+      clientOrderId: 'tos_partial',
+      status: 'PARTIALLY_FILLED',
+      executedQty: 12.5,
+      avgPrice: 99.95,
+    });
+    await chasedAutoPilot.onTick('SOLUSDT', 100);
+    expect(cancelSpy).toHaveBeenCalledWith('SOLUSDT', 'ex_ord_1', false);
+    const opened = tradesRepo.getActivePosition('BINANCE_DEMO', 'SOLUSDT');
+    expect(opened).not.toBeNull();
+    expect(opened!.entry_order_id).toBe('ex_ord_1');
+    expect(opened!.quantity).toBe(12.5);
+    expect(opened!.client_sl_id!.length).toBe(23);
+
+    // Verify SL algo call used 23-char clientAlgoId
+    const algoCall = (chasedBroker.createAlgoOrder as any).mock.calls[0][0];
+    expect(algoCall.clientAlgoId.length).toBe(23);
+
+    // Case C: Global 1-pos guard blocks ETHUSDT entry when SOLUSDT is already open
+    chasedAutoPilot.setActiveSymbol('ETHUSDT');
+    (chasedAutoPilot as any).openTradeId = null;
+    (chasedAutoPilot as any).state = 'IDLE';
+    await chasedAutoPilot.onTick('ETHUSDT', 3000);
+    expect((chasedBroker.openOrder as any).mock.calls).toHaveLength(2); // No 3rd order
+  });
+
+  it('propFirmRiskGuard_hydratesRecordedTradeIdsOnRestart_and_scopesLocalPaperOut', async () => {
+    const t0 = Date.now();
+    tradesRepo.insert(
+      makeOpenTrade({
+        id: 'hydrated_closed_1',
+        status: 'CLOSED',
+        remaining_qty: 0,
+        realized_pnl: 300,
+        fees_usd: 10,
+        opened_at: t0 - 10_000,
+        closed_at: t0 + 1_000,
+      })
+    );
+    guard.recordTradeClosed({
+      tradeId: 'hydrated_closed_1',
+      realizedNetPnlUsd: 290,
+      liveWalletBalanceUsd: 50_000,
+      nowMs: t0 + 1_000,
+    });
+
+    // Restart PropFirmRiskGuard from SQLite: must hydrate 'hydrated_closed_1' and ignore duplicate
+    const restartedGuard = new PropFirmRiskGuard(propFirmRepo);
+    const afterDup = restartedGuard.recordTradeClosed({
+      tradeId: 'hydrated_closed_1',
+      realizedNetPnlUsd: 290,
+      liveWalletBalanceUsd: 50_000,
+      nowMs: t0 + 2_000,
+    });
+    expect(afterDup.cycle.tradesCount).toBe(1);
+    expect(afterDup.cycle.realizedPnlUsd).toBe(290);
   });
 });

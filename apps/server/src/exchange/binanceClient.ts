@@ -34,6 +34,7 @@ export interface BinanceClientOptions {
   prodBaseUrl?: string;
   recvWindow?: number;
   timeoutMs?: number;
+  onIpBan?: (retryAfterSec: number, statusCode: number) => void;
 }
 
 export interface RequestOptions {
@@ -95,6 +96,7 @@ export class BinanceClient {
   private bannedUntil: number = 0;
   private exchangeHealth: ExchangeHealth = 'HEALTHY';
   private exchangeInfoCache: { timestamp: number; data: unknown } | null = null;
+  public onIpBan?: (retryAfterSec: number, statusCode: number) => void;
 
   constructor(options: BinanceClientOptions = {}) {
     this.apiKey = options.apiKey || process.env.BINANCE_DEMO_API_KEY || '';
@@ -103,6 +105,7 @@ export class BinanceClient {
     this.prodBaseUrl = (options.prodBaseUrl || 'https://fapi.binance.com').replace(/\/+$/, '');
     this.recvWindow = options.recvWindow || 5000;
     this.timeoutMs = options.timeoutMs || 5000;
+    this.onIpBan = options.onIpBan;
   }
 
   /**
@@ -292,6 +295,11 @@ export class BinanceClient {
         }
         this.bannedUntil = Date.now() + retryAfterSec * 1000;
         this.exchangeHealth = 'BANNED';
+        try {
+          this.onIpBan?.(retryAfterSec, res.status);
+        } catch {
+          // Never allow callback errors to mask ExchangeBannedError
+        }
         throw new ExchangeBannedError(
           retryAfterSec,
           `Binance IP ban triggered (${res.status}). Retry-After: ${retryAfterSec}s.`
@@ -682,6 +690,39 @@ export class BinanceClient {
   }
 
   /**
+   * Fetch a single order status by orderId (GET /fapi/v1/order).
+   */
+  async getOrder(symbol: string, orderId: string | number): Promise<any> {
+    return this.request<any>('/fapi/v1/order', {
+      method: 'GET',
+      signed: true,
+      priority: 'P1',
+      params: {
+        symbol: symbol.toUpperCase(),
+        orderId: String(orderId),
+      },
+    });
+  }
+
+  /**
+   * Fetch account trade history for a symbol (GET /fapi/v1/userTrades).
+   */
+  async getUserTrades(symbol: string, startTimeMs: number): Promise<any[]> {
+    const params: Record<string, unknown> = {
+      symbol: symbol.toUpperCase(),
+    };
+    if (Number.isFinite(startTimeMs) && startTimeMs > 0) {
+      params.startTime = Math.floor(startTimeMs);
+    }
+    return this.request<any[]>('/fapi/v1/userTrades', {
+      method: 'GET',
+      signed: true,
+      priority: 'P1',
+      params,
+    });
+  }
+
+  /**
    * Amends an in-flight limit order (PUT /fapi/v1/order) with HMAC signature.
    * Returns -5022 Post-Only rejection error when order would trigger as taker.
    */
@@ -689,7 +730,8 @@ export class BinanceClient {
     symbol: string,
     orderId: string | number,
     price: number,
-    quantity: number
+    quantity: number,
+    side: TradeSide
   ): Promise<any> {
     const sym = symbol.toUpperCase();
     try {
@@ -700,6 +742,7 @@ export class BinanceClient {
         params: {
           symbol: sym,
           orderId: String(orderId),
+          side,
           price,
           quantity,
         },

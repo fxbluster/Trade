@@ -246,18 +246,15 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     expect(orderReq.marginUsd).toBe(100);
     expect(orderReq.leverage).toBe(10);
     expect(orderReq.side).toBe('BUY');
-    expect(orderReq.orderType).toBe('LIMIT');
-
-    // Slippage ceiling: markPrice * 1.0010 = 100.10
-    expect(orderReq.limitPrice).toBe(100.10);
+    expect(orderReq.orderType).toBe('MARKET');
 
     // Stop loss at 1.5x ATR (1.5 * 1.5 = 2.25) -> 100 - 2.25 = 97.75
     expect(orderReq.stopLoss).toBe(97.75);
 
-    // Dynamic TP1 pins to nearest liquidation cluster (25x short liq at 104.10, R:R >= 1.5)
-    expect(orderReq.tp1).toBe(104.10);
-    // Dynamic TP2 runner scales with TP1 ratio: 100 + (4.10 * 2) = 108.20
-    expect(orderReq.tp2).toBe(108.20);
+    // Dynamic TP1 pins to nearest liquidation cluster (25x short liq at 104.00, R:R >= 1.5)
+    expect(orderReq.tp1).toBe(104.00);
+    // Dynamic TP2 runner scales with TP1 ratio: 100 + (4.00 * 2) = 108.00
+    expect(orderReq.tp2).toBe(108.00);
 
     expect(autoPilot.getState()).toBe('POSITION_OPEN');
   });

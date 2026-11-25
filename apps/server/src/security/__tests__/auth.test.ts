@@ -24,6 +24,7 @@ function createMockReqRes(options: {
   method?: string;
   url?: string;
   headers?: Record<string, string>;
+  socket?: { remoteAddress?: string };
 } = {}): { req: Request; res: MockResponse & Response; next: ReturnType<typeof vi.fn> } {
   const req = new EventEmitter() as unknown as Request;
   req.method = options.method || 'GET';
@@ -31,6 +32,8 @@ function createMockReqRes(options: {
   req.headers = options.headers || {};
   req.params = {};
   req.query = {};
+  (req as unknown as { socket?: { remoteAddress?: string } }).socket =
+    options.socket ?? { remoteAddress: '127.0.0.1' };
 
   const headersMap: Record<string, string> = {};
 
@@ -96,6 +99,7 @@ describe('Security & Auth Guard Middleware', () => {
         expect(next).toHaveBeenCalled();
         expect(res.statusCode).toBe(200);
         expect(res._headers['access-control-allow-origin']).toBe(origin);
+        expect(res._headers['access-control-allow-headers']).toContain('X-Operator-Pin');
       }
     });
 

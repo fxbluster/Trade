@@ -5,7 +5,8 @@ import { HierarchicalMtfManager } from '../hierarchicalMtfManager.js';
 import { NativeSmcEngine } from '../nativeSmcEngine.js';
 import { OrderFlowEngine } from '../orderFlowEngine.js';
 import { LiquidationEngine } from '../liquidationEngine.js';
-import type { KlineCandle } from '@tradeos/shared';
+import { calculateMaxDrawdown, calculateMaxDrawdownUsd } from '../riskEngine.js';
+import type { KlineCandle, TradeRecord } from '@tradeos/shared';
 
 describe('Server Quant Unit Test Suite', () => {
   // --------------------------------------------------------------------------
@@ -468,6 +469,68 @@ describe('Server Quant Unit Test Suite', () => {
       expect(res.bias).toBe('NEUTRAL');
       expect(res.confirmed).toBe(false);
       expect(res.valueText).toContain('Dispersed');
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // 7. Chronological Drawdown Math (riskEngine.ts)
+  // --------------------------------------------------------------------------
+  describe('riskEngine chronological Max Drawdown math', () => {
+    function makeClosedTrade(id: string, pnl: number, closedAt: number): TradeRecord {
+      return {
+        id,
+        symbol: 'SOLUSDT',
+        broker_mode: 'BINANCE_DEMO',
+        side: 'BUY',
+        status: 'CLOSED',
+        entry_price: 100,
+        exit_price: 100,
+        quantity: 1,
+        remaining_qty: 0,
+        leverage: 10,
+        margin_usd: 10,
+        stop_loss: 95,
+        tp1: null,
+        tp2: null,
+        be_price: null,
+        is_breakeven: 0,
+        client_order_id: null,
+        client_sl_id: null,
+        client_tp1_id: null,
+        client_tp2_id: null,
+        entry_order_id: null,
+        sl_algo_id: null,
+        tp1_algo_id: null,
+        tp2_algo_id: null,
+        realized_pnl: pnl,
+        fees_usd: 0,
+        exit_reason: 'CLOSED',
+        opened_at: closedAt - 60_000,
+        closed_at: closedAt,
+      };
+    }
+
+    it('sorts closed trades chronologically (closed_at ASC) and returns bounded [0,1] ratio + USD drawdown', () => {
+      // Reverse-chronological order (like paginated DESC slice):
+      // Chronological sequence: +500 (peak 50,500) -> -1,000 (trough 49,500, DD=$1,000) -> +200
+      const descTrades = [
+        makeClosedTrade('t3', 200, 3_000_000),
+        makeClosedTrade('t2', -1_000, 2_000_000),
+        makeClosedTrade('t1', 500, 1_000_000),
+      ];
+
+      const ratio = calculateMaxDrawdown(descTrades, 50_000);
+      const usd = calculateMaxDrawdownUsd(descTrades);
+      // 1000 / 50500 = 0.0198019... -> 0.0198 (1.98%), strictly bounded in [0, 1]
+      expect(ratio).toBe(0.0198);
+      expect(ratio).toBeGreaterThanOrEqual(0);
+      expect(ratio).toBeLessThanOrEqual(1);
+      expect(usd).toBe(1000);
+
+      // CUJ 5 regression check: -$97.82 drawdown on $50,000 challenge -> 0.0020 (0.2%) & $97.82
+      const cuj5 = [makeClosedTrade('cuj5', -97.82, 1_000_000)];
+      expect(calculateMaxDrawdown(cuj5, 50_000)).toBe(0.002);
+      expect(calculateMaxDrawdownUsd(cuj5)).toBe(97.82);
     });
   });
 });

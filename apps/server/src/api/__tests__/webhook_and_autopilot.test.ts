@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import polka, { type Request, type Response } from 'polka';
 import type { DatabaseSync } from 'node:sqlite';
@@ -8,9 +8,11 @@ import { AutoPilotManager } from '../../services/autoPilotManager.js';
 import { ConfluenceEngine } from '../../quant/confluenceEngine.js';
 import { registerRoutes, type AppContext } from '../routes.js';
 import { requireSessionToken } from '../../security/auth.js';
-import { SESSION_TOKEN, WEBHOOK_SECRET, PORT } from '../../config.js';
+import { SESSION_TOKEN, PORT } from '../../config.js';
 import type { BrokerAdapter } from '../../exchange/broker.js';
 import type { AccountInfo, OpenOrderInfo } from '@tradeos/shared';
+
+const TEST_WEBHOOK_SECRET = 'test-webhook-secret-16chars';
 
 function createMockBroker(): BrokerAdapter {
   return {
@@ -56,8 +58,10 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
   let autoPilotManager: AutoPilotManager;
   let ctx: AppContext;
   let app: ReturnType<typeof polka>;
+  const origWebhookSecret = process.env.WEBHOOK_SECRET;
 
   beforeEach(() => {
+    process.env.WEBHOOK_SECRET = TEST_WEBHOOK_SECRET;
     db = initializeDatabase(':memory:');
     mockBroker = createMockBroker();
     tradeManager = new TradeManager({
@@ -97,6 +101,11 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
     registerRoutes(app, ctx);
   });
 
+  afterEach(() => {
+    if (origWebhookSecret === undefined) delete process.env.WEBHOOK_SECRET;
+    else process.env.WEBHOOK_SECRET = origWebhookSecret;
+  });
+
   async function invokeRoute(
     method: string,
     url: string,
@@ -119,6 +128,7 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
       params: {},
       query: Object.fromEntries(parsedUrl.searchParams),
       body: {},
+      socket: { remoteAddress: '127.0.0.1' },
     }) as unknown as Request;
 
     const resHeaders: Record<string, string> = {};
@@ -223,7 +233,7 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
     it('rejects request with 400 when timestamp drift exceeds 30 seconds', async () => {
       const staleTimestamp = Date.now() - 35_000; // 35 seconds in the past
       const res = await invokeRoute('POST', '/api/webhook', {
-        secret: WEBHOOK_SECRET,
+        secret: TEST_WEBHOOK_SECRET,
         symbol: 'SOLUSDT',
         side: 'BUY',
         time: staleTimestamp,
@@ -235,7 +245,7 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
 
     it('rejects request with 400 when symbol or side is missing', async () => {
       const res = await invokeRoute('POST', '/api/webhook', {
-        secret: WEBHOOK_SECRET,
+        secret: TEST_WEBHOOK_SECRET,
         time: Date.now(),
       });
 
@@ -246,7 +256,7 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
     it('accepts valid webhook alert and returns 200 INGESTED', async () => {
       const now = Date.now();
       const res = await invokeRoute('POST', '/api/webhook', {
-        secret: WEBHOOK_SECRET,
+        secret: TEST_WEBHOOK_SECRET,
         symbol: 'SOLUSDT',
         side: 'BUY',
         time: now,
@@ -267,7 +277,7 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
 
       // First ingestion: 200 OK
       const res1 = await invokeRoute('POST', '/api/webhook', {
-        secret: WEBHOOK_SECRET,
+        secret: TEST_WEBHOOK_SECRET,
         symbol: 'SOLUSDT',
         side: 'BUY',
         time: now,
@@ -277,7 +287,7 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
 
       // Second ingestion with same alert_id within 60s: 400 Bad Request
       const res2 = await invokeRoute('POST', '/api/webhook', {
-        secret: WEBHOOK_SECRET,
+        secret: TEST_WEBHOOK_SECRET,
         symbol: 'SOLUSDT',
         side: 'BUY',
         time: now + 100,

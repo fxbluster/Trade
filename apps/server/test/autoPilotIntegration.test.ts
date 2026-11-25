@@ -448,6 +448,31 @@ describe('AutoPilotManager Next-Gen Modular Integration', () => {
       return [];
     });
 
+    (broker as any).getOrder = vi.fn().mockImplementation(async (_sym: string, orderId: string) => {
+      openOrderChecks += 1;
+      if (openOrderChecks === 1) {
+        // Shift depth so ChasingExecutionEngine performs an in-flight amendment
+        confluenceEngine.orderFlowEngine.updateDepth([[99.95, 500]], [[100.15, 500]]);
+        return {
+          orderId,
+          clientOrderId: 'tos_ent',
+          status: 'NEW',
+          executedQty: 0,
+          avgPrice: broker.openOrders[0]?.price ?? 100,
+        };
+      }
+      const fillPrice = broker.openOrders[0]?.price ?? 100;
+      const fillQty = broker.openOrders[0]?.origQty ?? 1;
+      broker.openOrders = [];
+      return {
+        orderId,
+        clientOrderId: 'tos_ent',
+        status: 'FILLED',
+        executedQty: fillQty,
+        avgPrice: fillPrice,
+      };
+    });
+
     await wiredAutoPilot.onTick('SOLUSDT', 100);
 
     const triggers = telemetryEvents.map((e) => e.triggerType);

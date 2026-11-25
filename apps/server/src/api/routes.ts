@@ -29,11 +29,13 @@ import {
   ExchangeDegradedError,
   ExchangeBannedError
 } from '../exchange/broker.js';
+import { BinanceClient } from '../exchange/binanceClient.js';
 import type { BinanceStreamsManager } from '../exchange/binanceStreams.js';
 import type { CvdEngine } from '../quant/cvd.js';
 import {
   calculateKellyCriterion,
   calculateMaxDrawdown,
+  calculateMaxDrawdownUsd,
   calculateProfitFactor
 } from '../quant/riskEngine.js';
 import { generateMentorBrief } from '../quant/sokratMentor.js';
@@ -45,7 +47,11 @@ import {
   requireSessionToken,
   jsonBodyParser
 } from '../security/auth.js';
-import { SESSION_TOKEN, WEBHOOK_SECRET } from '../config.js';
+import {
+  SESSION_TOKEN,
+  getWebhookSecret,
+  getOperatorAccessPin
+} from '../config.js';
 import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
 import type { AutoPilotManager } from '../services/autoPilotManager.js';
 import type { DecisionAuditService } from '../services/decisionAuditService.js';
@@ -60,6 +66,7 @@ import {
 export interface AppContext {
   tradeManager: TradeManager;
   broker: BrokerAdapter;
+  binanceClient?: BinanceClient;
   db: DatabaseSync;
   streamsManager?: BinanceStreamsManager;
   cvdEngine?: CvdEngine;
@@ -71,6 +78,7 @@ export interface AppContext {
   propFirmRiskGuard?: PropFirmRiskGuard;
   getPropFirmWalletBalance?: () => number;
   activeSymbol?: string;
+  getActiveSymbol?: () => string;
   getMarkPrice?: (symbol: string) => number;
   setActiveSymbol?: (symbol: string) => void;
   getIndicators?: (symbol: string) => TechnicalSummary | null;
@@ -93,6 +101,31 @@ const IN_FLIGHT_AUTOPILOT_STATES = new Set([
   'POSITION_OPEN',
   'CLOSING',
 ]);
+
+const PROXY_FORWARDING_HEADERS = [
+  'x-forwarded-for',
+  'cf-connecting-ip',
+  'forwarded',
+  'x-real-ip',
+  'true-client-ip',
+] as const;
+
+const LOOPBACK_REMOTE_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+export function isUnproxiedLoopback(req: Request): boolean {
+  const remoteAddr = req.socket?.remoteAddress;
+  if (!remoteAddr || !LOOPBACK_REMOTE_ADDRS.has(remoteAddr)) {
+    return false;
+  }
+  const headers = req.headers || {};
+  for (const headerName of PROXY_FORWARDING_HEADERS) {
+    const val = headers[headerName];
+    if (val !== undefined && String(val).trim() !== '') {
+      return false;
+    }
+  }
+  return true;
+}
 
 async function resolvePropFirmWalletBalance(ctx: AppContext): Promise<number> {
   let walletBalance = 0;
@@ -128,7 +161,9 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   const auditRepo = new AuditLogRepo(ctx.db);
   const settingsRepo = new SettingsRepo(ctx.db);
 
-  let activeSymbol = (ctx.activeSymbol || 'SOLUSDT').toUpperCase();
+  let fallbackSymbol = (ctx.activeSymbol || 'SOLUSDT').toUpperCase();
+  const resolveActiveSymbol = (): string =>
+    (ctx.getActiveSymbol?.() || fallbackSymbol).toUpperCase();
 
   // Apply security and auth middlewares
   app.use(validateHost);
@@ -155,15 +190,43 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     });
   });
 
-  // 2. GET /api/auth/session — Session token acquisition for localhost client
+  // 2. GET /api/auth/session — Session token acquisition (unproxied loopback or X-Operator-Pin)
   app.get('/api/auth/session', (req: Request, res: Response) => {
-    sendJson(res, 200, { token: SESSION_TOKEN });
+    if (!req.socket?.remoteAddress) {
+      return sendJson(res, 403, { error: 'Forbidden: Missing client socket address' });
+    }
+
+    const expectedPin = getOperatorAccessPin();
+    const publicDomain = (process.env.PUBLIC_DOMAIN || '').trim();
+    if (publicDomain && expectedPin.length < 16) {
+      return sendJson(res, 403, {
+        error: 'Forbidden: PUBLIC_DOMAIN tunnel requires OPERATOR_ACCESS_PIN (>= 16 chars)',
+      });
+    }
+
+    if (isUnproxiedLoopback(req)) {
+      return sendJson(res, 200, { token: SESSION_TOKEN });
+    }
+
+    const rawPin = req.headers['x-operator-pin'];
+    const providedPin = Array.isArray(rawPin) ? rawPin[0] : rawPin;
+    if (!providedPin || typeof providedPin !== 'string' || expectedPin.length < 16) {
+      return sendJson(res, 401, { error: 'Unauthorized: Valid X-Operator-Pin required' });
+    }
+
+    const a = Buffer.from(providedPin.trim());
+    const b = Buffer.from(expectedPin);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return sendJson(res, 401, { error: 'Unauthorized: Invalid X-Operator-Pin' });
+    }
+
+    return sendJson(res, 200, { token: SESSION_TOKEN });
   });
 
   // 3. GET /api/state — Full cockpit snapshot
   app.get('/api/state', async (req: Request, res: Response) => {
     try {
-      const sym = activeSymbol;
+      const sym = resolveActiveSymbol();
       const markPrice = ctx.tradeManager.getMarkPrice(sym);
       const funding = ctx.getFunding ? ctx.getFunding(sym) : { rate: null, nextTime: null };
       const account = await ctx.broker.getAccount().catch(() => ({
@@ -216,7 +279,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   app.get('/api/klines', async (req: Request, res: Response) => {
     try {
       const query = (req.query || {}) as Record<string, string>;
-      const symbol = (query.symbol || activeSymbol).toUpperCase();
+      const symbol = (query.symbol || resolveActiveSymbol()).toUpperCase();
       const interval = query.interval || '1m';
       const limit = Math.min(Number(query.limit) || 400, 1000);
 
@@ -283,16 +346,10 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     }
 
     const cleanSymbol = symbol.trim().toUpperCase();
-    activeSymbol = cleanSymbol;
+    fallbackSymbol = cleanSymbol;
 
     if (ctx.setActiveSymbol) {
       ctx.setActiveSymbol(cleanSymbol);
-    }
-    if (ctx.streamsManager) {
-      ctx.streamsManager.subscribeSymbol(cleanSymbol);
-    }
-    if (ctx.cvdEngine) {
-      ctx.cvdEngine.reset(cleanSymbol);
     }
 
     sendJson(res, 200, { success: true, symbol: cleanSymbol });
@@ -307,15 +364,37 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
 
     // Guard: conflict if active open position exists
     const active = tradesRepo.getActivePosition(ctx.broker.mode);
-    if (active && (active.status === 'OPEN' || active.status === 'PARTIALLY_CLOSED' || active.status === 'CLOSING')) {
+    if (
+      active &&
+      (active.status === 'OPEN' ||
+        active.status === 'PARTIALLY_CLOSED' ||
+        active.status === 'CLOSING' ||
+        active.status === 'CLOSING_IN_PROGRESS')
+    ) {
       return sendJson(res, 409, { error: 'Cannot switch broker mode while an active position is open' });
     }
 
+    const apState = ctx.autoPilotManager?.getState();
+    if (apState && IN_FLIGHT_AUTOPILOT_STATES.has(apState)) {
+      return sendJson(res, 409, {
+        error: `Cannot switch broker mode while AutoPilot is ${apState}`,
+        code: 'AUTOPILOT_IN_FLIGHT',
+      });
+    }
+
     try {
-      const newAdapter = BrokerFactory.getAdapter(mode, { db: ctx.db });
+      const newAdapter =
+        mode === 'BINANCE_DEMO'
+          ? BrokerFactory.getAdapter('BINANCE_DEMO', {
+              db: ctx.db,
+              client: ctx.binanceClient ?? new BinanceClient(),
+            })
+          : BrokerFactory.getAdapter('LOCAL_PAPER', { db: ctx.db });
       ctx.broker = newAdapter;
       ctx.tradeManager.setBroker(newAdapter);
       ctx.tradeManager.setBrokerMode(mode);
+      (ctx.autoPilotManager as { setBroker?: (b: BrokerAdapter) => void } | undefined)?.setBroker?.(newAdapter);
+      (tradesRepo as { invalidateActiveCache?: () => void }).invalidateActiveCache?.();
       if (ctx.onBrokerModeChange) {
         ctx.onBrokerModeChange(newAdapter);
       }
@@ -386,7 +465,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   // 10. POST /api/orders/close — Emergency or market exit with OCO cancellation
   app.post('/api/orders/close', async (req: Request, res: Response) => {
     const { symbol, reason } = (req.body || {}) as { symbol?: string; reason?: string };
-    const sym = (symbol || activeSymbol).toUpperCase();
+    const sym = (symbol || resolveActiveSymbol()).toUpperCase();
 
     try {
       const trade = await ctx.tradeManager.closePosition(sym, reason || 'USER_MANUAL');
@@ -401,7 +480,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   // 11. POST /api/orders/breakeven — Fail-closed Breakeven SL migration
   app.post('/api/orders/breakeven', async (req: Request, res: Response) => {
     const { symbol } = (req.body || {}) as { symbol?: string };
-    const sym = (symbol || activeSymbol).toUpperCase();
+    const sym = (symbol || resolveActiveSymbol()).toUpperCase();
 
     try {
       const trade = await ctx.tradeManager.moveToBreakeven(sym);
@@ -422,7 +501,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   app.delete('/api/orders/:orderId', async (req: Request, res: Response) => {
     const { orderId } = req.params;
     const query = (req.query || {}) as Record<string, string>;
-    const symbol = (query.symbol || activeSymbol).toUpperCase();
+    const symbol = (query.symbol || resolveActiveSymbol()).toUpperCase();
     const isAlgo = query.isAlgo === 'true' || (req.body as { isAlgo?: boolean })?.isAlgo === true;
 
     try {
@@ -455,17 +534,35 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     const trades = tradesRepo.listClosed(ctx.broker.mode, limit, offset, symbol);
     const totalTrades = tradesRepo.countClosed(ctx.broker.mode, symbol);
 
-    const winRate = trades.length > 0
-      ? Number(((trades.filter(t => (t.realized_pnl - t.fees_usd) > 0).length / trades.length) * 100).toFixed(2))
+    const allClosedDesc = totalTrades > 0
+      ? tradesRepo.listClosed(ctx.broker.mode, totalTrades, 0, symbol)
+      : [];
+    const allClosedAsc = [...allClosedDesc].sort((a, b) => {
+      const ca = a.closed_at ?? a.opened_at;
+      const cb = b.closed_at ?? b.opened_at;
+      return ca !== cb ? ca - cb : a.opened_at - b.opened_at;
+    });
+
+    const cachedWallet = ctx.getPropFirmWalletBalance?.();
+    const initialEquity =
+      ctx.propFirmRiskGuard && ctx.broker.mode === 'BINANCE_DEMO'
+        ? 50_000
+        : cachedWallet && Number.isFinite(cachedWallet) && cachedWallet > 0
+          ? cachedWallet
+          : 10_000;
+
+    const winRate = allClosedAsc.length > 0
+      ? Number(((allClosedAsc.filter(t => (t.realized_pnl - t.fees_usd) > 0).length / allClosedAsc.length) * 100).toFixed(2))
       : 0;
 
     const summary: JournalSummary = {
       trades,
       totalTrades,
       winRate,
-      profitFactor: calculateProfitFactor(trades),
-      maxDrawdown: calculateMaxDrawdown(trades),
-      kellyCriterion: calculateKellyCriterion(trades)
+      profitFactor: calculateProfitFactor(allClosedAsc),
+      maxDrawdown: calculateMaxDrawdown(allClosedAsc, initialEquity),
+      maxDrawdownUsd: calculateMaxDrawdownUsd(allClosedAsc),
+      kellyCriterion: calculateKellyCriterion(allClosedAsc)
     };
 
     sendJson(res, 200, summary);
@@ -517,8 +614,9 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       updated_at: Date.now()
     };
 
-    const markPrice = ctx.tradeManager.getMarkPrice(activeSymbol);
-    const indicators = ctx.getIndicators ? ctx.getIndicators(activeSymbol) : null;
+    const currentSym = resolveActiveSymbol();
+    const markPrice = ctx.tradeManager.getMarkPrice(currentSym);
+    const indicators = ctx.getIndicators ? ctx.getIndicators(currentSym) : null;
     const brief = generateMentorBrief({ indicators, markPrice }, risk);
 
     let reply: string | null = null;
@@ -542,6 +640,11 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
 
   // 17. POST /api/webhook — TradingView PineScript v6 webhook alert ingestion
   app.post('/api/webhook', (req: Request, res: Response) => {
+    const expectedSecret = getWebhookSecret();
+    if (!expectedSecret || expectedSecret.length < 16) {
+      return sendJson(res, 503, { error: 'Webhook Disabled: WEBHOOK_SECRET not configured (min 16 chars)' });
+    }
+
     const payload = (req.body || {}) as any;
 
     // Constant-time passphrase comparison against WEBHOOK_SECRET
@@ -550,7 +653,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       return sendJson(res, 401, { error: 'Unauthorized: Missing webhook secret passphrase' });
     }
     const a = Buffer.from(secret);
-    const b = Buffer.from(WEBHOOK_SECRET);
+    const b = Buffer.from(expectedSecret);
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
       return sendJson(res, 401, { error: 'Unauthorized: Invalid webhook secret passphrase' });
     }
@@ -582,7 +685,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
 
   // 18. GET /api/confluence — Live 6+1 Confluence snapshot
   app.get('/api/confluence', (req: Request, res: Response) => {
-    const symbol = ((req.query?.symbol as string) || activeSymbol).toUpperCase();
+    const symbol = ((req.query?.symbol as string) || resolveActiveSymbol()).toUpperCase();
     if (ctx.confluenceEngine) {
       const snapshot = ctx.confluenceEngine.getSnapshot(symbol);
       return sendJson(res, 200, snapshot);
@@ -690,7 +793,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     }
 
     const query = (req.query || {}) as Record<string, string>;
-    const symbol = (query.symbol || ctx.activeSymbol || 'SOLUSDT').toUpperCase().trim();
+    const symbol = (query.symbol || resolveActiveSymbol()).toUpperCase().trim();
     const horizon = (query.horizon || '15m') as TrajectoryHorizon;
 
     const validHorizons: TrajectoryHorizon[] = ['1m', '5m', '15m', '60m'];
@@ -719,7 +822,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
         return sendJson(res, 503, { error: 'PnlService not initialized' });
       }
       const query = (req.query || {}) as Record<string, string>;
-      const symbol = (query.symbol || activeSymbol).toUpperCase().trim();
+      const symbol = (query.symbol || resolveActiveSymbol()).toUpperCase().trim();
       const summary = await ctx.pnlService.getPnlSummary(symbol);
       sendJson(res, 200, summary);
     } catch (err: unknown) {

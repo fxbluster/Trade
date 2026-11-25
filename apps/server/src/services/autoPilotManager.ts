@@ -21,12 +21,17 @@ import type {
 import { calculateLiquidationPrice } from '@tradeos/shared';
 import { TradesRepo, SettingsRepo, ExecutionChaseLogsRepo } from '../db/sqlite.js';
 import { TradeManager } from './tradeManager.js';
-import type { BrokerAdapter } from '../exchange/broker.js';
+import {
+  ExchangeDegradedError,
+  type BrokerAdapter,
+  type OrderExecutionResult,
+} from '../exchange/broker.js';
 import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
 import type { AdaptiveSizingEngine } from '../quant/adaptiveSizingEngine.js';
 import type { PropFirmRiskGuard } from '../quant/propFirmRiskGuard.js';
-import type { ChasingExecutionEngine } from './chasingExecutionEngine.js';
+import type { ChasingExecutionEngine, CheckFillResult } from './chasingExecutionEngine.js';
 import type { TwapExecutionSlicer } from './twapExecutionSlicer.js';
+import type { AlertNotifier } from './alertNotifier.js';
 
 export type { AutoPilotState };
 
@@ -65,6 +70,7 @@ export interface AutoPilotManagerOptions {
   chasingExecutionEngine?: ChasingExecutionEngine;
   twapExecutionSlicer?: TwapExecutionSlicer;
   executionChaseLogsRepo?: ExecutionChaseLogsRepo;
+  alertNotifier?: AlertNotifier;
   onOrderDispatched?: (event: AutoPilotOrderDispatchEvent) => void;
   onTelemetryEvent?: (event: FactorTelemetryEvent) => void;
   onStateTransition?: (newState: AutoPilotState | string) => void;
@@ -102,6 +108,7 @@ export class AutoPilotManager {
   public readonly propFirmRiskGuard?: PropFirmRiskGuard;
   public readonly chasingExecutionEngine?: ChasingExecutionEngine;
   public readonly twapExecutionSlicer?: TwapExecutionSlicer;
+  private alertNotifier?: AlertNotifier;
   private latestSizingBreakdown: SizingBreakdown | null = null;
   private latestChasingState: ChasingOrderState | null = null;
   private activeEntryContext: {
@@ -158,6 +165,7 @@ export class AutoPilotManager {
     this.propFirmRiskGuard = options.propFirmRiskGuard;
     this.chasingExecutionEngine = options.chasingExecutionEngine;
     this.twapExecutionSlicer = options.twapExecutionSlicer;
+    this.alertNotifier = options.alertNotifier;
     this.executionChaseLogsRepo =
       options.executionChaseLogsRepo || new ExecutionChaseLogsRepo(this.db);
 
@@ -298,6 +306,24 @@ export class AutoPilotManager {
 
   public setActiveSymbol(symbol: string): void {
     this.activeSymbol = symbol.toUpperCase().trim();
+  }
+
+  public setAlertNotifier(notifier: AlertNotifier): void {
+    this.alertNotifier = notifier;
+  }
+
+  public setBroker(broker: BrokerAdapter): void {
+    this.broker = broker;
+    this.chasingExecutionEngine?.setBroker?.(broker);
+    this.cachedBalance = 0;
+    this.broker
+      .getAccount()
+      .then((acc) => {
+        if (acc && acc.walletBalance > 0) {
+          this.cachedBalance = acc.walletBalance;
+        }
+      })
+      .catch(() => {});
   }
 
   public isCooldownActive(): boolean {
@@ -598,13 +624,19 @@ export class AutoPilotManager {
       return;
     }
 
+    // Global 1-position guard across all symbols
+    const anyActive = this.tradesRepo.getActivePosition(this.broker.mode);
+    if (anyActive) {
+      return;
+    }
+
     // Re-entry lockout check (180s mandatory cooldown after position exit)
     if (Date.now() - this.lastExitTime < 180_000) {
       return;
     }
 
-    // 0. Upcomers Prop Firm Challenge Risk Guard Pre-Entry Gate
-    if (this.propFirmRiskGuard) {
+    // 0. Upcomers Prop Firm Challenge Risk Guard Pre-Entry Gate (BINANCE_DEMO only)
+    if (this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO') {
       const guardCheck = this.propFirmRiskGuard.canOpenTrade();
       if (!guardCheck.allowed) {
         const nextBlockReason: BlockReason =
@@ -656,8 +688,8 @@ export class AutoPilotManager {
     }
 
     // 2. Proactive Daily Mark-to-Market Drawdown Ceiling (Synchronous Pre-Check) [CUJ 5 / DEF-13]
-    // Skipped when PropFirmRiskGuard is active (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
-    if (!this.propFirmRiskGuard) {
+    // Skipped when PropFirmRiskGuard is active in BINANCE_DEMO (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
+    if (!(this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO')) {
       const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
       const balance = this.cachedBalance > 0 ? this.cachedBalance : 1000;
       const drawdownLimitPct = (this.config.dailyDrawdownLimitPct ?? 2.0) / 100;
@@ -718,6 +750,24 @@ export class AutoPilotManager {
     let marginAllocationPct = this.config.marginAllocationPct;
 
     try {
+      // Global 1-position guard (without symbol filter) before chasing / opening
+      const globalActive = this.tradesRepo.getActivePosition(this.broker.mode);
+      if (globalActive) {
+        this.state = 'IDLE';
+        this.broadcastStatus();
+        this.onOrderDispatched?.({
+          symbol,
+          side,
+          action: 'FAILED',
+          price: markPrice,
+          marginUsd: 0,
+          leverage,
+          atr,
+          errorMessage: `ERR_POSITION_EXISTS: Active position already open on ${globalActive.symbol}`,
+        });
+        return;
+      }
+
       const account = await this.broker.getAccount();
       const balance = account.walletBalance;
       this.cachedBalance = balance;
@@ -738,8 +788,8 @@ export class AutoPilotManager {
       }
 
       // Daily Mark-to-Market Drawdown Ceiling: Hard halt if session net loss >= dailyDrawdownLimitPct of wallet equity [CUJ 5 / DEF-13]
-      // Skipped when PropFirmRiskGuard is active (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
-      if (!this.propFirmRiskGuard) {
+      // Skipped when PropFirmRiskGuard is active in BINANCE_DEMO (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
+      if (!(this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO')) {
         const nowUtc = new Date();
         const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
         const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
@@ -841,7 +891,7 @@ export class AutoPilotManager {
 
       let notionalUsd = marginUsd * leverage;
       let targetQty = Number((notionalUsd / markPrice).toFixed(4));
-      const refPrice = this.chasingExecutionEngine ? markPrice : limitPrice;
+      const refPrice = markPrice;
 
       // Dead-SL Armor Clamping:
       const estLiq = calculateLiquidationPrice(side, refPrice, leverage, 0.005);
@@ -850,8 +900,8 @@ export class AutoPilotManager {
         (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(2)
       );
 
-      // Upcomers $250/trade max risk quantity clamp (fail-closed if <= 0)
-      if (this.propFirmRiskGuard) {
+      // Upcomers $250/trade max risk quantity clamp (fail-closed if <= 0) in BINANCE_DEMO
+      if (this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO') {
         const clamped = this.propFirmRiskGuard.clampEntryQuantity({
           desiredQty: targetQty,
           entryPrice: refPrice,
@@ -979,12 +1029,14 @@ export class AutoPilotManager {
         this.state = 'LIMIT_CHASING';
         this.broadcastStatus();
 
-        const tradeId = crypto.randomUUID();
+        const tradeId = crypto.randomBytes(8).toString('hex');
         const startTime = Date.now();
         let executedQty = 0;
         let effectivePrice = markPrice;
         let amendCount = 0;
         let finalStatus = 'FILLED';
+        let lastPlacedOrderId: string | null = null;
+        let entryOrderId: string | null = null;
 
         const getDepth = async () => {
           const bids = this.confluenceEngine.orderFlowEngine.getBids();
@@ -995,30 +1047,79 @@ export class AutoPilotManager {
           return { bestBid: markPrice - 0.01, bestAsk: markPrice + 0.01 };
         };
 
-        const checkFill = async (orderId: string) => {
-          const openOrders = await this.broker.getOpenOrders(symbol);
-          const found = openOrders.find((o) => o.orderId === orderId);
-          if (!found) {
-            return { fillPrice: effectivePrice, fillQty: targetQty };
+        const checkFill = async (orderId: string): Promise<CheckFillResult> => {
+          if (typeof this.broker.getOrder !== 'function') {
+            await this.broker.cancelOrder(symbol, orderId, false).catch(() => {});
+            return { status: 'TERMINAL', reason: 'GET_ORDER_UNSUPPORTED' };
           }
-          if (found.executedQty && found.executedQty >= found.origQty) {
-            return { fillPrice: found.price, fillQty: found.executedQty };
+
+          let order: OrderExecutionResult | null = null;
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              order = await this.broker.getOrder(symbol, orderId);
+              break;
+            } catch (err) {
+              if (err instanceof ExchangeDegradedError && attempt === 0) {
+                await new Promise((r) => setTimeout(r, 100));
+                continue;
+              }
+              await this.broker.cancelOrder(symbol, orderId, false).catch(() => {});
+              return {
+                status: 'TERMINAL',
+                reason: err instanceof ExchangeDegradedError ? 'EXCHANGE_DEGRADED' : 'GET_ORDER_ERROR',
+              };
+            }
           }
+
+          if (!order) {
+            return { status: 'TERMINAL', reason: 'NOT_FOUND' };
+          }
+
+          const orderStatus = String(order.status || '').toUpperCase();
+          if (
+            orderStatus === 'CANCELED' ||
+            orderStatus === 'CANCELLED' ||
+            orderStatus === 'EXPIRED' ||
+            orderStatus === 'REJECTED'
+          ) {
+            return { status: 'TERMINAL', reason: orderStatus };
+          }
+
+          if (orderStatus === 'PARTIALLY_FILLED' && order.executedQty > 0) {
+            await this.broker.cancelOrder(symbol, orderId, false).catch(() => {});
+            return {
+              status: 'FILLED',
+              fillPrice: order.avgPrice > 0 ? order.avgPrice : effectivePrice,
+              fillQty: order.executedQty,
+            };
+          }
+
+          if (orderStatus === 'FILLED' && order.executedQty > 0) {
+            return {
+              status: 'FILLED',
+              fillPrice: order.avgPrice > 0 ? order.avgPrice : effectivePrice,
+              fillQty: order.executedQty,
+            };
+          }
+
           return null;
         };
 
-        const placeOrder = async (price: number, qty?: number) => {
+        const placeOrder = async (price: number, qty?: number, sliceClientOrderId?: string) => {
           effectivePrice = price;
           const orderQty = qty ?? targetQty;
           const res = await this.broker.openOrder({
             symbol,
             side,
             orderType: 'LIMIT',
+            timeInForce: 'GTX',
             limitPrice: price,
             marginUsd: (orderQty * price) / leverage,
             leverage,
             quantity: orderQty,
+            clientOrderId: sliceClientOrderId ?? `tos_${tradeId}_ent`,
           });
+          lastPlacedOrderId = res.orderId;
           return res.orderId;
         };
 
@@ -1028,6 +1129,7 @@ export class AutoPilotManager {
             side,
             totalQty: targetQty,
             anchorPrice: markPrice,
+            tradeId,
             getDepth,
             checkFill,
             placeOrder,
@@ -1035,6 +1137,8 @@ export class AutoPilotManager {
           executedQty = twapResult.filledQty;
           finalStatus = twapResult.status === 'COMPLETED' ? 'FILLED' : twapResult.status;
           amendCount = twapResult.slices.length;
+          const filledSlice = twapResult.slices.find((s) => s.status === 'FILLED' && s.orderId);
+          entryOrderId = filledSlice?.orderId ?? lastPlacedOrderId;
         } else {
           const chaseResult = await this.chasingExecutionEngine.chase({
             symbol,
@@ -1047,8 +1151,9 @@ export class AutoPilotManager {
           });
           finalStatus = chaseResult.status;
           amendCount = chaseResult.amendCount;
-          executedQty = chaseResult.fillQty ?? (chaseResult.status === 'FILLED' ? targetQty : 0);
+          executedQty = chaseResult.fillQty ?? 0;
           if (chaseResult.fillPrice) effectivePrice = chaseResult.fillPrice;
+          entryOrderId = chaseResult.orderId || lastPlacedOrderId;
         }
 
         const feeSavedUsd = Number((notionalUsd * 0.0003).toFixed(4));
@@ -1073,7 +1178,7 @@ export class AutoPilotManager {
             : 0;
         const realizedFeeUsd = Number((notionalUsd * 0.0002).toFixed(4));
         const finalChasingTelemetry: ChasingTelemetrySnapshot = {
-          orderId: this.latestChasingState?.orderId ?? tradeId,
+          orderId: entryOrderId ?? this.latestChasingState?.orderId ?? tradeId,
           status:
             finalStatus === 'FILLED'
               ? 'FILLED'
@@ -1090,7 +1195,7 @@ export class AutoPilotManager {
         };
         const serializedChaseTelemetry = JSON.stringify(finalChasingTelemetry);
 
-        if (finalStatus !== 'FILLED' && executedQty <= 0) {
+        if (finalStatus !== 'FILLED' || executedQty <= 0) {
           this.state = 'IDLE';
           this.openTradeId = null;
           this.activeEntryContext = null;
@@ -1146,7 +1251,7 @@ export class AutoPilotManager {
           client_sl_id: `tos_${tradeId}_sl`,
           client_tp1_id: `tos_${tradeId}_tp1`,
           client_tp2_id: `tos_${tradeId}_tp2`,
-          entry_order_id: tradeId,
+          entry_order_id: entryOrderId,
           sl_algo_id: null,
           tp1_algo_id: null,
           tp2_algo_id: null,
@@ -1181,6 +1286,17 @@ export class AutoPilotManager {
           this.state = 'CLOSING';
           this.tradesRepo.update(tradeId, { status: 'CLOSING_IN_PROGRESS' });
           this.broadcastStatus();
+          void this.alertNotifier?.notifyCriticalEvent(
+            'SL_PLACEMENT_FAILED_EMERGENCY_UNWIND',
+            `AutoPilot SL algo placement failed on ${symbol}; emergency market unwind triggered.`,
+            {
+              tradeId,
+              symbol,
+              side,
+              executedQty,
+              error: slErr instanceof Error ? slErr.message : String(slErr),
+            }
+          );
           try {
             await this.tradeManager.closePosition(symbol, 'SL_PLACEMENT_FAILED_EMERGENCY_UNWIND');
           } finally {
@@ -1223,6 +1339,9 @@ export class AutoPilotManager {
         this.broadcastStatus();
         this.emitStateTransition('POSITION_OPEN');
 
+        const persistedTrade = this.tradesRepo.getById(tradeId) ?? tradeRecord;
+        void this.alertNotifier?.notifyTradeOpened(persistedTrade);
+
         const enteredEvent = this.buildTelemetryEvent(
           'POSITION_ENTERED',
           symbol,
@@ -1255,15 +1374,10 @@ export class AutoPilotManager {
           noiseBandState,
         });
       } else {
-        const limitPrice = Number(
-          (side === 'BUY' ? markPrice * 1.0010 : markPrice * 0.9990).toFixed(2)
-        );
-
         const trade = await this.tradeManager.openPosition({
           symbol,
           side,
-          orderType: 'LIMIT',
-          limitPrice,
+          orderType: 'MARKET',
           marginUsd,
           leverage,
           stopLoss,
@@ -1272,8 +1386,9 @@ export class AutoPilotManager {
           marginAllocationPct,
         });
 
+        const fillEntryPrice = trade.entry_price || markPrice;
         this.tradesRepo.update(trade.id, {
-          peak_price: limitPrice,
+          peak_price: fillEntryPrice,
           peak_mfe: 0,
           trailing_stop_active: 0,
         });
@@ -1287,7 +1402,7 @@ export class AutoPilotManager {
         const enteredEvent = this.buildTelemetryEvent(
           'POSITION_ENTERED',
           symbol,
-          limitPrice,
+          fillEntryPrice,
           side,
           snapshot,
           { sizingTelemetry }
@@ -1298,7 +1413,7 @@ export class AutoPilotManager {
           symbol,
           side,
           action: 'EXECUTED',
-          price: limitPrice,
+          price: fillEntryPrice,
           marginUsd,
           leverage,
           atr,
@@ -1361,8 +1476,8 @@ export class AutoPilotManager {
       return;
     }
 
-    // Case 1b: Upcomers Intra-Tick Floating Drawdown & Target Watchdog ($1,250 Daily / $2,500 Trailing / +$2,500 Target)
-    if (this.propFirmRiskGuard) {
+    // Case 1b: Upcomers Intra-Tick Floating Drawdown & Target Watchdog ($1,250 Daily / $2,500 Trailing / +$2,500 Target) in BINANCE_DEMO
+    if (this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO') {
       const qty = trade.remaining_qty > 0 ? trade.remaining_qty : trade.quantity;
       const rawUnrealizedPnl =
         trade.side === 'BUY'
@@ -1629,6 +1744,7 @@ export class AutoPilotManager {
     if (
       this.propFirmRiskGuard &&
       trade &&
+      trade.broker_mode === 'BINANCE_DEMO' &&
       trade.status === 'CLOSED' &&
       !this.recordedClosedTradeIds.has(trade.id)
     ) {
@@ -1641,6 +1757,10 @@ export class AutoPilotManager {
         realizedNetPnlUsd,
         liveWalletBalanceUsd: this.cachedBalance,
       });
+    }
+
+    if (trade && trade.status === 'CLOSED') {
+      void this.alertNotifier?.notifyTradeClosed(trade);
     }
 
     this.statusMessage = null;

@@ -132,6 +132,7 @@ export interface OpenOrderRequest {
   symbol: string;
   side: TradeSide;
   orderType: OrderType;
+  timeInForce?: 'GTC' | 'IOC' | 'FOK' | 'GTX';
   marginUsd: number;
   leverage: number;
   marginAllocationPct?: number; // e.g. 2.5, 5, 10, 25, 50
@@ -407,6 +408,7 @@ export interface JournalSummary {
   winRate: number;
   profitFactor: number;
   maxDrawdown: number;
+  maxDrawdownUsd: number;
   kellyCriterion: number;
 }
 

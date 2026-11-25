@@ -1,12 +1,15 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import polka, { type Request, type Response } from 'polka';
-import { initializeDatabase } from '../../db/sqlite.js';
+import { initializeDatabase, TradesRepo } from '../../db/sqlite.js';
 import { TradeManager } from '../../services/tradeManager.js';
 import { registerRoutes, type AppContext } from '../routes.js';
 import { SESSION_TOKEN, PORT } from '../../config.js';
-import type { BrokerAdapter } from '../../exchange/broker.js';
-import type { AccountInfo, OpenOrderInfo } from '@tradeos/shared';
+import { BrokerFactory, type BrokerAdapter } from '../../exchange/broker.js';
+import { BinanceClient } from '../../exchange/binanceClient.js';
+import type { PropFirmRiskGuard } from '../../quant/propFirmRiskGuard.js';
+import type { AutoPilotManager } from '../../services/autoPilotManager.js';
+import type { AccountInfo, BrokerMode, OpenOrderInfo } from '@tradeos/shared';
 import type { DatabaseSync } from 'node:sqlite';
 
 function createMockBroker(): BrokerAdapter {
@@ -77,11 +80,16 @@ describe('TradeOS v2 16 REST Routes', () => {
     registerRoutes(app, ctx);
   });
 
+  afterEach(() => {
+    BrokerFactory.reset();
+  });
+
   async function invokeRoute(
     method: string,
     url: string,
     body?: unknown,
-    headers: Record<string, string> = {}
+    headers: Record<string, string> = {},
+    socket: { remoteAddress?: string } = { remoteAddress: '127.0.0.1' }
   ): Promise<{ status: number; headers: Record<string, string>; body: any }> {
     const parsedUrl = new URL(`http://127.0.0.1:${PORT}${url}`);
     const reqHeaders: Record<string, string> = {
@@ -98,7 +106,8 @@ describe('TradeOS v2 16 REST Routes', () => {
       headers: reqHeaders,
       params: {},
       query: Object.fromEntries(parsedUrl.searchParams),
-      body: {}
+      body: {},
+      socket
     }) as unknown as Request;
 
     const resHeaders: Record<string, string> = {};
@@ -291,5 +300,294 @@ describe('TradeOS v2 16 REST Routes', () => {
     expect(res.status).toBe(200);
     expect(res.body.reply).toBeDefined();
     expect(res.body.mode).toBeDefined();
+  });
+
+  it('17. Unified symbol switching reads ctx.getActiveSymbol() and avoids redundant stream/cvd calls', async () => {
+    let sharedSymbol = 'SOLUSDT';
+    const subscribeSymbol = vi.fn();
+    const cvdReset = vi.fn();
+    const setActiveSymbol = vi.fn((sym: string) => {
+      sharedSymbol = sym;
+    });
+
+    const syncedApp = polka();
+    registerRoutes(syncedApp, {
+      ...ctx,
+      streamsManager: { subscribeSymbol } as unknown as AppContext['streamsManager'],
+      cvdEngine: { reset: cvdReset, getSnapshot: () => null } as unknown as AppContext['cvdEngine'],
+      getActiveSymbol: () => sharedSymbol,
+      setActiveSymbol,
+    });
+
+    const callSynced = async (method: string, url: string, body?: unknown) => {
+      const parsedUrl = new URL(`http://127.0.0.1:${PORT}${url}`);
+      const emitter = new EventEmitter();
+      const req = Object.assign(emitter, {
+        method,
+        url,
+        path: parsedUrl.pathname,
+        headers: {
+          host: `127.0.0.1:${PORT}`,
+          authorization: `Bearer ${SESSION_TOKEN}`,
+        },
+        params: {},
+        query: Object.fromEntries(parsedUrl.searchParams),
+        body: {},
+        socket: { remoteAddress: '127.0.0.1' },
+      }) as unknown as Request;
+
+      return new Promise<{ status: number; body: any }>((resolve) => {
+        let statusCode = 200;
+        let responseBody = '';
+        const res = {
+          statusCode: 200,
+          setHeader: vi.fn(),
+          getHeader: vi.fn(),
+          end(data?: string) {
+            if (data) responseBody = data;
+            resolve({ status: statusCode, body: responseBody ? JSON.parse(responseBody) : null });
+          },
+        } as unknown as Response;
+        Object.defineProperty(res, 'statusCode', {
+          get: () => statusCode,
+          set: (val: number) => { statusCode = val; },
+        });
+        syncedApp.handler(req, res, { pathname: parsedUrl.pathname, query: {} });
+        process.nextTick(() => {
+          if (body !== undefined) emitter.emit('data', Buffer.from(JSON.stringify(body)));
+          emitter.emit('end');
+        });
+      });
+    };
+
+    const switchRes = await callSynced('POST', '/api/symbol', { symbol: 'btcusdt' });
+    expect(switchRes.status).toBe(200);
+    expect(switchRes.body.symbol).toBe('BTCUSDT');
+    expect(setActiveSymbol).toHaveBeenCalledWith('BTCUSDT');
+    expect(subscribeSymbol).not.toHaveBeenCalled();
+    expect(cvdReset).not.toHaveBeenCalled();
+
+    // Simulate external WS SUBSCRIBE_SYMBOL updating sharedSymbol directly
+    sharedSymbol = 'ETHUSDT';
+    const stateRes = await callSynced('GET', '/api/state');
+    expect(stateRes.status).toBe(200);
+    expect(stateRes.body.symbol).toBe('ETHUSDT');
+  });
+
+  it('18. POST /api/broker/mode enforces CLOSING_IN_PROGRESS + in-flight AutoPilot guards and propagates setBroker', async () => {
+    const tradesRepo = new TradesRepo(db);
+    let apState = 'LIMIT_CHASING';
+    const apSetBroker = vi.fn();
+    const tmSetBrokerSpy = vi.spyOn(tradeManager, 'setBroker');
+    const customClient = new BinanceClient({ apiKey: 'test-k', apiSecret: 'test-s' });
+
+    const guardedApp = polka();
+    const guardedCtx: AppContext = {
+      ...ctx,
+      binanceClient: customClient,
+      autoPilotManager: {
+        getState: () => apState,
+        setBroker: apSetBroker,
+      } as unknown as AutoPilotManager,
+    };
+    registerRoutes(guardedApp, guardedCtx);
+
+    const callGuarded = async (mode: BrokerMode) => {
+      const emitter = new EventEmitter();
+      const req = Object.assign(emitter, {
+        method: 'POST',
+        url: '/api/broker/mode',
+        path: '/api/broker/mode',
+        headers: {
+          host: `127.0.0.1:${PORT}`,
+          authorization: `Bearer ${SESSION_TOKEN}`,
+        },
+        params: {},
+        query: {},
+        body: {},
+        socket: { remoteAddress: '127.0.0.1' },
+      }) as unknown as Request;
+
+      return new Promise<{ status: number; body: any }>((resolve) => {
+        let statusCode = 200;
+        let responseBody = '';
+        const res = {
+          statusCode: 200,
+          setHeader: vi.fn(),
+          getHeader: vi.fn(),
+          end(data?: string) {
+            if (data) responseBody = data;
+            resolve({ status: statusCode, body: responseBody ? JSON.parse(responseBody) : null });
+          },
+        } as unknown as Response;
+        Object.defineProperty(res, 'statusCode', {
+          get: () => statusCode,
+          set: (val: number) => { statusCode = val; },
+        });
+        guardedApp.handler(req, res, { pathname: '/api/broker/mode', query: {} });
+        process.nextTick(() => {
+          emitter.emit('data', Buffer.from(JSON.stringify({ mode })));
+          emitter.emit('end');
+        });
+      });
+    };
+
+    // Guarded while AutoPilot is LIMIT_CHASING
+    const blockedAp = await callGuarded('LOCAL_PAPER');
+    expect(blockedAp.status).toBe(409);
+    expect(blockedAp.body.code).toBe('AUTOPILOT_IN_FLIGHT');
+
+    // Guarded while trade is CLOSING_IN_PROGRESS
+    apState = 'IDLE';
+    tradesRepo.insert({
+      id: 'closing-in-prog-1',
+      symbol: 'SOLUSDT',
+      broker_mode: 'BINANCE_DEMO',
+      side: 'BUY',
+      status: 'CLOSING_IN_PROGRESS',
+      entry_price: 150,
+      exit_price: null,
+      quantity: 1,
+      remaining_qty: 1,
+      leverage: 5,
+      margin_usd: 30,
+      stop_loss: 145,
+      tp1: null,
+      tp2: null,
+      be_price: null,
+      is_breakeven: 0,
+      peak_price: 150,
+      peak_mfe: 0,
+      trailing_stop_active: 0,
+      client_order_id: null,
+      client_sl_id: null,
+      client_tp1_id: null,
+      client_tp2_id: null,
+      entry_order_id: null,
+      sl_algo_id: null,
+      tp1_algo_id: null,
+      tp2_algo_id: null,
+      realized_pnl: 0,
+      fees_usd: 0,
+      exit_reason: null,
+      opened_at: Date.now(),
+      closed_at: null,
+    });
+    const blockedClosing = await callGuarded('LOCAL_PAPER');
+    expect(blockedClosing.status).toBe(409);
+
+    // Clear trade to CLOSED and verify switch + propagation + LOCAL_PAPER reuse
+    tradesRepo.update('closing-in-prog-1', { status: 'CLOSED', closed_at: Date.now() });
+
+    const toPaper1 = await callGuarded('LOCAL_PAPER');
+    expect(toPaper1.status).toBe(200);
+    const paperAdapter1 = guardedCtx.broker;
+    expect(paperAdapter1.mode).toBe('LOCAL_PAPER');
+    expect(tmSetBrokerSpy).toHaveBeenCalledWith(paperAdapter1);
+    expect(apSetBroker).toHaveBeenCalledWith(paperAdapter1);
+
+    const toDemo = await callGuarded('BINANCE_DEMO');
+    expect(toDemo.status).toBe(200);
+    expect(guardedCtx.broker.mode).toBe('BINANCE_DEMO');
+    expect(apSetBroker).toHaveBeenCalledWith(guardedCtx.broker);
+  });
+
+  it('19. GET /api/journal computes chronological ASC aggregate drawdown ratio and maxDrawdownUsd across full history', async () => {
+    const tradesRepo = new TradesRepo(db);
+    const baseTime = 1700000000000;
+    const closedRows = [
+      { id: 't1', pnl: 200, fees: 0, closedAt: baseTime + 1000 },
+      { id: 't2', pnl: -300, fees: 0, closedAt: baseTime + 2000 },
+      { id: 't3', pnl: -200, fees: 0, closedAt: baseTime + 3000 },
+      { id: 't4', pnl: 100, fees: 0, closedAt: baseTime + 4000 },
+    ];
+    for (const row of closedRows) {
+      tradesRepo.insert({
+        id: row.id,
+        symbol: 'SOLUSDT',
+        broker_mode: 'BINANCE_DEMO',
+        side: 'BUY',
+        status: 'CLOSED',
+        entry_price: 150,
+        exit_price: 151,
+        quantity: 1,
+        remaining_qty: 0,
+        leverage: 5,
+        margin_usd: 30,
+        stop_loss: 145,
+        tp1: null,
+        tp2: null,
+        be_price: null,
+        is_breakeven: 0,
+        peak_price: 151,
+        peak_mfe: 0,
+        trailing_stop_active: 0,
+        client_order_id: null,
+        client_sl_id: null,
+        client_tp1_id: null,
+        client_tp2_id: null,
+        entry_order_id: null,
+        sl_algo_id: null,
+        tp1_algo_id: null,
+        tp2_algo_id: null,
+        realized_pnl: row.pnl,
+        fees_usd: row.fees,
+        exit_reason: 'TAKE_PROFIT',
+        opened_at: row.closedAt - 500,
+        closed_at: row.closedAt,
+      });
+    }
+
+    // Wire propFirmRiskGuard so BINANCE_DEMO uses $50,000 PropFirm initialEquity
+    const propFirmApp = polka();
+    registerRoutes(propFirmApp, {
+      ...ctx,
+      propFirmRiskGuard: {} as PropFirmRiskGuard,
+    });
+
+    const parsedUrl = new URL(`http://127.0.0.1:${PORT}/api/journal?limit=2&offset=0`);
+    const emitter = new EventEmitter();
+    const req = Object.assign(emitter, {
+      method: 'GET',
+      url: '/api/journal?limit=2&offset=0',
+      path: '/api/journal',
+      headers: {
+        host: `127.0.0.1:${PORT}`,
+        authorization: `Bearer ${SESSION_TOKEN}`,
+      },
+      params: {},
+      query: { limit: '2', offset: '0' },
+      body: {},
+      socket: { remoteAddress: '127.0.0.1' },
+    }) as unknown as Request;
+
+    const resData = await new Promise<{ status: number; body: any }>((resolve) => {
+      let statusCode = 200;
+      let responseBody = '';
+      const res = {
+        statusCode: 200,
+        setHeader: vi.fn(),
+        getHeader: vi.fn(),
+        end(data?: string) {
+          if (data) responseBody = data;
+          resolve({ status: statusCode, body: responseBody ? JSON.parse(responseBody) : null });
+        },
+      } as unknown as Response;
+      Object.defineProperty(res, 'statusCode', {
+        get: () => statusCode,
+        set: (val: number) => { statusCode = val; },
+      });
+      propFirmApp.handler(req, res, { pathname: '/api/journal', query: 'limit=2&offset=0' });
+    });
+
+    expect(resData.status).toBe(200);
+    // Paginated slice returns latest 2 trades (t4, t3)
+    expect(resData.body.trades.length).toBe(2);
+    expect(resData.body.totalTrades).toBe(4);
+    // Aggregate metrics computed across ALL 4 chronological ASC trades:
+    // 2 wins / 4 total = 50% winRate; Peak 50200 -> trough 49700 => $500 / 50200 ≈ 0.01 (0.0100)
+    expect(resData.body.winRate).toBe(50);
+    expect(resData.body.maxDrawdownUsd).toBe(500);
+    expect(resData.body.maxDrawdown).toBeCloseTo(500 / 50200, 4);
   });
 });

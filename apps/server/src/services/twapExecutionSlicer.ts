@@ -1,5 +1,11 @@
+import crypto from 'node:crypto';
 import type { TradeSide } from '@tradeos/shared';
-import type { ChasingExecutionEngine, DepthSnapshot, ChasingResult } from './chasingExecutionEngine.js';
+import type {
+  ChasingExecutionEngine,
+  DepthSnapshot,
+  ChasingResult,
+  CheckFillResult,
+} from './chasingExecutionEngine.js';
 
 export interface TwapSlicerOptions {
   /** Notional threshold (USD) above which TWAP slicing is triggered (default 5000) */
@@ -23,6 +29,7 @@ export interface TwapSliceRecord {
   status: 'PENDING' | 'FILLED' | 'CANCELED' | 'ABORTED';
   fillPrice?: number;
   orderId?: string;
+  clientOrderId?: string;
 }
 
 export interface TwapResult {
@@ -116,21 +123,29 @@ export class TwapExecutionSlicer {
     side: TradeSide;
     totalQty: number;
     anchorPrice: number;
+    tradeId?: string;
     getDepth: () => Promise<DepthSnapshot>;
-    checkFill: (orderId: string) => Promise<{ fillPrice: number; fillQty: number } | null>;
-    placeOrder: (price: number, qty: number) => Promise<string>;
+    checkFill: (orderId: string) => Promise<CheckFillResult>;
+    placeOrder: (price: number, qty: number, clientOrderId?: string) => Promise<string>;
   }): Promise<TwapResult> {
     const { symbol, side, totalQty, anchorPrice } = params;
+    const rawTradeId = (params.tradeId || crypto.randomBytes(8).toString('hex')).replace(/[^a-zA-Z0-9_-]/g, '');
 
     const sliceQtys = this.generateSliceQuantities(totalQty);
     const intervals = this.generateIntervals();
 
-    const sliceRecords: TwapSliceRecord[] = sliceQtys.map((qty, i) => ({
-      sliceIndex: i,
-      quantity: qty,
-      intervalMs: i < intervals.length ? intervals[i] : 0,
-      status: 'PENDING',
-    }));
+    const sliceRecords: TwapSliceRecord[] = sliceQtys.map((qty, i) => {
+      const suffix = `_s${i}`;
+      const maxIdLen = Math.max(1, 36 - 4 - suffix.length);
+      const clientOrderId = `tos_${rawTradeId.slice(0, maxIdLen)}${suffix}`;
+      return {
+        sliceIndex: i,
+        quantity: qty,
+        intervalMs: i < intervals.length ? intervals[i] : 0,
+        status: 'PENDING',
+        clientOrderId,
+      };
+    });
 
     let totalFilled = 0;
 
@@ -148,7 +163,7 @@ export class TwapExecutionSlicer {
           anchorPrice,
           getDepth: params.getDepth,
           checkFill: params.checkFill,
-          placeOrder: (price) => params.placeOrder(price, sliceQty),
+          placeOrder: (price) => params.placeOrder(price, sliceQty, record.clientOrderId),
         });
       } catch {
         record.status = 'ABORTED';
@@ -169,7 +184,7 @@ export class TwapExecutionSlicer {
       if (result.status === 'FILLED') {
         record.status = 'FILLED';
         record.fillPrice = result.fillPrice;
-        totalFilled += sliceQty;
+        totalFilled += result.fillQty ?? sliceQty;
       } else if (result.status === 'CANCELLED') {
         record.status = 'CANCELED';
       } else {

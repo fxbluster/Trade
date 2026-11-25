@@ -13,6 +13,8 @@ export const OrderTicket: React.FC = () => {
   const risk = useMarketStore((s) => s.risk);
   const activePosition = useMarketStore((s) => s.activePosition);
   const indicators = useMarketStore((s) => s.indicators);
+  const propFirmStatus = useMarketStore((s) => s.propFirmStatus);
+  const brokerMode = useMarketStore((s) => s.brokerMode);
   const isAudioMuted = useUiStore((s) => s.isAudioMuted);
 
   const orderDraft = useUiStore((s) => s.orderDraft);
@@ -126,6 +128,8 @@ export const OrderTicket: React.FC = () => {
     setHoldProgress(0);
   };
 
+  useEffect(() => () => cancelHold(), []);
+
   const executeOrder = async () => {
     setIsSubmitting(true);
     setErrorMessage(null);
@@ -165,11 +169,15 @@ export const OrderTicket: React.FC = () => {
     }
   };
 
-  // Cooldown status check
+  // Cooldown & PropFirm status checks
   const isCooldownActive = risk?.cooldown_until ? risk.cooldown_until > Date.now() : false;
+  const isPropFirmBlocked = Boolean(propFirmStatus && !propFirmStatus.canTrade);
+  const isPropFirmRiskClampWarning =
+    brokerMode === 'BINANCE_DEMO' && (orderDraft.preview?.maxLossUsd ?? 0) > 250;
   const hasValidSl = typeof orderDraft.stopLoss === 'number' && orderDraft.stopLoss > 0;
   const deadSlSafe = orderDraft.preview ? orderDraft.preview.deadSlSafe : false;
-  const isBlocked = isCooldownActive || !hasValidSl || !deadSlSafe || isSubmitting;
+  const isBlocked =
+    isCooldownActive || isPropFirmBlocked || !hasValidSl || !deadSlSafe || isSubmitting;
 
   return (
     <div className="flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg p-3 space-y-3 select-none">
@@ -187,6 +195,17 @@ export const OrderTicket: React.FC = () => {
           Mark: <strong className="text-[#e6edf3]">{markPrice.toFixed(2)}</strong>
         </span>
       </div>
+
+      {/* Upcomers $250.00 Max-Risk Auto-Clamp Notice */}
+      {isPropFirmRiskClampWarning && (
+        <div
+          data-testid="upcomers-risk-clamp-warning"
+          className="flex items-center space-x-1.5 px-2 py-1.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[11px] font-mono"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />
+          <span>Upcomers Limit: risk auto-clamped to $250.00 max on submit</span>
+        </div>
+      )}
 
       {/* LONG / SHORT Tabs */}
       <div className="grid grid-cols-2 gap-2">
@@ -473,6 +492,19 @@ export const OrderTicket: React.FC = () => {
         </div>
       )}
 
+      {/* Prop-Firm Halt Lock Banner */}
+      {isPropFirmBlocked && (
+        <div
+          data-testid="propfirm-halt-banner"
+          className="flex items-center space-x-1.5 p-2 rounded bg-[#f6465d]/10 border border-[#f6465d]/30 text-[#f6465d] text-xs font-mono"
+        >
+          <ShieldAlert className="w-4 h-4 flex-shrink-0" />
+          <span>
+            UPCOMERS HALT LOCK: {propFirmStatus?.haltReason || 'Trading halted by Prop-Firm guard'}
+          </span>
+        </div>
+      )}
+
       {/* 400ms Hold-to-Confirm Submit Button */}
       <div className="relative pt-1">
         <button
@@ -485,6 +517,8 @@ export const OrderTicket: React.FC = () => {
           className={`relative w-full py-3 rounded font-mono text-xs font-bold uppercase overflow-hidden transition-all ${
             isSubmitting
               ? 'bg-[#151d2c] text-[#7d8590] cursor-not-allowed'
+              : isPropFirmBlocked
+              ? 'bg-[#f6465d]/10 text-[#f6465d] border border-[#f6465d]/40 cursor-not-allowed'
               : isCooldownActive
               ? 'bg-amber-500/10 text-amber-400 border border-amber-500/30 cursor-not-allowed'
               : !hasValidSl
@@ -505,6 +539,8 @@ export const OrderTicket: React.FC = () => {
           <span className="relative z-10 flex items-center justify-center space-x-2">
             {isSubmitting ? (
               <span>Executing Order...</span>
+            ) : isPropFirmBlocked ? (
+              <span>Prop-Firm Halted</span>
             ) : isCooldownActive ? (
               <span>Cooldown Locked</span>
             ) : !hasValidSl ? (

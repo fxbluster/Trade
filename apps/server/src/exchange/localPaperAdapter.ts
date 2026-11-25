@@ -5,8 +5,11 @@ import type {
   AccountInfo,
   OpenOrderRequest,
   OpenOrderInfo,
+  TradeSide,
+  FillRecord,
 } from '@tradeos/shared';
 import { SettingsRepo } from '../db/sqlite.js';
+import { BinanceApiError } from './binanceClient.js';
 import type {
   BrokerAdapter,
   PositionInfo,
@@ -39,6 +42,9 @@ interface PaperOrder {
   price?: number;
   triggerPrice?: number;
   quantity: number;
+  leverage?: number;
+  marginUsd?: number;
+  timeInForce?: string;
   isAlgo: boolean;
   reduceOnly: boolean;
 }
@@ -47,7 +53,7 @@ interface PaperOrder {
  * Isolated Paper Trading Broker Adapter.
  * Applies 3bps slippage (0.0003) and 0.05% fee (0.0005) on all executions,
  * persists balance in SQLite settings table (key: 'paper_wallet_balance'),
- * and listens to live Mainnet mark prices to evaluate SL/TP execution.
+ * and listens to live Mainnet mark prices to evaluate SL/TP and resting LIMIT execution.
  */
 export class LocalPaperAdapter implements BrokerAdapter {
   public readonly mode: BrokerMode = 'LOCAL_PAPER';
@@ -59,6 +65,8 @@ export class LocalPaperAdapter implements BrokerAdapter {
 
   private positions: Map<string, PaperPosition> = new Map();
   private openOrders: Map<string, PaperOrder> = new Map();
+  private ordersById: Map<string, OrderExecutionResult> = new Map();
+  private userTrades: FillRecord[] = [];
   private markPrices: Map<string, number> = new Map();
 
   constructor(options: LocalPaperAdapterOptions) {
@@ -105,11 +113,62 @@ export class LocalPaperAdapter implements BrokerAdapter {
   }
 
   /**
-   * Attaches live mark price tick from Mainnet streams to evaluate paper SL/TP orders.
+   * Attaches live mark price tick from Mainnet streams to evaluate paper LIMIT & SL/TP orders.
    */
   onMarkPriceTick(symbol: string, price: number): void {
     const symUpper = symbol.toUpperCase();
     this.markPrices.set(symUpper, price);
+
+    // Check resting LIMIT orders for fills
+    for (const [orderId, ord] of this.openOrders.entries()) {
+      if (ord.symbol !== symUpper || ord.isAlgo || ord.type !== 'LIMIT' || ord.price === undefined) {
+        continue;
+      }
+      const crossed =
+        (ord.side === 'BUY' && price <= ord.price) ||
+        (ord.side === 'SELL' && price >= ord.price);
+      if (crossed) {
+        this.openOrders.delete(orderId);
+        const execPrice = ord.price;
+        const fee = execPrice * ord.quantity * this.FEE_RATE;
+        const { balance } = this.getBalanceRecord();
+        this.updateBalance(balance - fee);
+
+        const lev = ord.leverage ?? 10;
+        const margin = ord.marginUsd ?? (execPrice * ord.quantity) / lev;
+        this.positions.set(symUpper, {
+          symbol: symUpper,
+          side: ord.side,
+          entryPrice: execPrice,
+          quantity: ord.quantity,
+          leverage: lev,
+          marginUsd: margin,
+          openedAt: Date.now(),
+        });
+
+        this.ordersById.set(orderId, {
+          orderId,
+          clientOrderId: ord.clientOrderId || '',
+          status: 'FILLED',
+          executedQty: ord.quantity,
+          avgPrice: execPrice,
+        });
+
+        this.userTrades.push({
+          binance_trade_id: `paper_fill_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+          trade_id: '',
+          order_id: orderId,
+          symbol: symUpper,
+          side: ord.side,
+          price: execPrice,
+          qty: ord.quantity,
+          realized_pnl: 0,
+          commission: fee,
+          commission_asset: 'USDT',
+          filled_at: Date.now(),
+        });
+      }
+    }
 
     const pos = this.positions.get(symUpper);
     if (!pos) return;
@@ -203,6 +262,66 @@ export class LocalPaperAdapter implements BrokerAdapter {
     req: OpenOrderRequest & { clientOrderId?: string; quantity?: number; currentPrice?: number }
   ): Promise<OrderExecutionResult> {
     const symUpper = req.symbol.toUpperCase();
+    const knownMark = req.currentPrice ?? this.markPrices.get(symUpper);
+    const tif = req.timeInForce ?? 'GTC';
+
+    const orderId = `paper_order_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const clientOrderId = req.clientOrderId || `tos_paper_${orderId}`;
+
+    if (req.orderType === 'LIMIT') {
+      const limitPrice = req.limitPrice ?? knownMark ?? 100.0;
+
+      if (tif === 'GTX' && knownMark !== undefined) {
+        const crosses =
+          req.side === 'BUY' ? limitPrice >= knownMark : limitPrice <= knownMark;
+        if (crosses) {
+          throw new BinanceApiError(
+            'Post Only order would immediately trigger as taker order.',
+            400,
+            -5022
+          );
+        }
+      }
+
+      const isNonCrossing =
+        knownMark !== undefined &&
+        ((req.side === 'BUY' && limitPrice < knownMark) ||
+          (req.side === 'SELL' && limitPrice > knownMark));
+
+      if (isNonCrossing || (tif === 'GTX' && knownMark === undefined)) {
+        const qty =
+          req.quantity ??
+          (req.marginUsd && req.leverage
+            ? Number(((req.marginUsd * req.leverage) / limitPrice).toFixed(4))
+            : 1);
+
+        this.openOrders.set(orderId, {
+          orderId,
+          clientOrderId,
+          symbol: symUpper,
+          side: req.side,
+          type: 'LIMIT',
+          price: limitPrice,
+          quantity: qty,
+          leverage: req.leverage,
+          marginUsd: req.marginUsd,
+          timeInForce: tif,
+          isAlgo: false,
+          reduceOnly: false,
+        });
+
+        const restingResult: OrderExecutionResult = {
+          orderId,
+          clientOrderId,
+          status: 'NEW',
+          executedQty: 0,
+          avgPrice: 0,
+        };
+        this.ordersById.set(orderId, restingResult);
+        return restingResult;
+      }
+    }
+
     const rawPrice =
       req.limitPrice || req.currentPrice || this.markPrices.get(symUpper) || 100.0;
 
@@ -224,6 +343,8 @@ export class LocalPaperAdapter implements BrokerAdapter {
     const { balance } = this.getBalanceRecord();
     this.updateBalance(balance - fee);
 
+    const filledAt = Date.now();
+
     // Record position
     this.positions.set(symUpper, {
       symbol: symUpper,
@@ -232,19 +353,32 @@ export class LocalPaperAdapter implements BrokerAdapter {
       quantity: qty,
       leverage: req.leverage,
       marginUsd: req.marginUsd,
-      openedAt: Date.now(),
+      openedAt: filledAt,
     });
 
-    const orderId = `paper_order_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const clientOrderId = req.clientOrderId || `tos_paper_${orderId}`;
-
-    return {
+    const filledResult: OrderExecutionResult = {
       orderId,
       clientOrderId,
       status: 'FILLED',
       executedQty: qty,
       avgPrice: execPrice,
     };
+    this.ordersById.set(orderId, filledResult);
+    this.userTrades.push({
+      binance_trade_id: `paper_fill_${filledAt}_${crypto.randomBytes(4).toString('hex')}`,
+      trade_id: '',
+      order_id: orderId,
+      symbol: symUpper,
+      side: req.side,
+      price: execPrice,
+      qty,
+      realized_pnl: 0,
+      commission: fee,
+      commission_asset: 'USDT',
+      filled_at: filledAt,
+    });
+
+    return filledResult;
   }
 
   async createAlgoOrder(params: AlgoOrderParams): Promise<AlgoOrderResult> {
@@ -317,12 +451,33 @@ export class LocalPaperAdapter implements BrokerAdapter {
       pos.quantity -= closeQty;
     }
 
-    const orderId = `paper_close_${Date.now()}`;
+    const filledAt = Date.now();
+    const orderId = `paper_close_${filledAt}`;
+    this.userTrades.push({
+      binance_trade_id: `paper_fill_${filledAt}_${crypto.randomBytes(4).toString('hex')}`,
+      trade_id: '',
+      order_id: orderId,
+      symbol: symUpper,
+      side: pos.side === 'BUY' ? 'SELL' : 'BUY',
+      price: exitPrice,
+      qty: closeQty,
+      realized_pnl: Number(grossPnl.toFixed(4)),
+      commission: Number(exitFee.toFixed(4)),
+      commission_asset: 'USDT',
+      filled_at: filledAt,
+    });
     return { orderId, status: 'FILLED' };
   }
 
-  async cancelOrder(symbol: string, orderId: string, _isAlgo?: boolean): Promise<boolean> {
-    return this.openOrders.delete(orderId);
+  async cancelOrder(_symbol: string, orderId: string, _isAlgo?: boolean): Promise<boolean> {
+    const deleted = this.openOrders.delete(orderId);
+    if (deleted) {
+      const existing = this.ordersById.get(orderId);
+      if (existing && existing.status === 'NEW') {
+        this.ordersById.set(orderId, { ...existing, status: 'CANCELED' });
+      }
+    }
+    return deleted;
   }
 
   async cancelAllOrders(symbol: string): Promise<boolean> {
@@ -330,6 +485,10 @@ export class LocalPaperAdapter implements BrokerAdapter {
     for (const [id, ord] of this.openOrders.entries()) {
       if (ord.symbol === symUpper) {
         this.openOrders.delete(id);
+        const existing = this.ordersById.get(id);
+        if (existing && existing.status === 'NEW') {
+          this.ordersById.set(id, { ...existing, status: 'CANCELED' });
+        }
       }
     }
     return true;
@@ -385,6 +544,17 @@ export class LocalPaperAdapter implements BrokerAdapter {
     return result;
   }
 
+  async getOrder(_symbol: string, orderId: string): Promise<OrderExecutionResult | null> {
+    return this.ordersById.get(String(orderId)) ?? null;
+  }
+
+  async getSymbolUserTrades(symbol: string, startTimeMs: number): Promise<FillRecord[]> {
+    const symUpper = symbol.toUpperCase();
+    return this.userTrades.filter(
+      (f) => f.symbol === symUpper && f.filled_at >= startTimeMs
+    );
+  }
+
   async setLeverage(symbol: string, leverage: number): Promise<number> {
     const symUpper = symbol.toUpperCase();
     const pos = this.positions.get(symUpper);
@@ -396,21 +566,36 @@ export class LocalPaperAdapter implements BrokerAdapter {
 
   /**
    * In-memory modifyOrder: updates the simulated open order's price and quantity.
-   * Returns a synthetic amended order response (mirrors Binance shape).
+   * Throws -5022 if order is Post-Only (GTX) and amended price crosses mark.
    */
   async modifyOrder(
     symbol: string,
     orderId: string | number,
     price: number,
-    quantity: number
+    quantity: number,
+    side?: TradeSide
   ): Promise<any> {
     const symUpper = symbol.toUpperCase();
     const orderIdStr = String(orderId);
     const ord = this.openOrders.get(orderIdStr);
+    const mark = this.markPrices.get(symUpper);
+
     if (ord && ord.symbol === symUpper) {
+      const effSide = side ?? ord.side;
+      if (ord.timeInForce === 'GTX' && mark !== undefined) {
+        const crosses = effSide === 'BUY' ? price >= mark : price <= mark;
+        if (crosses) {
+          throw new BinanceApiError(
+            'Post Only order would immediately trigger as taker order.',
+            400,
+            -5022
+          );
+        }
+      }
       ord.price = price;
       ord.quantity = quantity;
     }
+
     return {
       orderId: orderIdStr,
       symbol: symUpper,

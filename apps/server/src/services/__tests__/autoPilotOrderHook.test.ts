@@ -33,7 +33,7 @@ describe('AutoPilotManager onOrderDispatched hook', () => {
         side: 'BUY',
         action: 'EXECUTED',
         tradeId: 't_123',
-        price: 100.1, // 100 * 1.0010
+        price: 100,
         marginUsd: 100, // min(1000 * 10%, 1000)
         leverage: 10,
         atr: 1.5,

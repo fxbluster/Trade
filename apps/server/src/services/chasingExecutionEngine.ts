@@ -31,6 +31,11 @@ export interface ChasingResult {
   feeSavedUsd?: number;
 }
 
+export type CheckFillResult =
+  | { status: 'FILLED'; fillPrice: number; fillQty: number }
+  | { status: 'TERMINAL'; reason: string }
+  | null;
+
 /**
  * Token bucket rate limiter: allows at most `capacity` tokens per second.
  */
@@ -79,7 +84,7 @@ export class ChasingExecutionEngine {
   private onStateUpdate?: (state: ChasingOrderState) => void;
 
   constructor(
-    private readonly broker: BrokerAdapter,
+    private broker: BrokerAdapter,
     options: ChasingEngineOptions = {}
   ) {
     this.debouncMs = options.debouncMs ?? 250;
@@ -89,6 +94,11 @@ export class ChasingExecutionEngine {
     this.tickSize = options.tickSize ?? 0.01;
     const ratePerSec = options.maxAmendPerSec ?? 5;
     this.bucket = new TokenBucket(ratePerSec, ratePerSec);
+  }
+
+  /** Hot-swap active broker adapter when switching between BINANCE_DEMO and LOCAL_PAPER */
+  setBroker(broker: BrokerAdapter): void {
+    this.broker = broker;
   }
 
   /** Register optional state update callback */
@@ -167,7 +177,7 @@ export class ChasingExecutionEngine {
     quantity: number;
     anchorPrice: number;
     getDepth: () => Promise<DepthSnapshot>;
-    checkFill: (orderId: string) => Promise<{ fillPrice: number; fillQty: number } | null>;
+    checkFill: (orderId: string) => Promise<CheckFillResult>;
     placeOrder: (price: number) => Promise<string>;
   }): Promise<ChasingResult> {
     const { symbol, side, quantity, anchorPrice } = params;
@@ -175,10 +185,31 @@ export class ChasingExecutionEngine {
 
     // Initial depth snapshot
     const initialDepth = await params.getDepth();
-    const initialPrice = this.computeTarget(side, initialDepth.bestBid, initialDepth.bestAsk);
+    let initialPrice = this.computeTarget(side, initialDepth.bestBid, initialDepth.bestAsk);
 
-    // Place initial GTX limit order
-    const orderId = await params.placeOrder(initialPrice);
+    // Place initial GTX limit order (wrap in -5022 1-tick backoff retry)
+    let orderId: string;
+    try {
+      orderId = await params.placeOrder(initialPrice);
+    } catch (err: any) {
+      if (err instanceof BinanceApiError && err.code === -5022) {
+        const backedOffPrice =
+          side === 'BUY'
+            ? initialPrice - this.tickSize
+            : initialPrice + this.tickSize;
+        await sleep(250);
+        const freshDepth = await params.getDepth();
+        const requotedPrice = this.computeTarget(side, freshDepth.bestBid, freshDepth.bestAsk);
+        const retryPrice =
+          side === 'BUY'
+            ? Math.min(backedOffPrice, requotedPrice)
+            : Math.max(backedOffPrice, requotedPrice);
+        initialPrice = retryPrice;
+        orderId = await params.placeOrder(retryPrice);
+      } else {
+        throw err;
+      }
+    }
 
     this.state = {
       active: true,
@@ -198,9 +229,9 @@ export class ChasingExecutionEngine {
     let lastAmendTime = startTime;
     let currentPrice = initialPrice;
 
-    // Polling loop: 100ms intervals
+    // Polling loop: >= 300ms intervals to stay within exchange API weight limits
     while (true) {
-      await sleep(100);
+      await sleep(300);
 
       const now = Date.now();
 
@@ -215,21 +246,36 @@ export class ChasingExecutionEngine {
         };
       }
 
-      // 2. Check fill
+      // 2. Check fill or terminal exchange abort
       const fill = await params.checkFill(orderId);
       if (fill) {
-        this.setState({
-          active: false,
-          status: 'FILLED',
-          currentLimitPrice: fill.fillPrice,
-        });
-        return {
-          orderId,
-          status: 'FILLED',
-          fillPrice: fill.fillPrice,
-          fillQty: fill.fillQty,
-          amendCount: this.state!.amendCount,
-        };
+        if (fill.status === 'TERMINAL') {
+          this.setState({
+            active: false,
+            status: 'CANCELLED',
+          });
+          return {
+            orderId,
+            status: 'CANCELLED',
+            fillQty: 0,
+            amendCount: this.state!.amendCount,
+          };
+        }
+
+        if (fill.status === 'FILLED') {
+          this.setState({
+            active: false,
+            status: 'FILLED',
+            currentLimitPrice: fill.fillPrice,
+          });
+          return {
+            orderId,
+            status: 'FILLED',
+            fillPrice: fill.fillPrice,
+            fillQty: fill.fillQty,
+            amendCount: this.state!.amendCount,
+          };
+        }
       }
 
       // 3. Debounce gate
@@ -276,7 +322,7 @@ export class ChasingExecutionEngine {
 
       // 9. Attempt amendment
       try {
-        await broker_modifyOrder(this.broker, symbol, orderId, newTargetPrice, quantity);
+        await broker_modifyOrder(this.broker, symbol, orderId, newTargetPrice, quantity, side);
         currentPrice = newTargetPrice;
         lastAmendTime = now;
         this.setState({
@@ -298,10 +344,14 @@ export class ChasingExecutionEngine {
           await sleep(250);
           const freshDepth = await params.getDepth();
           const requeotedPrice = this.computeTarget(side, freshDepth.bestBid, freshDepth.bestAsk);
+          const retryPrice =
+            side === 'BUY'
+              ? Math.min(backedOffPrice, requeotedPrice)
+              : Math.max(backedOffPrice, requeotedPrice);
 
           try {
-            await broker_modifyOrder(this.broker, symbol, orderId, Math.min(backedOffPrice, requeotedPrice), quantity);
-            currentPrice = Math.min(backedOffPrice, requeotedPrice);
+            await broker_modifyOrder(this.broker, symbol, orderId, retryPrice, quantity, side);
+            currentPrice = retryPrice;
             lastAmendTime = Date.now();
             this.setState({
               amendCount: this.state!.amendCount + 1,
@@ -335,10 +385,11 @@ function broker_modifyOrder(
   symbol: string,
   orderId: string,
   price: number,
-  quantity: number
+  quantity: number,
+  side: TradeSide
 ): Promise<any> {
   if (typeof broker.modifyOrder === 'function') {
-    return broker.modifyOrder(symbol, orderId, price, quantity);
+    return broker.modifyOrder(symbol, orderId, price, quantity, side);
   }
   return Promise.reject(new Error('broker.modifyOrder not implemented'));
 }

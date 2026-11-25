@@ -19,8 +19,18 @@ export const HOST: string = '127.0.0.1';
 export const BINANCE_DEMO_API_KEY: string = process.env.BINANCE_DEMO_API_KEY || '';
 export const BINANCE_DEMO_API_SECRET: string = process.env.BINANCE_DEMO_API_SECRET || '';
 export const GEMINI_API_KEY: string = process.env.GEMINI_API_KEY || '';
-export const WEBHOOK_SECRET: string = process.env.WEBHOOK_SECRET || 'tradeos-webhook-secret-passphrase';
+export const WEBHOOK_SECRET: string = process.env.WEBHOOK_SECRET || '';
 export const CRYPTOPANIC_API_KEY: string = process.env.CRYPTOPANIC_API_KEY || '';
+export const TELEGRAM_BOT_TOKEN: string = process.env.TELEGRAM_BOT_TOKEN || '';
+export const TELEGRAM_CHAT_ID: string = process.env.TELEGRAM_CHAT_ID || '';
+
+export function getWebhookSecret(): string {
+  return (process.env.WEBHOOK_SECRET || '').trim();
+}
+
+export function getOperatorAccessPin(): string {
+  return (process.env.OPERATOR_ACCESS_PIN || '').trim();
+}
 
 // 256-bit cryptographic session token persisted across daemon auto-restarts
 function getOrGenerateSessionToken(): string {
@@ -68,7 +78,7 @@ export function redactSecrets(obj: unknown): unknown {
   }
   const clone: Record<string, unknown> = { ...(obj as Record<string, unknown>) };
   for (const key of Object.keys(clone)) {
-    if (/key|secret|token|password|auth|authorization/i.test(key) && typeof clone[key] === 'string') {
+    if (/key|secret|token|password|auth|authorization|pin/i.test(key) && typeof clone[key] === 'string') {
       clone[key] = '***REDACTED***';
     } else if (typeof clone[key] === 'object' && clone[key] !== null) {
       clone[key] = redactSecrets(clone[key]);

@@ -4,6 +4,7 @@ import {
   updateRiskStateOnTradeClose,
   calculateKellyCriterion,
   calculateMaxDrawdown,
+  calculateMaxDrawdownUsd,
   calculateProfitFactor,
 } from '../riskEngine.js';
 import { generateMentorBrief } from '../sokratMentor.js';
@@ -261,12 +262,14 @@ describe('TradeOS v2 — Risk Engine & Sokrat Mentor', () => {
       expect(calculateKellyCriterion([makeTrade(-10), makeTrade(-20)])).toBe(0);
     });
 
-    it('calculates Maximum Drawdown (MDD) in dollars', () => {
+    it('calculates Maximum Drawdown (MDD) ratio and USD chronologically', () => {
       expect(calculateMaxDrawdown([])).toBe(0);
+      expect(calculateMaxDrawdownUsd([])).toBe(0);
 
-      // Equity starts at 100: +20 (120), -30 (90), +10 (100) -> Peak 120, Trough 90 -> MaxDD 30
+      // Equity starts at 100: +20 (120), -30 (90), +10 (100) -> Peak 120, Trough 90 -> MaxDD 30 (25% = 0.25)
       const trades = [makeTrade(20), makeTrade(-30), makeTrade(10)];
-      expect(calculateMaxDrawdown(trades, 100)).toBe(30);
+      expect(calculateMaxDrawdown(trades, 100)).toBe(0.25);
+      expect(calculateMaxDrawdownUsd(trades)).toBe(30);
     });
 
     it('calculates Profit Factor (PF)', () => {

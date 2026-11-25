@@ -79,8 +79,17 @@ export const TradeJournalPanel: React.FC = () => {
             <span>Max Drawdown</span>
             <TrendingDown className="w-3 h-3 text-[#f6465d]" />
           </div>
-          <div className="text-base font-bold text-[#f6465d] mt-0.5">
-            {journal ? `${(journal.maxDrawdown * 100).toFixed(1)}%` : '--'}
+          <div className="text-base font-bold text-[#f6465d] mt-0.5" data-testid="journal-max-drawdown">
+            {journal ? (
+              <>
+                <span>{`${(journal.maxDrawdown * 100).toFixed(1)}%`}</span>
+                <span className="text-xs font-normal text-[#7d8590] ml-1.5">
+                  {`(-$${(journal.maxDrawdownUsd ?? 0).toFixed(2)})`}
+                </span>
+              </>
+            ) : (
+              '--'
+            )}
           </div>
         </div>
 

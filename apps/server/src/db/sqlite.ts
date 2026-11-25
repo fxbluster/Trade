@@ -240,15 +240,78 @@ export function runTransaction<T>(db: DatabaseSync, fn: () => T): T {
     return result;
   } catch (err) {
     db.exec('ROLLBACK;');
+    TradesRepo.invalidateActiveCacheForDb(db);
     throw err;
   }
 }
+
+const ACTIVE_TRADE_STATUSES = new Set([
+  'OPEN',
+  'PARTIALLY_CLOSED',
+  'CLOSING',
+  'CLOSING_IN_PROGRESS',
+]);
 
 /**
  * Repository for trades table.
  */
 export class TradesRepo {
-  constructor(private db: DatabaseSync) {}
+  private static readonly cacheByDb = new WeakMap<
+    DatabaseSync,
+    Map<string, TradeRecord | null>
+  >();
+
+  public static invalidateActiveCacheForDb(
+    db: DatabaseSync,
+    brokerMode?: BrokerMode,
+    symbol?: string
+  ): void {
+    const cache = TradesRepo.cacheByDb.get(db);
+    if (!cache) return;
+    if (brokerMode && symbol) {
+      cache.delete(`${brokerMode}:${symbol.toUpperCase()}`);
+      return;
+    }
+    if (brokerMode) {
+      const prefix = `${brokerMode}:`;
+      for (const key of cache.keys()) {
+        if (key.startsWith(prefix)) {
+          cache.delete(key);
+        }
+      }
+      return;
+    }
+    cache.clear();
+  }
+
+  private readonly activePositionCache: Map<string, TradeRecord | null>;
+
+  constructor(private db: DatabaseSync) {
+    let shared = TradesRepo.cacheByDb.get(db);
+    if (!shared) {
+      shared = new Map<string, TradeRecord | null>();
+      TradesRepo.cacheByDb.set(db, shared);
+    }
+    this.activePositionCache = shared;
+  }
+
+  private cacheKey(brokerMode: BrokerMode, symbol: string): string {
+    return `${brokerMode}:${symbol.toUpperCase()}`;
+  }
+
+  public getActivePositionCached(brokerMode: BrokerMode, symbol: string): TradeRecord | null {
+    const key = this.cacheKey(brokerMode, symbol);
+    if (this.activePositionCache.has(key)) {
+      return this.activePositionCache.get(key) ?? null;
+    }
+    const pos = this.getActivePosition(brokerMode, symbol.toUpperCase());
+    this.activePositionCache.set(key, pos ? { ...pos } : null);
+    return pos;
+  }
+
+  public invalidateActiveCache(brokerMode?: BrokerMode, symbol?: string): void {
+    TradesRepo.invalidateActiveCacheForDb(this.db, brokerMode, symbol);
+  }
 
   insert(trade: TradeRecord): void {
     const stmt = this.db.prepare(`
@@ -303,6 +366,13 @@ export class TradesRepo {
       trade.opened_at,
       trade.closed_at ?? null
     );
+
+    const key = this.cacheKey(trade.broker_mode, trade.symbol);
+    if (ACTIVE_TRADE_STATUSES.has(trade.status)) {
+      this.activePositionCache.set(key, { ...trade });
+    } else if (this.activePositionCache.get(key)?.id === trade.id) {
+      this.activePositionCache.set(key, null);
+    }
   }
 
   getById(id: string): TradeRecord | null {
@@ -313,13 +383,16 @@ export class TradesRepo {
 
   getActivePosition(brokerMode: BrokerMode, symbol?: string): TradeRecord | null {
     if (symbol) {
+      const symUpper = symbol.toUpperCase();
       const stmt = this.db.prepare(`
         SELECT * FROM trades 
         WHERE broker_mode = ? AND symbol = ? AND status IN ('OPEN', 'PARTIALLY_CLOSED', 'CLOSING', 'CLOSING_IN_PROGRESS')
         ORDER BY opened_at DESC LIMIT 1
       `);
-      const row = stmt.get(brokerMode, symbol);
-      return row ? (row as unknown as TradeRecord) : null;
+      const row = stmt.get(brokerMode, symUpper);
+      const pos = row ? (row as unknown as TradeRecord) : null;
+      this.activePositionCache.set(this.cacheKey(brokerMode, symUpper), pos ? { ...pos } : null);
+      return pos;
     } else {
       const stmt = this.db.prepare(`
         SELECT * FROM trades 
@@ -329,6 +402,15 @@ export class TradesRepo {
       const row = stmt.get(brokerMode);
       return row ? (row as unknown as TradeRecord) : null;
     }
+  }
+
+  getActiveSymbols(brokerMode: BrokerMode): string[] {
+    const stmt = this.db.prepare(`
+      SELECT DISTINCT symbol FROM trades
+      WHERE broker_mode = ? AND status IN ('OPEN', 'PARTIALLY_CLOSED', 'CLOSING', 'CLOSING_IN_PROGRESS')
+    `);
+    const rows = stmt.all(brokerMode) as Array<{ symbol: string }>;
+    return rows.map((r) => r.symbol.toUpperCase());
   }
 
   getLatestTrade(brokerMode: BrokerMode, symbol?: string): TradeRecord | null {
@@ -360,6 +442,17 @@ export class TradesRepo {
 
     const stmt = this.db.prepare(`UPDATE trades SET ${setClauses} WHERE id = ?`);
     stmt.run(...values, id);
+
+    const updated = this.getById(id);
+    if (updated) {
+      const key = this.cacheKey(updated.broker_mode, updated.symbol);
+      if (ACTIVE_TRADE_STATUSES.has(updated.status)) {
+        this.activePositionCache.set(key, { ...updated });
+      } else {
+        // Re-sync cache entry (null if no other active trade for this mode+symbol)
+        this.getActivePosition(updated.broker_mode, updated.symbol);
+      }
+    }
   }
 
   listClosed(brokerMode: BrokerMode, limit: number = 50, offset: number = 0, symbol?: string): TradeRecord[] {
@@ -377,6 +470,24 @@ export class TradesRepo {
         ORDER BY closed_at DESC LIMIT ? OFFSET ?
       `);
       return stmt.all(brokerMode, limit, offset) as unknown as TradeRecord[];
+    }
+  }
+
+  listClosedAsc(brokerMode: BrokerMode, symbol?: string): TradeRecord[] {
+    if (symbol) {
+      const stmt = this.db.prepare(`
+        SELECT * FROM trades
+        WHERE broker_mode = ? AND symbol = ? AND status = 'CLOSED'
+        ORDER BY closed_at ASC, opened_at ASC
+      `);
+      return stmt.all(brokerMode, symbol) as unknown as TradeRecord[];
+    } else {
+      const stmt = this.db.prepare(`
+        SELECT * FROM trades
+        WHERE broker_mode = ? AND status = 'CLOSED'
+        ORDER BY closed_at ASC, opened_at ASC
+      `);
+      return stmt.all(brokerMode) as unknown as TradeRecord[];
     }
   }
 
@@ -2065,6 +2176,18 @@ export class PropFirmRepo {
       `UPDATE propfirm_challenge_cycles SET ${clauses.join(', ')} WHERE id = ?`
     );
     stmt.run(...values, id);
+  }
+
+  public listClosedTradeIdsSince(
+    startedAtMs: number,
+    brokerMode: BrokerMode = 'BINANCE_DEMO'
+  ): string[] {
+    const stmt = this.db.prepare(`
+      SELECT id FROM trades
+      WHERE broker_mode = ? AND status = 'CLOSED' AND closed_at >= ?
+    `);
+    const rows = stmt.all(brokerMode, startedAtMs) as Array<{ id: string }>;
+    return rows.map((r) => r.id);
   }
 
   public getNextCycleNumber(): number {

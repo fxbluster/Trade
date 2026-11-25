@@ -5,6 +5,7 @@ import type {
   OpenOrderRequest,
   OpenOrderInfo,
   TradeSide,
+  FillRecord,
 } from '@tradeos/shared';
 import { BinanceClient, ExchangeDegradedError, ExchangeBannedError } from './binanceClient.js';
 import { BinanceDemoAdapter } from './binanceDemoAdapter.js';
@@ -64,14 +65,17 @@ export interface BrokerAdapter {
   cancelAllOrders(symbol: string): Promise<boolean>;
   moveToBreakeven(symbol: string, bePrice: number, currentSlId?: string): Promise<{ newSlId: string }>;
   getOpenOrders(symbol?: string): Promise<OpenOrderInfo[]>;
+  getOrder?(symbol: string, orderId: string): Promise<OrderExecutionResult | null>;
+  getSymbolUserTrades?(symbol: string, startTimeMs: number): Promise<FillRecord[]>;
   setLeverage?(symbol: string, leverage: number): Promise<number>;
-  modifyOrder?(symbol: string, orderId: string | number, price: number, quantity: number): Promise<any>;
+  modifyOrder?(symbol: string, orderId: string | number, price: number, quantity: number, side?: TradeSide): Promise<any>;
 }
 
 export interface BrokerFactoryOptions {
   client?: BinanceClient;
   db?: DatabaseSync;
   initialPaperBalance?: number;
+  forceNew?: boolean;
 }
 
 /**
@@ -92,7 +96,7 @@ export class BrokerFactory {
     }
 
     if (mode === 'BINANCE_DEMO') {
-      if (!this.demoAdapterInstance || options.client) {
+      if (!this.demoAdapterInstance || options.client || options.forceNew) {
         const client = options.client || new BinanceClient();
         this.demoAdapterInstance = new BinanceDemoAdapter({ client });
       }
@@ -100,7 +104,7 @@ export class BrokerFactory {
     }
 
     if (mode === 'LOCAL_PAPER') {
-      if (!this.paperAdapterInstance || options.db) {
+      if (!this.paperAdapterInstance || options.forceNew) {
         if (!options.db) {
           throw new Error('DatabaseSync instance required to initialize LocalPaperAdapter');
         }

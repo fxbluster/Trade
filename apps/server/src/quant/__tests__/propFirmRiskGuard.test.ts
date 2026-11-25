@@ -517,7 +517,7 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
 
       expect(mockBroker.openOrderCalls).toHaveLength(1);
       const req = mockBroker.openOrderCalls[0];
-      const entryPrice = req.limitPrice; // 100.10
+      const entryPrice = req.limitPrice ?? markPrice;
       const stopLoss = req.stopLoss; // 100 - 3.00 = 97.00
       const executedQty = (req.marginUsd * req.leverage) / entryPrice;
       const riskAtStop = executedQty * Math.abs(entryPrice - stopLoss);

@@ -20,12 +20,98 @@ import type {
   PropFirmCertificateResponse,
 } from '@tradeos/shared';
 
+const SESSION_TOKEN_STORAGE_KEY = 'tradeos_session_token';
+const OPERATOR_PIN_STORAGE_KEY = 'tradeos_operator_pin';
+
+export class PinRequiredError extends Error {
+  public readonly status = 401;
+  public readonly code = 'PIN_REQUIRED';
+
+  constructor(message = 'Operator access PIN is required') {
+    super(message);
+    this.name = 'PinRequiredError';
+  }
+}
+
+export function isPinRequiredError(err: unknown): err is PinRequiredError {
+  return (
+    err instanceof PinRequiredError ||
+    (typeof err === 'object' &&
+      err !== null &&
+      ((err as { name?: string }).name === 'PinRequiredError' ||
+        (err as { code?: string }).code === 'PIN_REQUIRED'))
+  );
+}
+
 let sessionToken: string | null = null;
 let sessionPromise: Promise<string> | null = null;
+let operatorPin: string | null = null;
+const pinRequiredListeners = new Set<() => void>();
+
+export function onPinRequired(listener: () => void): () => void {
+  pinRequiredListeners.add(listener);
+  return () => {
+    pinRequiredListeners.delete(listener);
+  };
+}
+
+function notifyPinRequired(): void {
+  pinRequiredListeners.forEach((listener) => {
+    try {
+      listener();
+    } catch {
+      // Ignore listener errors
+    }
+  });
+}
+
+export function getOperatorPin(): string | null {
+  if (typeof sessionStorage !== 'undefined') {
+    try {
+      const stored = sessionStorage.getItem(OPERATOR_PIN_STORAGE_KEY);
+      if (stored) {
+        operatorPin = stored;
+        return operatorPin;
+      }
+    } catch {
+      // Ignore storage read errors
+    }
+  }
+  return operatorPin;
+}
+
+export function setOperatorPin(pin: string): void {
+  const trimmed = pin.trim();
+  operatorPin = trimmed || null;
+  if (typeof sessionStorage !== 'undefined') {
+    try {
+      if (operatorPin) {
+        sessionStorage.setItem(OPERATOR_PIN_STORAGE_KEY, operatorPin);
+      } else {
+        sessionStorage.removeItem(OPERATOR_PIN_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage write errors
+    }
+  }
+  invalidateSessionToken();
+}
+
+export function clearOperatorPin(): void {
+  operatorPin = null;
+  if (typeof sessionStorage !== 'undefined') {
+    try {
+      sessionStorage.removeItem(OPERATOR_PIN_STORAGE_KEY);
+    } catch {
+      // Ignore storage remove errors
+    }
+  }
+  invalidateSessionToken();
+}
 
 export async function getSessionToken(): Promise<string> {
   if (typeof sessionStorage !== 'undefined') {
-    const stored = sessionStorage.getItem('tradeos_session_token');
+    const stored = sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
     if (stored) {
       sessionToken = stored;
       return sessionToken;
@@ -37,20 +123,40 @@ export async function getSessionToken(): Promise<string> {
   if (!sessionPromise) {
     sessionPromise = (async () => {
       try {
-        const res = await fetch('/api/auth/session');
+        const pin = getOperatorPin();
+        const res = pin
+          ? await fetch('/api/auth/session', {
+              headers: {
+                'X-Operator-Pin': pin,
+              },
+            })
+          : await fetch('/api/auth/session');
+
+        if (res.status === 401) {
+          clearOperatorPin();
+          notifyPinRequired();
+          throw new PinRequiredError('Operator access PIN required or invalid');
+        }
         if (!res.ok) {
-          throw new Error(`Failed to acquire session token: ${res.status} ${res.statusText}`);
+          const err: Error & { status?: number } = new Error(
+            `Failed to acquire session token: ${res.status} ${res.statusText}`
+          );
+          err.status = res.status;
+          throw err;
         }
         const data = await res.json();
+        if (!data?.token) {
+          throw new Error('Session response did not include a token');
+        }
         sessionToken = data.token;
         if (typeof sessionStorage !== 'undefined') {
-          sessionStorage.setItem('tradeos_session_token', sessionToken!);
+          sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, sessionToken!);
         }
         return sessionToken!;
       } catch (err) {
         sessionPromise = null;
-        sessionToken = 'local-dev-token';
-        return sessionToken;
+        sessionToken = null;
+        throw err;
       }
     })();
   }
@@ -65,7 +171,7 @@ export function invalidateSessionToken(): void {
   sessionToken = null;
   sessionPromise = null;
   if (typeof sessionStorage !== 'undefined') {
-    sessionStorage.removeItem('tradeos_session_token');
+    sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
   }
 }
 

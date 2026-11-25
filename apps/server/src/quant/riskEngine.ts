@@ -203,17 +203,57 @@ export function calculateKellyCriterion(trades: TradeRecord[], maxRiskCap: numbe
 }
 
 /**
- * Maximum Drawdown (MDD) in Dollars
+ * Maximum Drawdown (MDD) as a bounded [0, 1] peak-to-trough ratio (maxDD / peak)
+ * computed over trades sorted chronologically by closed_at ASC (fallback opened_at).
  */
-export function calculateMaxDrawdown(trades: TradeRecord[], initialBalance: number = 100): number {
+export function calculateMaxDrawdown(
+  trades: TradeRecord[],
+  initialEquity: number = 50_000
+): number {
   if (!trades || trades.length === 0) return 0;
 
-  let equity = initialBalance;
+  const sorted = [...trades].sort(
+    (a, b) => (a.closed_at ?? a.opened_at) - (b.closed_at ?? b.opened_at)
+  );
+
+  let equity = Number.isFinite(initialEquity) && initialEquity > 0 ? initialEquity : 0;
   let peak = equity;
+  let maxDdRatio = 0;
+
+  for (const t of sorted) {
+    const net = (t.realized_pnl ?? 0) - (t.fees_usd ?? 0);
+    equity += net;
+    if (equity > peak) {
+      peak = equity;
+    }
+    if (peak > 0) {
+      const ddRatio = Math.max(0, (peak - equity) / peak);
+      if (ddRatio > maxDdRatio) {
+        maxDdRatio = ddRatio;
+      }
+    }
+  }
+
+  const bounded = Math.max(0, Math.min(1, maxDdRatio));
+  return Number(bounded.toFixed(4));
+}
+
+/**
+ * Maximum Drawdown (MDD) in USD (>= 0) computed chronologically.
+ */
+export function calculateMaxDrawdownUsd(trades: TradeRecord[]): number {
+  if (!trades || trades.length === 0) return 0;
+
+  const sorted = [...trades].sort(
+    (a, b) => (a.closed_at ?? a.opened_at) - (b.closed_at ?? b.opened_at)
+  );
+
+  let equity = 0;
+  let peak = 0;
   let maxDD = 0;
 
-  for (const t of trades) {
-    const net = t.realized_pnl - t.fees_usd;
+  for (const t of sorted) {
+    const net = (t.realized_pnl ?? 0) - (t.fees_usd ?? 0);
     equity += net;
     if (equity > peak) {
       peak = equity;
@@ -224,7 +264,7 @@ export function calculateMaxDrawdown(trades: TradeRecord[], initialBalance: numb
     }
   }
 
-  return Number(maxDD.toFixed(2));
+  return Number(Math.max(0, maxDD).toFixed(2));
 }
 
 /**

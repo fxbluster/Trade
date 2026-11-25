@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ChasingExecutionEngine } from '../src/services/chasingExecutionEngine.js';
+import { TwapExecutionSlicer } from '../src/services/twapExecutionSlicer.js';
 import type { BrokerAdapter } from '../src/exchange/broker.js';
 import { BinanceApiError } from '../src/exchange/binanceClient.js';
 
@@ -66,7 +67,7 @@ describe('ChasingExecutionEngine', () => {
         checkFill: async () => {
           if (!checked) {
             checked = true;
-            return { fillPrice: 50000.01, fillQty: 0.1 };
+            return { status: 'FILLED', fillPrice: 50000.01, fillQty: 0.1 };
           }
           return null;
         },
@@ -106,7 +107,7 @@ describe('ChasingExecutionEngine', () => {
         checkFill: async () => {
           // Fill after 2 iterations
           if (iteration >= 2) {
-            return { fillPrice: 50003, fillQty: 0.1 };
+            return { status: 'FILLED', fillPrice: 50003, fillQty: 0.1 };
           }
           return null;
         },
@@ -149,7 +150,7 @@ describe('ChasingExecutionEngine', () => {
         },
         checkFill: async () => {
           if (rejectedOnce) {
-            return { fillPrice: 50001, fillQty: 0.1 };
+            return { status: 'FILLED', fillPrice: 50001, fillQty: 0.1 };
           }
           return null;
         },
@@ -209,6 +210,146 @@ describe('ChasingExecutionEngine', () => {
 
       expect(result.status).toBe('CANCELLED');
       expect(broker.cancelOrder).toHaveBeenCalledWith('BTCUSDT', 'order_runaway', false);
+    });
+
+    it('aborts immediately with CANCELLED and fillQty=0 when checkFill returns TERMINAL', async () => {
+      const broker = createMockBroker();
+      const engine = new ChasingExecutionEngine(broker, { debouncMs: 20, timeoutMs: 2000 });
+
+      const result = await engine.chase({
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        quantity: 0.1,
+        anchorPrice: 50000,
+        getDepth: async () => ({ bestBid: 50000, bestAsk: 50001 }),
+        checkFill: async () => ({ status: 'TERMINAL', reason: 'EXPIRED' }),
+        placeOrder: async () => 'order_terminal',
+      });
+
+      expect(result.status).toBe('CANCELLED');
+      expect(result.fillQty).toBe(0);
+      expect(broker.cancelOrder).not.toHaveBeenCalled();
+    });
+
+    it('retries initial placeOrder once with 1-tick backoff on -5022', async () => {
+      const broker = createMockBroker();
+      const engine = new ChasingExecutionEngine(broker, {
+        debouncMs: 20,
+        timeoutMs: 2000,
+        tickSize: 1,
+      });
+
+      const placedPrices: number[] = [];
+      const result = await engine.chase({
+        symbol: 'BTCUSDT',
+        side: 'SELL',
+        quantity: 0.1,
+        anchorPrice: 50000,
+        getDepth: async () => ({ bestBid: 49990, bestAsk: 50000 }),
+        checkFill: async () => ({ status: 'FILLED', fillPrice: 50000, fillQty: 0.1 }),
+        placeOrder: async (price) => {
+          placedPrices.push(price);
+          if (placedPrices.length === 1) {
+            throw new BinanceApiError('Post Only reject', 400, -5022);
+          }
+          return 'order_init_retry';
+        },
+      });
+
+      // initial SELL target = 50000 - 1 = 49999; backedOff = 49999 + 1 = 50000 -> Math.max(50000, 49999) = 50000
+      expect(placedPrices).toEqual([49999, 50000]);
+      expect(result.status).toBe('FILLED');
+    });
+
+    it('SELL -5022 amend backoff uses Math.max (moves ask higher/passive) and passes side', async () => {
+      const amendCalls: Array<{ price: number; side?: string }> = [];
+      let rejectedOnce = false;
+      const broker = createMockBroker();
+      broker.modifyOrder = vi.fn(async (_sym, _id, price, _qty, side?: string) => {
+        amendCalls.push({ price, side });
+        if (!rejectedOnce) {
+          rejectedOnce = true;
+          throw new BinanceApiError('Post Only reject', 400, -5022);
+        }
+        return { status: 'NEW' };
+      });
+
+      const engine = new ChasingExecutionEngine(broker, {
+        debouncMs: 20,
+        timeoutMs: 2000,
+        tickSize: 1,
+      });
+
+      let depthCall = 0;
+      const result = await engine.chase({
+        symbol: 'BTCUSDT',
+        side: 'SELL',
+        quantity: 0.1,
+        anchorPrice: 50000,
+        getDepth: async () => {
+          depthCall++;
+          if (depthCall === 1) return { bestBid: 49990, bestAsk: 50000 }; // initial target = 49999
+          if (depthCall === 2) return { bestBid: 49990, bestAsk: 49998 }; // newTarget = 49997 -> -5022
+          return { bestBid: 49990, bestAsk: 49998 }; // freshDepth -> requoted = 49997, backedOff = 49999 + 1 = 50000
+        },
+        checkFill: async () => {
+          if (rejectedOnce) {
+            return { status: 'FILLED', fillPrice: 50000, fillQty: 0.1 };
+          }
+          return null;
+        },
+        placeOrder: async () => 'order_sell_5022',
+      });
+
+      expect(result.status).toBe('FILLED');
+      expect(amendCalls[0]).toEqual({ price: 49997, side: 'SELL' });
+      expect(amendCalls[1]).toEqual({ price: 50000, side: 'SELL' });
+    });
+
+    it('supports setBroker() hot-swap and unique TwapExecutionSlicer clientOrderIds', async () => {
+      const broker1 = createMockBroker();
+      const broker2 = createMockBroker();
+      const engine = new ChasingExecutionEngine(broker1, { debouncMs: 20, timeoutMs: 2000 });
+      engine.setBroker(broker2);
+
+      await engine.chase({
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        quantity: 0.1,
+        anchorPrice: 50000,
+        getDepth: async () => ({ bestBid: 50000, bestAsk: 50001 }),
+        checkFill: async () => ({ status: 'TERMINAL', reason: 'CANCELED' }),
+        placeOrder: async () => 'order_swap',
+      });
+
+      const slicer = new TwapExecutionSlicer(engine, {
+        thresholdUsd: 5000,
+        numSlices: 3,
+        baseIntervalMs: 0,
+      });
+
+      const clientIds: string[] = [];
+      const twapRes = await slicer.execute({
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        totalQty: 3,
+        anchorPrice: 50000,
+        tradeId: '0123456789abcdef',
+        getDepth: async () => ({ bestBid: 50000, bestAsk: 50001 }),
+        checkFill: async () => ({ status: 'FILLED', fillPrice: 50000, fillQty: 1 }),
+        placeOrder: async (_p, _q, clientOrderId) => {
+          if (clientOrderId) clientIds.push(clientOrderId);
+          return `ord_${clientIds.length}`;
+        },
+      });
+
+      expect(twapRes.status).toBe('COMPLETED');
+      expect(clientIds).toEqual([
+        'tos_0123456789abcdef_s0',
+        'tos_0123456789abcdef_s1',
+        'tos_0123456789abcdef_s2',
+      ]);
+      expect(clientIds.every((id) => id.length <= 36)).toBe(true);
     });
   });
 });

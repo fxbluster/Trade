@@ -30,6 +30,8 @@ import type {
   AlgoOrderParams,
   AlgoOrderResult,
 } from '../exchange/broker.js';
+import type { PropFirmRiskGuard } from '../quant/propFirmRiskGuard.js';
+import type { AlertNotifier } from './alertNotifier.js';
 
 export class TradeManagerError extends Error {
   constructor(
@@ -48,7 +50,10 @@ export interface TradeManagerOptions {
   brokerMode?: BrokerMode;
   getMarkPrice?: (symbol: string) => number;
   broadcastWs?: (msg: WsServerMessage) => void;
+  onTradeOpened?: (trade: TradeRecord) => void;
   onTradeClosed?: (trade: TradeRecord) => void;
+  propFirmRiskGuard?: PropFirmRiskGuard;
+  alertNotifier?: AlertNotifier;
 }
 
 /**
@@ -69,10 +74,15 @@ export class TradeManager {
   private brokerMode: BrokerMode;
   private getMarkPriceFn?: (symbol: string) => number;
   private broadcastWsFn?: (msg: WsServerMessage) => void;
+  private onTradeOpenedFn?: (trade: TradeRecord) => void;
   private onTradeClosedFn?: (trade: TradeRecord) => void;
+  private propFirmRiskGuard?: PropFirmRiskGuard;
+  private alertNotifier?: AlertNotifier;
 
   // Per-symbol async mutex queue to serialize actions per symbol
   private mutexQueues = new Map<string, Promise<unknown>>();
+  // Global pre-trade mutex queue when PropFirmRiskGuard 1-position limit is active in BINANCE_DEMO
+  private globalPreTradeQueue: Promise<unknown> = Promise.resolve();
   // Track cumulative executed quantity per order ID to prevent double-deduction on partial fills
   private cumulativeExecutedByOrder = new Map<string, number>();
 
@@ -87,7 +97,10 @@ export class TradeManager {
     this.brokerMode = options.brokerMode || options.broker.mode || 'BINANCE_DEMO';
     this.getMarkPriceFn = options.getMarkPrice;
     this.broadcastWsFn = options.broadcastWs;
+    this.onTradeOpenedFn = options.onTradeOpened;
     this.onTradeClosedFn = options.onTradeClosed;
+    this.propFirmRiskGuard = options.propFirmRiskGuard;
+    this.alertNotifier = options.alertNotifier;
   }
 
   public setBroker(broker: BrokerAdapter): void {
@@ -107,16 +120,64 @@ export class TradeManager {
     this.broadcastWsFn = fn;
   }
 
+  public setOnTradeOpened(fn: (trade: TradeRecord) => void): void {
+    this.onTradeOpenedFn = fn;
+  }
+
   public setOnTradeClosed(fn: (trade: TradeRecord) => void): void {
     this.onTradeClosedFn = fn;
   }
 
+  public setPropFirmRiskGuard(guard?: PropFirmRiskGuard): void {
+    this.propFirmRiskGuard = guard;
+  }
+
+  public setAlertNotifier(notifier?: AlertNotifier): void {
+    this.alertNotifier = notifier;
+  }
+
+  private notifyTradeOpened(trade: TradeRecord): void {
+    if (this.onTradeOpenedFn) {
+      try {
+        this.onTradeOpenedFn(trade);
+      } catch {
+        // Tolerate listener errors so trade flow never breaks
+      }
+    }
+    void this.alertNotifier?.notifyTradeOpened(trade);
+  }
+
   private notifyTradeClosed(trade: TradeRecord): void {
-    if (!this.onTradeClosedFn) return;
+    if (this.onTradeClosedFn) {
+      try {
+        this.onTradeClosedFn(trade);
+      } catch {
+        // Tolerate listener errors so trade cleanup never breaks
+      }
+    }
+    void this.alertNotifier?.notifyTradeClosed(trade);
+  }
+
+  /**
+   * Serializes pre-trade opens globally when Upcomers 1-position guard is active.
+   */
+  private async withGlobalPreTradeMutex<T>(task: () => Promise<T>): Promise<T> {
+    const currentQueue = this.globalPreTradeQueue;
+    let release: () => void = () => {};
+    const nextInQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    this.globalPreTradeQueue = currentQueue.then(
+      () => nextInQueue,
+      () => nextInQueue
+    );
+
     try {
-      this.onTradeClosedFn(trade);
-    } catch {
-      // Tolerate listener errors so trade cleanup never breaks
+      await currentQueue;
+      return await task();
+    } finally {
+      release();
     }
   }
 
@@ -316,6 +377,21 @@ export class TradeManager {
       'CRITICAL',
       `Fail-Closed Protection: Emergency unwind executed on ${symbol}. Səbəb: ${exitReason}`
     );
+
+    const alertKey =
+      exitReason === 'SL_PLACEMENT_FAIL_UNWIND' ? 'SL_PLACEMENT_FAIL_UNWIND' : exitReason;
+    void this.alertNotifier?.notifyCriticalEvent(
+      alertKey,
+      `Emergency market unwind executed on ${symbol}: ${exitReason}`,
+      {
+        tradeId,
+        symbol,
+        side,
+        quantity,
+        unwindExecuted,
+        exitPrice: unwindExitPrice,
+      }
+    );
   }
 
   /**
@@ -323,122 +399,195 @@ export class TradeManager {
    * strict risk & cooldown gatekeeping, and atomic bracket order placement.
    */
   public async openPosition(req: OpenOrderRequest): Promise<TradeRecord> {
-    return this.withSymbolMutex(req.symbol, async () => {
-      // Gate 1: Check existing active position on symbol in this broker mode
-      const activePosition = this.tradesRepo.getActivePosition(this.brokerMode, req.symbol);
-      if (activePosition) {
-        throw new TradeManagerError(
-          `Aktiv pozisiya artıq mövcuddur: ${req.symbol} (status: ${activePosition.status})`,
-          409,
-          'ERR_POSITION_EXISTS'
-        );
-      }
+    const runOpen = () =>
+      this.withSymbolMutex(req.symbol, async () => {
+        const isPropFirmDemoActive =
+          Boolean(this.propFirmRiskGuard) && this.brokerMode === 'BINANCE_DEMO';
 
-      // Gate 2: Fetch account balance and current risk state
-      const account = await this.broker.getAccount();
-      const currentRisk = this.riskStateRepo.get(this.brokerMode) || {
-        broker_mode: this.brokerMode,
-        consecutive_losses: 0,
-        cooldown_until: 0,
-        cooldown_reason: null,
-        session_net_pnl: 0,
-        session_started_at: Date.now(),
-        updated_at: Date.now(),
-      };
+        if (isPropFirmDemoActive && this.propFirmRiskGuard) {
+          const guardCheck = this.propFirmRiskGuard.canOpenTrade();
+          if (!guardCheck.allowed) {
+            throw new TradeManagerError(
+              guardCheck.details ?? guardCheck.reason ?? 'Upcomers PropFirm guard blocked entry',
+              403,
+              guardCheck.reason
+            );
+          }
 
-      const markPrice = this.getMarkPrice(req.symbol);
+          const globalActive = this.tradesRepo.getActivePosition(this.brokerMode);
+          if (globalActive) {
+            throw new TradeManagerError(
+              `Upcomers challenge permits at most 1 active position across all symbols (active: ${globalActive.symbol})`,
+              409,
+              'ERR_POSITION_EXISTS'
+            );
+          }
+        }
 
-      // Gate 3: Risk Engine Gatekeeper (Cooldown, Margin Cap, Drawdown, Dead-SL Armor)
-      const riskValidation = validateOrderRisk(req, account, currentRisk, markPrice);
-      if (!riskValidation.allowed) {
-        if (riskValidation.code === 'ERR_COOLDOWN_ACTIVE') {
+        // Gate 1: Check existing active position on symbol in this broker mode
+        const activePosition = this.tradesRepo.getActivePosition(this.brokerMode, req.symbol);
+        if (activePosition) {
           throw new TradeManagerError(
-            riskValidation.reason || 'Anti-qumar 15 dəqiqəlik Cooldown kilidi aktivdir',
-            423,
-            'ERR_COOLDOWN_ACTIVE'
+            `Aktiv pozisiya artıq mövcuddur: ${req.symbol} (status: ${activePosition.status})`,
+            409,
+            'ERR_POSITION_EXISTS'
           );
         }
-        throw new TradeManagerError(
-          riskValidation.reason || 'Risk yoxlamasından keçmədi',
-          400,
-          riskValidation.code
-        );
-      }
 
-      // Gate 4: Generate Deterministic Client Order IDs (max 36 chars for Binance limits)
-      const tradeId = crypto.randomBytes(8).toString('hex');
-      const clientEntId = `tos_${tradeId}_ent`;
-      const clientSlId = `tos_${tradeId}_sl`;
-      const clientTp1Id = req.tp1 ? `tos_${tradeId}_tp1` : null;
-      const clientTp2Id = req.tp2 ? `tos_${tradeId}_tp2` : null;
+        // Gate 2: Fetch account balance and current risk state
+        const account = await this.broker.getAccount();
+        const currentRisk = this.riskStateRepo.get(this.brokerMode) || {
+          broker_mode: this.brokerMode,
+          consecutive_losses: 0,
+          cooldown_until: 0,
+          cooldown_reason: null,
+          session_net_pnl: 0,
+          session_started_at: Date.now(),
+          updated_at: Date.now(),
+        };
 
-      // Calculate quantity if not provided directly
-      const effectiveEntryPrice =
-        req.orderType === 'LIMIT' && req.limitPrice && req.limitPrice > 0
-          ? req.limitPrice
-          : markPrice > 0
-          ? markPrice
-          : 0;
+        const markPrice = this.getMarkPrice(req.symbol);
+        const effectiveEntryPrice =
+          req.orderType === 'LIMIT' && req.limitPrice && req.limitPrice > 0
+            ? req.limitPrice
+            : markPrice > 0
+            ? markPrice
+            : 0;
 
-      if (!effectiveEntryPrice || effectiveEntryPrice <= 0) {
-        throw new TradeManagerError(
-          'Bazar qiyməti (Mark Price) hələ əldə edilməyib. Zəhmət olmasa bir neçə saniyə gözləyin.',
-          400,
-          'ERR_MARK_PRICE_UNAVAILABLE'
-        );
-      }
+        let effectiveMarginUsd = req.marginUsd;
+        let clampedQtyOverride: number | null = null;
 
-      const notionalUsd = req.marginUsd * req.leverage;
-      const calculatedQty = Number((notionalUsd / effectiveEntryPrice).toFixed(4));
-      const targetQty = calculatedQty > 0 ? calculatedQty : 0.001;
+        if (isPropFirmDemoActive && this.propFirmRiskGuard) {
+          if (!effectiveEntryPrice || effectiveEntryPrice <= 0) {
+            throw new TradeManagerError(
+              'Bazar qiyməti (Mark Price) hələ əldə edilməyib. Zəhmət olmasa bir neçə saniyə gözləyin.',
+              400,
+              'ERR_MARK_PRICE_UNAVAILABLE'
+            );
+          }
 
-      // 5. Submit Entry Order via Broker
-      let entryResult: OrderExecutionResult;
-      try {
-        entryResult = await this.broker.openOrder({
-          ...req,
-          quantity: targetQty,
-          clientOrderId: clientEntId,
-        });
-      } catch (orderErr: any) {
-        throw new TradeManagerError(
-          `Giriş sifarişi uğursuz oldu: ${orderErr?.message || orderErr}`,
-          orderErr?.statusCode || 500,
-          'ERR_ENTRY_ORDER_FAILED'
-        );
-      }
-
-      const executedQty =
-        entryResult.executedQty > 0 ? entryResult.executedQty : targetQty;
-      const fillPrice =
-        entryResult.avgPrice > 0 ? entryResult.avgPrice : effectiveEntryPrice;
-
-      // Calculate Breakeven price (+-0.15% fee buffer)
-      const bePrice = Number(
-        (req.side === 'BUY' ? fillPrice * 1.0015 : fillPrice * 0.9985).toFixed(4)
-      );
-
-      // 6. Bracket Compensation — Place Stop-Loss Algo Order
-      const oppositeSide: TradeSide = req.side === 'BUY' ? 'SELL' : 'BUY';
-      let slAlgoId: string | null = null;
-
-      if (req.stopLoss && req.stopLoss > 0) {
-        try {
-          const slRes = await this.broker.createAlgoOrder({
-            symbol: req.symbol,
-            side: oppositeSide,
-            type: 'STOP_MARKET',
-            triggerPrice: req.stopLoss,
-            quantity: executedQty,
-            clientAlgoId: clientSlId,
-            reduceOnly: true,
+          const rawNotionalUsd = req.marginUsd * req.leverage;
+          const rawQty = Number((rawNotionalUsd / effectiveEntryPrice).toFixed(4));
+          const clamped = this.propFirmRiskGuard.clampEntryQuantity({
+            desiredQty: rawQty,
+            entryPrice: effectiveEntryPrice,
+            stopLossPrice: req.stopLoss ?? 0,
           });
-          slAlgoId = slRes.algoId;
-        } catch (slFirstErr) {
-          // Retry once within <= 500ms
-          await new Promise((r) => setTimeout(r, 200));
+
+          if (clamped.qty <= 0) {
+            throw new TradeManagerError(
+              'Stop-loss risk exceeds Upcomers $250.00 limit even after clamping',
+              400,
+              'ERR_PROPFIRM_RISK_LIMIT'
+            );
+          }
+
+          clampedQtyOverride = clamped.qty;
+          if (clamped.clampedByRisk) {
+            const effectiveNotionalUsd = Number((clamped.qty * effectiveEntryPrice).toFixed(2));
+            effectiveMarginUsd = Number((effectiveNotionalUsd / req.leverage).toFixed(2));
+          }
+        }
+
+        const effectiveReq: OpenOrderRequest = {
+          ...req,
+          marginUsd: effectiveMarginUsd,
+        };
+
+        // Gate 3: Risk Engine Gatekeeper (Cooldown, Margin Cap, Drawdown, Dead-SL Armor)
+        const riskValidation = validateOrderRisk(effectiveReq, account, currentRisk, markPrice);
+        if (!riskValidation.allowed) {
+          if (riskValidation.code === 'ERR_COOLDOWN_ACTIVE') {
+            throw new TradeManagerError(
+              riskValidation.reason || 'Anti-qumar 15 dəqiqəlik Cooldown kilidi aktivdir',
+              423,
+              'ERR_COOLDOWN_ACTIVE'
+            );
+          }
+          throw new TradeManagerError(
+            riskValidation.reason || 'Risk yoxlamasından keçmədi',
+            400,
+            riskValidation.code
+          );
+        }
+
+        // Gate 4: Generate Deterministic Client Order IDs (max 36 chars for Binance limits)
+        const tradeId = crypto.randomBytes(8).toString('hex');
+        const clientEntId = `tos_${tradeId}_ent`;
+        const clientSlId = `tos_${tradeId}_sl`;
+        const clientTp1Id = req.tp1 ? `tos_${tradeId}_tp1` : null;
+        const clientTp2Id = req.tp2 ? `tos_${tradeId}_tp2` : null;
+
+        if (!effectiveEntryPrice || effectiveEntryPrice <= 0) {
+          throw new TradeManagerError(
+            'Bazar qiyməti (Mark Price) hələ əldə edilməyib. Zəhmət olmasa bir neçə saniyə gözləyin.',
+            400,
+            'ERR_MARK_PRICE_UNAVAILABLE'
+          );
+        }
+
+        const notionalUsd = effectiveMarginUsd * req.leverage;
+        const calculatedQty = Number((notionalUsd / effectiveEntryPrice).toFixed(4));
+        const targetQty =
+          clampedQtyOverride !== null
+            ? clampedQtyOverride
+            : calculatedQty > 0
+            ? calculatedQty
+            : 0.001;
+
+        // 5. Submit Entry Order via Broker
+        let entryResult: OrderExecutionResult;
+        try {
+          entryResult = await this.broker.openOrder({
+            ...effectiveReq,
+            quantity: targetQty,
+            clientOrderId: clientEntId,
+          });
+        } catch (orderErr: any) {
+          throw new TradeManagerError(
+            `Giriş sifarişi uğursuz oldu: ${orderErr?.message || orderErr}`,
+            orderErr?.statusCode || 500,
+            'ERR_ENTRY_ORDER_FAILED'
+          );
+        }
+
+        const executedQty = entryResult.executedQty;
+        if (req.orderType === 'LIMIT' && executedQty <= 0) {
           try {
-            const slRetryRes = await this.broker.createAlgoOrder({
+            await this.broker.cancelOrder(req.symbol, entryResult.orderId, false);
+          } catch {
+            // Best-effort cancel
+          }
+          throw new TradeManagerError(
+            'Unfilled resting LIMIT entry cancelled; use AutoPilot chaser for passive fills',
+            409,
+            'ERR_LIMIT_ORDER_UNFILLED'
+          );
+        }
+
+        if (executedQty <= 0) {
+          throw new TradeManagerError(
+            'Entry order returned zero executed quantity',
+            502,
+            'ERR_ZERO_FILL'
+          );
+        }
+
+        const fillPrice =
+          entryResult.avgPrice > 0 ? entryResult.avgPrice : effectiveEntryPrice;
+
+        // Calculate Breakeven price (+-0.15% fee buffer)
+        const bePrice = Number(
+          (req.side === 'BUY' ? fillPrice * 1.0015 : fillPrice * 0.9985).toFixed(4)
+        );
+
+        // 6. Bracket Compensation — Place Stop-Loss Algo Order
+        const oppositeSide: TradeSide = req.side === 'BUY' ? 'SELL' : 'BUY';
+        let slAlgoId: string | null = null;
+
+        if (req.stopLoss && req.stopLoss > 0) {
+          try {
+            const slRes = await this.broker.createAlgoOrder({
               symbol: req.symbol,
               side: oppositeSide,
               type: 'STOP_MARKET',
@@ -447,120 +596,140 @@ export class TradeManager {
               clientAlgoId: clientSlId,
               reduceOnly: true,
             });
-            slAlgoId = slRetryRes.algoId;
-          } catch (slRetryErr) {
-            // CRITICAL FAIL-CLOSED GUARANTEE:
-            // If entry fills but SL algo placement fails (after <=500ms retry),
-            // immediately execute automated emergencyUnwindPosition() (reduceOnly: true, type: 'MARKET'),
-            // cancel pending TP algos, write exit_reason = 'SL_PLACEMENT_FAIL_UNWIND', and return 502 Bad Gateway.
-            // Never leave an unhedged/naked position.
-            await this.emergencyUnwindPosition(
-              tradeId,
-              req.symbol,
-              req.side,
-              executedQty,
-              fillPrice,
-              'SL_PLACEMENT_FAIL_UNWIND'
-            );
+            slAlgoId = slRes.algoId;
+          } catch (slFirstErr) {
+            // Retry once within <= 500ms
+            await new Promise((r) => setTimeout(r, 200));
+            try {
+              const slRetryRes = await this.broker.createAlgoOrder({
+                symbol: req.symbol,
+                side: oppositeSide,
+                type: 'STOP_MARKET',
+                triggerPrice: req.stopLoss,
+                quantity: executedQty,
+                clientAlgoId: clientSlId,
+                reduceOnly: true,
+              });
+              slAlgoId = slRetryRes.algoId;
+            } catch (slRetryErr) {
+              // CRITICAL FAIL-CLOSED GUARANTEE:
+              // If entry fills but SL algo placement fails (after <=500ms retry),
+              // immediately execute automated emergencyUnwindPosition() (reduceOnly: true, type: 'MARKET'),
+              // cancel pending TP algos, write exit_reason = 'SL_PLACEMENT_FAIL_UNWIND', and return 502 Bad Gateway.
+              // Never leave an unhedged/naked position.
+              await this.emergencyUnwindPosition(
+                tradeId,
+                req.symbol,
+                req.side,
+                executedQty,
+                fillPrice,
+                'SL_PLACEMENT_FAIL_UNWIND'
+              );
 
-            throw new TradeManagerError(
-              'SL algo placement failed after retry. Automated emergency market unwind executed (Fail-Closed).',
-              502,
-              'ERR_SL_PLACEMENT_FAIL_UNWIND'
+              throw new TradeManagerError(
+                'SL algo placement failed after retry. Automated emergency market unwind executed (Fail-Closed).',
+                502,
+                'ERR_SL_PLACEMENT_FAIL_UNWIND'
+              );
+            }
+          }
+        }
+
+        // 7. Place TP1 / TP2 Algos if configured
+        let tp1AlgoId: string | null = null;
+        let tp2AlgoId: string | null = null;
+
+        if (req.tp1 && req.tp1 > 0) {
+          const tp1Qty = req.tp2
+            ? Number((executedQty * 0.5).toFixed(4))
+            : executedQty;
+
+          try {
+            const tp1Res = await this.broker.createAlgoOrder({
+              symbol: req.symbol,
+              side: oppositeSide,
+              type: 'TAKE_PROFIT_MARKET',
+              triggerPrice: req.tp1,
+              quantity: tp1Qty,
+              clientAlgoId: clientTp1Id!,
+              reduceOnly: true,
+            });
+            tp1AlgoId = tp1Res.algoId;
+          } catch (tp1Err) {
+            this.broadcastAlert(
+              'WARN',
+              `TP1 algo placement failed on ${req.symbol}. SL is active, trade is hedged.`
             );
           }
         }
-      }
 
-      // 7. Place TP1 / TP2 Algos if configured
-      let tp1AlgoId: string | null = null;
-      let tp2AlgoId: string | null = null;
+        if (req.tp2 && req.tp2 > 0) {
+          const tp1Qty = Number((executedQty * 0.5).toFixed(4));
+          const tp2Qty = Number((executedQty - tp1Qty).toFixed(4));
 
-      if (req.tp1 && req.tp1 > 0) {
-        const tp1Qty = req.tp2
-          ? Number((executedQty * 0.5).toFixed(4))
-          : executedQty;
-
-        try {
-          const tp1Res = await this.broker.createAlgoOrder({
-            symbol: req.symbol,
-            side: oppositeSide,
-            type: 'TAKE_PROFIT_MARKET',
-            triggerPrice: req.tp1,
-            quantity: tp1Qty,
-            clientAlgoId: clientTp1Id!,
-            reduceOnly: true,
-          });
-          tp1AlgoId = tp1Res.algoId;
-        } catch (tp1Err) {
-          this.broadcastAlert(
-            'WARN',
-            `TP1 algo placement failed on ${req.symbol}. SL is active, trade is hedged.`
-          );
+          try {
+            const tp2Res = await this.broker.createAlgoOrder({
+              symbol: req.symbol,
+              side: oppositeSide,
+              type: 'TAKE_PROFIT_MARKET',
+              triggerPrice: req.tp2,
+              quantity: tp2Qty,
+              clientAlgoId: clientTp2Id!,
+              reduceOnly: true,
+            });
+            tp2AlgoId = tp2Res.algoId;
+          } catch (tp2Err) {
+            this.broadcastAlert(
+              'WARN',
+              `TP2 algo placement failed on ${req.symbol}. SL is active, trade is hedged.`
+            );
+          }
         }
-      }
 
-      if (req.tp2 && req.tp2 > 0) {
-        const tp1Qty = Number((executedQty * 0.5).toFixed(4));
-        const tp2Qty = Number((executedQty - tp1Qty).toFixed(4));
+        // 8. Record active trade in SQLite trades table
+        const tradeRecord: TradeRecord = {
+          id: tradeId,
+          symbol: req.symbol,
+          broker_mode: this.brokerMode,
+          side: req.side,
+          status: 'OPEN',
+          entry_price: fillPrice,
+          exit_price: null,
+          quantity: executedQty,
+          remaining_qty: executedQty,
+          leverage: req.leverage,
+          margin_usd: effectiveMarginUsd,
+          stop_loss: req.stopLoss ?? null,
+          tp1: req.tp1 ?? null,
+          tp2: req.tp2 ?? null,
+          be_price: bePrice,
+          is_breakeven: 0,
+          client_order_id: clientEntId,
+          client_sl_id: clientSlId,
+          client_tp1_id: clientTp1Id,
+          client_tp2_id: clientTp2Id,
+          entry_order_id: entryResult.orderId,
+          sl_algo_id: slAlgoId,
+          tp1_algo_id: tp1AlgoId,
+          tp2_algo_id: tp2AlgoId,
+          realized_pnl: 0,
+          fees_usd: 0,
+          exit_reason: null,
+          opened_at: Date.now(),
+          closed_at: null,
+        };
 
-        try {
-          const tp2Res = await this.broker.createAlgoOrder({
-            symbol: req.symbol,
-            side: oppositeSide,
-            type: 'TAKE_PROFIT_MARKET',
-            triggerPrice: req.tp2,
-            quantity: tp2Qty,
-            clientAlgoId: clientTp2Id!,
-            reduceOnly: true,
-          });
-          tp2AlgoId = tp2Res.algoId;
-        } catch (tp2Err) {
-          this.broadcastAlert(
-            'WARN',
-            `TP2 algo placement failed on ${req.symbol}. SL is active, trade is hedged.`
-          );
-        }
-      }
+        this.tradesRepo.insert(tradeRecord);
+        this.broadcastPositionEvent('OPENED', tradeRecord);
+        this.notifyTradeOpened(tradeRecord);
 
-      // 8. Record active trade in SQLite trades table
-      const tradeRecord: TradeRecord = {
-        id: tradeId,
-        symbol: req.symbol,
-        broker_mode: this.brokerMode,
-        side: req.side,
-        status: 'OPEN',
-        entry_price: fillPrice,
-        exit_price: null,
-        quantity: executedQty,
-        remaining_qty: executedQty,
-        leverage: req.leverage,
-        margin_usd: req.marginUsd,
-        stop_loss: req.stopLoss ?? null,
-        tp1: req.tp1 ?? null,
-        tp2: req.tp2 ?? null,
-        be_price: bePrice,
-        is_breakeven: 0,
-        client_order_id: clientEntId,
-        client_sl_id: clientSlId,
-        client_tp1_id: clientTp1Id,
-        client_tp2_id: clientTp2Id,
-        entry_order_id: entryResult.orderId,
-        sl_algo_id: slAlgoId,
-        tp1_algo_id: tp1AlgoId,
-        tp2_algo_id: tp2AlgoId,
-        realized_pnl: 0,
-        fees_usd: 0,
-        exit_reason: null,
-        opened_at: Date.now(),
-        closed_at: null,
-      };
+        return tradeRecord;
+      });
 
-      this.tradesRepo.insert(tradeRecord);
-      this.broadcastPositionEvent('OPENED', tradeRecord);
-
-      return tradeRecord;
-    });
+    if (this.propFirmRiskGuard && this.brokerMode === 'BINANCE_DEMO') {
+      return this.withGlobalPreTradeMutex(runOpen);
+    }
+    return runOpen();
   }
 
   /**
@@ -1145,8 +1314,21 @@ export class TradeManager {
    * places a protective Stop Loss if naked, and never leaves funds unhedged.
    */
   public async reconcileWithExchange(targetSymbol: string = 'SOLUSDT'): Promise<void> {
-    const sym = targetSymbol.toUpperCase().trim();
+    const activeSymbols = this.tradesRepo.getActiveSymbols(this.brokerMode);
+    const symbolsToSync = new Set<string>(activeSymbols);
+    if (targetSymbol) {
+      symbolsToSync.add(targetSymbol.toUpperCase().trim());
+    }
+    if (symbolsToSync.size === 0) {
+      symbolsToSync.add('SOLUSDT');
+    }
 
+    for (const sym of symbolsToSync) {
+      await this.reconcileSymbol(sym);
+    }
+  }
+
+  private async reconcileSymbol(sym: string): Promise<void> {
     return this.withSymbolMutex(sym, async () => {
       let pos: PositionInfo | null = null;
       try {
@@ -1298,12 +1480,73 @@ export class TradeManager {
 
       // Case 2: Exchange position is ZERO (liveQty === 0)
       if (liveQty === 0 && activeTrade) {
-        // Mark as closed, preserving all historical metadata intact
+        let exitPrice = activeTrade.exit_price ?? null;
+        let realizedPnl = activeTrade.realized_pnl ?? 0;
+        let feesUsd = activeTrade.fees_usd ?? 0;
+        let closedAt = Date.now();
+
+        if (typeof this.broker.getSymbolUserTrades === 'function') {
+          try {
+            const userTrades = await this.broker.getSymbolUserTrades(
+              activeTrade.symbol,
+              activeTrade.opened_at
+            );
+            if (Array.isArray(userTrades) && userTrades.length > 0) {
+              const closingSide = activeTrade.side === 'BUY' ? 'SELL' : 'BUY';
+              const matchedFills = userTrades.filter(
+                (f) =>
+                  f.order_id === activeTrade.sl_algo_id ||
+                  f.order_id === activeTrade.tp1_algo_id ||
+                  f.order_id === activeTrade.tp2_algo_id ||
+                  f.order_id === activeTrade.entry_order_id ||
+                  f.filled_at >= activeTrade.opened_at
+              );
+
+              if (matchedFills.length > 0) {
+                let sumRealized = 0;
+                let sumFees = 0;
+                let weightedCloseNotional = 0;
+                let closeQty = 0;
+                let maxFillTs = 0;
+
+                for (const fill of matchedFills) {
+                  sumRealized += Number(fill.realized_pnl || 0);
+                  sumFees += Number(fill.commission || 0);
+                  if (fill.filled_at > maxFillTs) maxFillTs = fill.filled_at;
+                  if (fill.side === closingSide && fill.qty > 0 && fill.price > 0) {
+                    weightedCloseNotional += fill.price * fill.qty;
+                    closeQty += fill.qty;
+                  }
+                }
+
+                if (closeQty > 0) {
+                  exitPrice = Number((weightedCloseNotional / closeQty).toFixed(4));
+                }
+                if (sumRealized !== 0 || closeQty > 0) {
+                  realizedPnl = Number(sumRealized.toFixed(4));
+                }
+                if (sumFees > 0) {
+                  feesUsd = Number(sumFees.toFixed(4));
+                }
+                if (maxFillTs > 0) {
+                  closedAt = maxFillTs;
+                }
+              }
+            }
+          } catch {
+            // Tolerate userTrades fetch error and preserve existing SQLite fields
+          }
+        }
+
+        // Mark as closed, persisting realized fills BEFORE notifyTradeClosed
         this.tradesRepo.update(activeTrade.id, {
           status: 'CLOSED',
           remaining_qty: 0,
+          exit_price: exitPrice,
+          realized_pnl: realizedPnl,
+          fees_usd: feesUsd,
           exit_reason: activeTrade.exit_reason || 'EXCHANGE_SYNC_CLOSED',
-          closed_at: Date.now(),
+          closed_at: closedAt,
         });
         const closed = this.tradesRepo.getById(activeTrade.id)!;
         this.broadcastPositionEvent('CLOSED', closed, 'EXCHANGE_SYNC_CLOSED');

@@ -3,6 +3,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import polka, { type Request, type Response, type NextHandler } from 'polka';
+import sirv from 'sirv';
 import type {
   CockpitState,
   KlineCandle,
@@ -59,6 +60,7 @@ import { ChasingExecutionEngine } from './services/chasingExecutionEngine.js';
 import { TwapExecutionSlicer } from './services/twapExecutionSlicer.js';
 import { StrategyDecayEngine } from './quant/strategyDecayEngine.js';
 import { PropFirmRiskGuard } from './quant/propFirmRiskGuard.js';
+import { AlertNotifier } from './services/alertNotifier.js';
 import { TradeManager } from './services/tradeManager.js';
 import { AutoPilotManager } from './services/autoPilotManager.js';
 import { PnlService } from './services/pnlService.js';
@@ -120,6 +122,7 @@ export async function bootstrapServer(): Promise<{
   const executionChaseLogsRepo = new ExecutionChaseLogsRepo(db);
   const propFirmRepo = new PropFirmRepo(db);
   let wsHub: WsHub | null = null;
+  const alertNotifier = new AlertNotifier();
   const propFirmRiskGuard = new PropFirmRiskGuard(propFirmRepo, {}, (st) =>
     wsHub?.broadcastPropFirmStatus(st)
   );
@@ -134,6 +137,13 @@ export async function bootstrapServer(): Promise<{
   const client = new BinanceClient({
     apiKey: BINANCE_DEMO_API_KEY,
     apiSecret: BINANCE_DEMO_API_SECRET,
+    onIpBan: (retryAfterSec, statusCode) => {
+      void alertNotifier.notifyCriticalEvent(
+        'BINANCE_IP_BAN_418',
+        `Binance HTTP ${statusCode} rate-limit / IP ban triggered (retryAfter=${retryAfterSec}s)`,
+        { statusCode, retryAfterSec }
+      );
+    },
   });
 
   const logger = {
@@ -152,6 +162,20 @@ export async function bootstrapServer(): Promise<{
 
   const broker = BrokerFactory.getAdapter('BINANCE_DEMO', { client, db });
   let activeBroker = broker;
+
+  propFirmRiskGuard.setOnCriticalTransition((ev) => {
+    if (activeBroker.mode !== 'BINANCE_DEMO') return;
+    void alertNotifier.notifyCriticalEvent(
+      ev.reason,
+      `Upcomers $50K ${ev.reason}: ${ev.prevStatus} -> ${ev.nextStatus}`,
+      {
+        cycleId: ev.status.cycle.id,
+        cycleNumber: ev.status.cycle.cycleNumber,
+        currentEquityUsd: ev.status.cycle.currentEquityUsd,
+        dailyPnlUsd: ev.status.dailyPnlUsd,
+      }
+    );
+  });
 
   // 3. State and Cache Management
   let activeSymbol = 'SOLUSDT';
@@ -196,7 +220,7 @@ export async function bootstrapServer(): Promise<{
       lastWalletBalanceUsd = account.walletBalance;
     }
 
-    let activePosition = tradesRepo.getActivePosition(activeBroker.mode, sym);
+    let activePosition = tradesRepo.getActivePositionCached(activeBroker.mode, sym);
     if (activePosition) {
       try {
         const livePos = await activeBroker.getPosition(sym);
@@ -293,71 +317,90 @@ export async function bootstrapServer(): Promise<{
     alphaRegistry,
   });
 
+  let autoPilotManagerRef: AutoPilotManager | null = null;
+
+  const prewarmSymbolKlines = (sym: string): void => {
+    // Pre-warm 1m candle history (500 candles) for smooth chart & indicator feeds
+    client.getKlines(sym, '1m', 500).then((raw) => {
+      if (Array.isArray(raw) && raw.length > 0) {
+        const klines = raw.map((k: any) => ({
+          time: Math.floor(Number(k[0]) / 1000),
+          open: Number(k[1]),
+          high: Number(k[2]),
+          low: Number(k[3]),
+          close: Number(k[4]),
+          volume: Number(k[5]),
+        }));
+        candleHistoryMap.set(sym, klines);
+        mtfManager.setInitialCandles(sym, '1m', klines);
+        alphaRegistry.warmup(klines);
+      }
+    }).catch(() => {});
+
+    // Pre-warm 15m candle history via REST (1000 candles) for SMC, Intermediate Structure & NoiseBandEngine
+    client.getKlines(sym, '15m', 1000).then((raw) => {
+      if (Array.isArray(raw)) {
+        const klines = raw.map((k: any) => ({
+          time: Math.floor(Number(k[0]) / 1000),
+          open: Number(k[1]),
+          high: Number(k[2]),
+          low: Number(k[3]),
+          close: Number(k[4]),
+          volume: Number(k[5]),
+        }));
+        mtfManager.setInitialCandles(sym, '15m', klines);
+        smcEngine.onCandleClosed(sym, '15m', klines);
+        noiseBandEngine.loadKlines(klines);
+        alphaRegistry.warmup(klines);
+      }
+    }).catch(() => {});
+
+    // Pre-warm 1h candle history via REST (200 candles) for Macro Directional Regime
+    client.getKlines(sym, '1h', 200).then((raw) => {
+      if (Array.isArray(raw)) {
+        const klines = raw.map((k: any) => ({
+          time: Math.floor(Number(k[0]) / 1000),
+          open: Number(k[1]),
+          high: Number(k[2]),
+          low: Number(k[3]),
+          close: Number(k[4]),
+          volume: Number(k[5]),
+        }));
+        mtfManager.setInitialCandles(sym, '1h', klines);
+        alphaRegistry.warmup(klines);
+      }
+    }).catch(() => {});
+  };
+
+  const switchActiveSymbol = (sym: string): void => {
+    const nextSymbol = sym.trim().toUpperCase();
+    if (!nextSymbol) return;
+    const prevSymbol = activeSymbol;
+
+    if (prevSymbol !== nextSymbol) {
+      const prevOpen = tradesRepo.getActivePositionCached(activeBroker.mode, prevSymbol);
+      if (!prevOpen) {
+        streamsManager.unsubscribeSymbol(prevSymbol);
+      }
+    }
+
+    activeSymbol = nextSymbol;
+    cvdEngine.reset(nextSymbol);
+    mtfManager.reset(nextSymbol);
+    smcEngine.reset(nextSymbol);
+    confluenceEngine.reset(nextSymbol);
+    autoPilotManagerRef?.setActiveSymbol(nextSymbol);
+    streamsManager.subscribeSymbol(nextSymbol);
+    prewarmSymbolKlines(nextSymbol);
+  };
+
   // 7b. Initialize WebSocket Hub on /ws
   const createdWsHub = new WsHub({
     server,
     path: '/ws',
     sessionToken: SESSION_TOKEN,
     getSnapshot: (sym) => buildCockpitState(sym || activeSymbol),
-    onSubscribeSymbol: (sym) => {
-      activeSymbol = sym.toUpperCase();
-      cvdEngine.reset(activeSymbol);
-      mtfManager.reset(activeSymbol);
-      smcEngine.reset(activeSymbol);
-      confluenceEngine.reset(activeSymbol);
-      streamsManager.subscribeSymbol(activeSymbol);
-
-      // Pre-warm 1m candle history (500 candles) for smooth chart & indicator feeds
-      client.getKlines(activeSymbol, '1m', 500).then((raw) => {
-        if (Array.isArray(raw) && raw.length > 0) {
-          const klines = raw.map((k: any) => ({
-            time: Math.floor(Number(k[0]) / 1000),
-            open: Number(k[1]),
-            high: Number(k[2]),
-            low: Number(k[3]),
-            close: Number(k[4]),
-            volume: Number(k[5]),
-          }));
-          candleHistoryMap.set(activeSymbol, klines);
-          mtfManager.setInitialCandles(activeSymbol, '1m', klines);
-          alphaRegistry.warmup(klines);
-        }
-      }).catch(() => {});
-
-      // Pre-warm 15m candle history via REST (1000 candles) for SMC, Intermediate Structure & NoiseBandEngine
-      client.getKlines(activeSymbol, '15m', 1000).then((raw) => {
-        if (Array.isArray(raw)) {
-          const klines = raw.map((k: any) => ({
-            time: Math.floor(Number(k[0]) / 1000),
-            open: Number(k[1]),
-            high: Number(k[2]),
-            low: Number(k[3]),
-            close: Number(k[4]),
-            volume: Number(k[5]),
-          }));
-          mtfManager.setInitialCandles(activeSymbol, '15m', klines);
-          smcEngine.onCandleClosed(activeSymbol, '15m', klines);
-          noiseBandEngine.loadKlines(klines);
-          alphaRegistry.warmup(klines);
-        }
-      }).catch(() => {});
-
-      // Pre-warm 1h candle history via REST (200 candles) for Macro Directional Regime
-      client.getKlines(activeSymbol, '1h', 200).then((raw) => {
-        if (Array.isArray(raw)) {
-          const klines = raw.map((k: any) => ({
-            time: Math.floor(Number(k[0]) / 1000),
-            open: Number(k[1]),
-            high: Number(k[2]),
-            low: Number(k[3]),
-            close: Number(k[4]),
-            volume: Number(k[5]),
-          }));
-          mtfManager.setInitialCandles(activeSymbol, '1h', klines);
-          alphaRegistry.warmup(klines);
-        }
-      }).catch(() => {});
-    },
+    onSubscribeSymbol: (sym) => switchActiveSymbol(sym),
   });
   wsHub = createdWsHub;
 
@@ -366,17 +409,25 @@ export async function bootstrapServer(): Promise<{
     db,
     broker: activeBroker,
     brokerMode: activeBroker.mode,
+    propFirmRiskGuard,
+    alertNotifier,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
     broadcastWs: (msg) => wsHub?.broadcast(msg),
+    onTradeOpened: (trade) => {
+      void alertNotifier.notifyTradeOpened(trade);
+    },
     onTradeClosed: (trade) => {
-      const realizedNetPnlUsd = Number(
-        ((trade.realized_pnl ?? 0) - (trade.fees_usd ?? 0)).toFixed(2)
-      );
-      propFirmRiskGuard.recordTradeClosed({
-        tradeId: trade.id,
-        realizedNetPnlUsd,
-        liveWalletBalanceUsd: lastWalletBalanceUsd,
-      });
+      if (trade.broker_mode === 'BINANCE_DEMO') {
+        const realizedNetPnlUsd = Number(
+          ((trade.realized_pnl ?? 0) - (trade.fees_usd ?? 0)).toFixed(2)
+        );
+        propFirmRiskGuard.recordTradeClosed({
+          tradeId: trade.id,
+          realizedNetPnlUsd,
+          liveWalletBalanceUsd: lastWalletBalanceUsd,
+        });
+      }
+      void alertNotifier.notifyTradeClosed(trade);
     },
   });
 
@@ -396,6 +447,7 @@ export async function bootstrapServer(): Promise<{
     chasingExecutionEngine,
     twapExecutionSlicer,
     executionChaseLogsRepo,
+    alertNotifier,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
     getAtr: (sym) => {
       const candles = candleHistoryMap.get(sym) || [];
@@ -415,6 +467,7 @@ export async function bootstrapServer(): Promise<{
       }
     },
   });
+  autoPilotManagerRef = autoPilotManager;
 
   // 8c. Initialize Multi-Period PnL Performance Service
   const pnlService = new PnlService(
@@ -438,6 +491,7 @@ export async function bootstrapServer(): Promise<{
 
   // 9. Wire Stream Events to TradeManager, CvdEngine, and WsHub
   streamsManager.onMarkPrice((event) => {
+    if (event.symbol.toUpperCase() !== activeSymbol) return;
     markPriceMap.set(event.symbol, event.markPrice);
     fundingRateMap.set(event.symbol, {
       rate: event.fundingRate,
@@ -472,7 +526,7 @@ export async function bootstrapServer(): Promise<{
       candleHistoryMap.set(event.symbol, [latestCandle]);
     }
 
-    const activePos = tradesRepo.getActivePosition(activeBroker.mode, event.symbol);
+    const activePos = tradesRepo.getActivePositionCached(activeBroker.mode, event.symbol);
     let uPnl = 0;
     if (activePos && activePos.remaining_qty > 0) {
       uPnl =
@@ -544,10 +598,11 @@ export async function bootstrapServer(): Promise<{
       .onTick(event.symbol, event.markPrice)
       .catch(() => {})
       .finally(() => {
+        if (activeBroker.mode !== 'BINANCE_DEMO') return;
         const nowPropFirmTs = Date.now();
         if (nowPropFirmTs - lastPropFirmEvalAt >= 500) {
           lastPropFirmEvalAt = nowPropFirmTs;
-          const openPos = tradesRepo.getActivePosition(activeBroker.mode, event.symbol);
+          const openPos = tradesRepo.getActivePositionCached(activeBroker.mode, event.symbol);
           let liveUnrealizedPnl = 0;
           if (openPos && openPos.remaining_qty > 0) {
             const rawFloating =
@@ -571,6 +626,7 @@ export async function bootstrapServer(): Promise<{
 
   streamsManager.onKline((event) => {
     const sym = event.symbol.toUpperCase();
+    if (sym !== activeSymbol) return;
     const interval = event.interval;
 
     // Feed MTF Manager ring buffers for 1m, 15m, and 1h
@@ -711,6 +767,8 @@ export async function bootstrapServer(): Promise<{
     },
     onBrokerModeChange: (newAdapter) => {
       activeBroker = newAdapter;
+      tradesRepo.invalidateActiveCache();
+      autoPilotManager.setBroker(newAdapter);
       newAdapter
         .getAccount()
         .then((acc) => {
@@ -721,18 +779,16 @@ export async function bootstrapServer(): Promise<{
         .catch(() => null);
     },
     db,
+    binanceClient: client,
     streamsManager,
     cvdEngine,
     confluenceEngine,
     autoPilotManager,
     activeSymbol,
+    getActiveSymbol: () => activeSymbol,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
     getFunding: (sym) => fundingRateMap.get(sym) || { rate: null, nextTime: null },
-    setActiveSymbol: (sym) => {
-      activeSymbol = sym.toUpperCase();
-      cvdEngine.reset(activeSymbol);
-      streamsManager.subscribeSymbol(activeSymbol);
-    },
+    setActiveSymbol: (sym) => switchActiveSymbol(sym),
     getIndicators: (sym) => {
       const candles = candleHistoryMap.get(sym) || [];
       return calculateIndicators(candles, 0.01);
@@ -779,7 +835,7 @@ export async function bootstrapServer(): Promise<{
     },
   });
 
-  // 11. Static SPA Hosting with Native Fast File Serving
+  // 11. Static SPA Hosting with sirv
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
   const webDistCandidates = [
@@ -790,66 +846,22 @@ export async function bootstrapServer(): Promise<{
   ];
   const webDistPath = webDistCandidates.find((c) => fs.existsSync(c)) || webDistCandidates[0];
 
-  const MIME_TYPES: Record<string, string> = {
-    '.html': 'text/html; charset=utf-8',
-    '.js': 'application/javascript; charset=utf-8',
-    '.css': 'text/css; charset=utf-8',
-    '.json': 'application/json',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.svg': 'image/svg+xml',
-    '.ico': 'image/x-icon',
-    '.woff2': 'font/woff2',
-  };
-
   if (fs.existsSync(webDistPath)) {
+    const serveStatic = sirv(webDistPath, {
+      single: true,
+      setHeaders: (res, pathname) => {
+        if (pathname.endsWith('.html') || pathname === '/') {
+          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.setHeader('Pragma', 'no-cache');
+          res.setHeader('Expires', '0');
+        }
+      },
+    });
     app.use((req: Request, res: Response, next: NextHandler) => {
       if (req.url && (req.url.startsWith('/api') || req.url.startsWith('/ws'))) {
         return next();
       }
-
-      const cleanUrl = (req.url || '/').split('?')[0]!;
-      let relativePath = cleanUrl === '/' ? '/index.html' : cleanUrl;
-      let targetFile = path.normalize(path.join(webDistPath, relativePath));
-
-      // Security check: ensure path is within webDistPath
-      if (!targetFile.startsWith(path.normalize(webDistPath))) {
-        res.writeHead(403);
-        res.end('Forbidden');
-        return;
-      }
-
-      // SPA fallback to index.html if file doesn't exist
-      if (!fs.existsSync(targetFile) || fs.statSync(targetFile).isDirectory()) {
-        targetFile = path.join(webDistPath, 'index.html');
-      }
-
-      if (!fs.existsSync(targetFile)) {
-        return next();
-      }
-
-      try {
-        const ext = path.extname(targetFile).toLowerCase();
-        const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-        const fileContent = fs.readFileSync(targetFile);
-
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Content-Length', fileContent.length);
-
-        if (ext === '.html') {
-          res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-          res.setHeader('Pragma', 'no-cache');
-          res.setHeader('Expires', '0');
-        } else {
-          res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        }
-
-        res.writeHead(200);
-        res.end(fileContent);
-      } catch (err) {
-        console.error('[STATIC] Error serving file:', err);
-        next();
-      }
+      serveStatic(req as unknown as http.IncomingMessage, res as unknown as http.ServerResponse, next);
     });
   }
 
@@ -871,7 +883,9 @@ export async function bootstrapServer(): Promise<{
     .then((acc) => {
       if (acc && Number.isFinite(acc.walletBalance) && acc.walletBalance > 0) {
         lastWalletBalanceUsd = acc.walletBalance;
-        wsHub?.broadcastPropFirmStatus(propFirmRiskGuard.getStatus(lastWalletBalanceUsd));
+        if (activeBroker.mode === 'BINANCE_DEMO') {
+          wsHub?.broadcastPropFirmStatus(propFirmRiskGuard.getStatus(lastWalletBalanceUsd));
+        }
       }
     })
     .catch(() => null);

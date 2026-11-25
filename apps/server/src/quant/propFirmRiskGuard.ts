@@ -158,18 +158,28 @@ export interface RecordTradeClosedParams {
  * - Automatic 00:00 UTC daily baseline rollover lifting transient HALTED_DAILY_BUFFER without resurrecting terminal cycles.
  * - Sub-$50K Testnet wallet resilience: anchors challenge equity to $50,000 + cycle PnL and sets needsTopUp = true.
  */
+export interface PropFirmCriticalTransitionEvent {
+  reason: 'UPCOMERS_DAILY_HALT' | 'UPCOMERS_TRAILING_HALT' | 'PROPFIRM_TARGET_REACHED';
+  prevStatus: PropFirmCycleStatus;
+  nextStatus: PropFirmCycleStatus;
+  status: PropFirmStatusResponse;
+}
+
 export class PropFirmRiskGuard {
   private readonly repo: PropFirmRepo;
   private readonly config: UpcomersChallengeConfig;
   private readonly onStatusUpdate?: (status: PropFirmStatusResponse) => void;
+  private onCriticalTransition?: (event: PropFirmCriticalTransitionEvent) => void;
   private readonly realizedCyclePnlByCycleId = new Map<string, number>();
   private readonly recordedTradeIds = new Set<string>();
+  private readonly notifiedTargetCycleIds = new Set<string>();
   private lastLiveWalletBalanceUsd: number = 0;
 
   constructor(
     repo: PropFirmRepo,
     config?: Partial<UpcomersChallengeConfig>,
-    onStatusUpdate?: (status: PropFirmStatusResponse) => void
+    onStatusUpdate?: (status: PropFirmStatusResponse) => void,
+    onCriticalTransition?: (event: PropFirmCriticalTransitionEvent) => void
   ) {
     this.repo = repo;
     this.config = {
@@ -177,13 +187,25 @@ export class PropFirmRiskGuard {
       ...config,
     };
     this.onStatusUpdate = onStatusUpdate;
+    this.onCriticalTransition = onCriticalTransition;
 
     const existing = this.repo.getActiveCycle() ?? this.repo.getLatestCycle();
     if (!existing) {
       this.createFreshCycle(Date.now());
     } else {
       this.realizedCyclePnlByCycleId.set(existing.id, existing.realizedPnlUsd ?? 0);
+      const closedIds =
+        this.repo.listClosedTradeIdsSince?.(existing.startedAt, 'BINANCE_DEMO') ?? [];
+      for (const id of closedIds) {
+        this.recordedTradeIds.add(id);
+      }
     }
+  }
+
+  public setOnCriticalTransition(
+    cb?: (event: PropFirmCriticalTransitionEvent) => void
+  ): void {
+    this.onCriticalTransition = cb;
   }
 
   public getConfig(): UpcomersChallengeConfig {
@@ -323,6 +345,7 @@ export class PropFirmRiskGuard {
     const dailyMinEquityUsd = round2(Math.min(snapshot.dailyMinEquityUsd, currentEquityUsd));
 
     // 5. Evaluate Trailing, Daily, and Profit Target transitions
+    const prevStatus: PropFirmCycleStatus = cycle.status;
     let nextStatus: PropFirmCycleStatus = cycle.status;
     let emergencyExitReason: EvaluateLiveEquityResult['emergencyExitReason'] = null;
     let cycleJustPassed = false;
@@ -397,6 +420,13 @@ export class PropFirmRiskGuard {
 
     const status = this.buildStatusResponse(cycle, updatedSnapshot, safeWallet, nowMs);
     this.emitStatusUpdate(status);
+    this.emitCriticalTransitionIfNeeded(
+      cycle.id,
+      prevStatus,
+      nextStatus,
+      emergencyExitReason,
+      status
+    );
 
     return {
       status,
@@ -708,6 +738,48 @@ export class PropFirmRiskGuard {
     if (!this.onStatusUpdate) return;
     try {
       this.onStatusUpdate(status);
+    } catch {
+      // Tolerated listener failure
+    }
+  }
+
+  private emitCriticalTransitionIfNeeded(
+    cycleId: string,
+    prevStatus: PropFirmCycleStatus,
+    nextStatus: PropFirmCycleStatus,
+    emergencyExitReason: EvaluateLiveEquityResult['emergencyExitReason'],
+    status: PropFirmStatusResponse
+  ): void {
+    if (!this.onCriticalTransition) return;
+
+    let reason: PropFirmCriticalTransitionEvent['reason'] | null = null;
+
+    if (prevStatus !== nextStatus) {
+      if (nextStatus === 'HALTED_DAILY_BUFFER' || nextStatus === 'FAILED_DAILY') {
+        reason = 'UPCOMERS_DAILY_HALT';
+      } else if (nextStatus === 'HALTED_TRAILING_BUFFER' || nextStatus === 'FAILED_TRAILING') {
+        reason = 'UPCOMERS_TRAILING_HALT';
+      } else if (nextStatus === 'PASSED' && !this.notifiedTargetCycleIds.has(cycleId)) {
+        reason = 'PROPFIRM_TARGET_REACHED';
+        this.notifiedTargetCycleIds.add(cycleId);
+      }
+    } else if (
+      emergencyExitReason === 'PROPFIRM_TARGET_REACHED' &&
+      !this.notifiedTargetCycleIds.has(cycleId)
+    ) {
+      reason = 'PROPFIRM_TARGET_REACHED';
+      this.notifiedTargetCycleIds.add(cycleId);
+    }
+
+    if (!reason) return;
+
+    try {
+      this.onCriticalTransition({
+        reason,
+        prevStatus,
+        nextStatus,
+        status,
+      });
     } catch {
       // Tolerated listener failure
     }

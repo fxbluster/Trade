@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { DatabaseSync } from 'node:sqlite';
-import { initializeDatabase, TradesRepo, FillsRepo, RiskStateRepo } from '../../db/sqlite.js';
+import { initializeDatabase, TradesRepo, FillsRepo, RiskStateRepo, PropFirmRepo } from '../../db/sqlite.js';
+import { PropFirmRiskGuard } from '../../quant/propFirmRiskGuard.js';
 import { TradeManager, TradeManagerError } from '../tradeManager.js';
 import type {
   BrokerAdapter,
@@ -450,5 +451,221 @@ describe('TradeManager — Atomic Orchestration & Fail-Closed Execution', () => 
 
     // Original SL was never cancelled or touched
     expect(mockBroker.cancelOrderCalls.length).toBe(0);
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 7: Unified PropFirm Gate (403 halt, 409 global 1-pos, $250 clamp, 400 zero-SL)
+  // --------------------------------------------------------------------------
+  it('enforces PropFirm 403 halt, 409 global 1-pos mutex, $250 clamp with marginUsd recompute, and 400 zero-SL rejection', async () => {
+    const propRepo = new PropFirmRepo(db);
+    const guard = new PropFirmRiskGuard(propRepo);
+    const openedTrades: string[] = [];
+    const guardedTm = new TradeManager({
+      db,
+      broker: mockBroker,
+      brokerMode: 'BINANCE_DEMO',
+      propFirmRiskGuard: guard,
+      getMarkPrice: (sym) => markPriceMap.get(sym) || 100,
+      onTradeOpened: (t) => openedTrades.push(t.id),
+    });
+
+    mockBroker.account.walletBalance = 50_000;
+    mockBroker.account.availableBalance = 50_000;
+    markPriceMap.set('SOLUSDT', 100);
+    markPriceMap.set('BTCUSDT', 100);
+
+    // Zero/invalid SL distance -> 400 ERR_PROPFIRM_RISK_LIMIT
+    await expect(
+      guardedTm.openPosition({
+        symbol: 'SOLUSDT',
+        side: 'BUY',
+        orderType: 'MARKET',
+        marginUsd: 500,
+        leverage: 10,
+        stopLoss: 100, // 0 distance
+      })
+    ).rejects.toMatchObject({ statusCode: 400, code: 'ERR_PROPFIRM_RISK_LIMIT' });
+
+    // Concurrent cross-symbol open (SOLUSDT + BTCUSDT) -> global mutex lets 1 succeed clamped ($250 risk) & blocks 2nd with 409
+    const p1 = guardedTm.openPosition({
+      symbol: 'SOLUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 2_500,
+      leverage: 10,
+      stopLoss: 95, // $5 distance -> clamped to 50 qty ($500 margin)
+    });
+    const p2 = guardedTm.openPosition({
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 500,
+      leverage: 10,
+      stopLoss: 95,
+    });
+    const [r1, r2] = await Promise.allSettled([p1, p2]);
+    expect(r1.status).toBe('fulfilled');
+    if (r1.status === 'fulfilled') {
+      expect(r1.value.quantity).toBe(50);
+      expect(r1.value.margin_usd).toBe(500);
+      expect(openedTrades).toEqual([r1.value.id]);
+    }
+    expect(r2.status).toBe('rejected');
+    if (r2.status === 'rejected') {
+      expect(r2.reason).toBeInstanceOf(TradeManagerError);
+      expect(r2.reason.statusCode).toBe(409);
+      expect(r2.reason.code).toBe('ERR_POSITION_EXISTS');
+    }
+
+    // Close active trade, breach daily halt -> 403 UPCOMERS_DAILY_HALT
+    await guardedTm.closePosition('SOLUSDT', 'MANUAL_CLOSE');
+    guard.evaluateLiveEquity({
+      realizedCyclePnlUsd: -1_300,
+      unrealizedPnlUsd: 0,
+      liveWalletBalanceUsd: 50_000,
+      hasOpenPosition: false,
+    });
+    await expect(
+      guardedTm.openPosition({
+        symbol: 'SOLUSDT',
+        side: 'BUY',
+        orderType: 'MARKET',
+        marginUsd: 200,
+        leverage: 10,
+        stopLoss: 95,
+      })
+    ).rejects.toMatchObject({ statusCode: 403, code: 'UPCOMERS_DAILY_HALT' });
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 8: Unfilled resting LIMIT cancels & throws 409 ERR_LIMIT_ORDER_UNFILLED
+  // --------------------------------------------------------------------------
+  it('auto-cancels unfilled resting LIMIT order (executedQty=0) and rejects with 409 ERR_LIMIT_ORDER_UNFILLED', async () => {
+    vi.spyOn(mockBroker, 'openOrder').mockResolvedValueOnce({
+      orderId: 'resting_limit_1',
+      clientOrderId: 'tos_limit_1_ent',
+      status: 'NEW',
+      executedQty: 0,
+      avgPrice: 0,
+    });
+
+    await expect(
+      tradeManager.openPosition({
+        symbol: 'SOLUSDT',
+        side: 'BUY',
+        orderType: 'LIMIT',
+        limitPrice: 95,
+        marginUsd: 50,
+        leverage: 5,
+        stopLoss: 90,
+      })
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ERR_LIMIT_ORDER_UNFILLED',
+    });
+
+    expect(mockBroker.cancelOrderCalls).toEqual([
+      { symbol: 'SOLUSDT', orderId: 'resting_limit_1', isAlgo: false },
+    ]);
+    const tradesRepo = new TradesRepo(db);
+    expect(tradesRepo.getActivePosition('BINANCE_DEMO', 'SOLUSDT')).toBeNull();
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 9: Offline reconcileWithExchange iterates all open symbols & syncs userTrades BEFORE notifyTradeClosed
+  // --------------------------------------------------------------------------
+  it('reconciles all open SQLite symbols, fetches getSymbolUserTrades, and persists exit_price/PnL/fees before notifyTradeClosed', async () => {
+    const tradesRepo = new TradesRepo(db);
+    const closedEvents: Array<{ id: string; exit_price: number | null; realized_pnl: number; fees_usd: number }> = [];
+    const tmWithSync = new TradeManager({
+      db,
+      broker: {
+        ...mockBroker,
+        mode: 'BINANCE_DEMO',
+        getAccount: () => mockBroker.getAccount(),
+        getPosition: async () => null,
+        openOrder: (r) => mockBroker.openOrder(r),
+        createAlgoOrder: (p) => mockBroker.createAlgoOrder(p),
+        closePosition: (s, q) => mockBroker.closePosition(s, q),
+        cancelOrder: (s, o, a) => mockBroker.cancelOrder(s, o, a),
+        cancelAllOrders: (s) => mockBroker.cancelAllOrders(s),
+        moveToBreakeven: (s, b, c) => mockBroker.moveToBreakeven(s, b, c),
+        getOpenOrders: (s) => mockBroker.getOpenOrders(s),
+        getSymbolUserTrades: async (symbol: string) => {
+          if (symbol === 'ETHUSDT') {
+            return [
+              {
+                binance_trade_id: 'ut_1',
+                trade_id: 'offline_eth_1',
+                order_id: 'sl_eth_1',
+                symbol: 'ETHUSDT',
+                side: 'SELL',
+                price: 2950,
+                qty: 2,
+                realized_pnl: -100,
+                commission: 2.95,
+                commission_asset: 'USDT',
+                filled_at: Date.now(),
+              },
+            ];
+          }
+          return [];
+        },
+      },
+      brokerMode: 'BINANCE_DEMO',
+      getMarkPrice: () => 100,
+      onTradeClosed: (trade) => {
+        closedEvents.push({
+          id: trade.id,
+          exit_price: trade.exit_price,
+          realized_pnl: trade.realized_pnl,
+          fees_usd: trade.fees_usd,
+        });
+      },
+    });
+
+    tradesRepo.insert({
+      id: 'offline_eth_1',
+      symbol: 'ETHUSDT',
+      broker_mode: 'BINANCE_DEMO',
+      side: 'BUY',
+      status: 'OPEN',
+      entry_price: 3000,
+      exit_price: null,
+      quantity: 2,
+      remaining_qty: 2,
+      leverage: 10,
+      margin_usd: 600,
+      stop_loss: 2950,
+      tp1: null,
+      tp2: null,
+      be_price: null,
+      is_breakeven: 0,
+      client_order_id: 'tos_offline_eth_1_ent',
+      client_sl_id: 'tos_offline_eth_1_sl',
+      client_tp1_id: null,
+      client_tp2_id: null,
+      entry_order_id: 'ent_eth_1',
+      sl_algo_id: 'sl_eth_1',
+      tp1_algo_id: null,
+      tp2_algo_id: null,
+      realized_pnl: 0,
+      fees_usd: 0,
+      exit_reason: null,
+      opened_at: Date.now() - 60_000,
+      closed_at: null,
+    });
+
+    // Reconcile targeting SOLUSDT -> still iterates ETHUSDT from SQLite open trades!
+    await tmWithSync.reconcileWithExchange('SOLUSDT');
+
+    expect(closedEvents).toHaveLength(1);
+    expect(closedEvents[0]).toEqual({
+      id: 'offline_eth_1',
+      exit_price: 2950,
+      realized_pnl: -100,
+      fees_usd: 2.95,
+    });
+    expect(tradesRepo.getActivePositionCached('BINANCE_DEMO', 'ETHUSDT')).toBeNull();
   });
 });

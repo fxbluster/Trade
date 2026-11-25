@@ -161,6 +161,21 @@ describe('BinanceClient & Broker Adapters Integration', () => {
       await expect(client.request('/fapi/v1/ping')).rejects.toThrow(ExchangeBannedError);
       expect(mockFetch).toHaveBeenCalledTimes(1); // STILL 1 call! Never retried blindly!
     });
+
+    it('invokes onIpBan callback on HTTP 418 and 429', async () => {
+      const onIpBan = vi.fn();
+      const client = new BinanceClient({ apiKey: 'key', apiSecret: 'secret', onIpBan });
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 429,
+        headers: new Headers({ 'retry-after': '15' }),
+        text: async () => JSON.stringify({ code: -1003, msg: 'Too many requests' }),
+      });
+
+      await expect(client.request('/fapi/v1/ping')).rejects.toThrow(ExchangeBannedError);
+      expect(onIpBan).toHaveBeenCalledWith(15, 429);
+    });
   });
 
   describe('4. Algo Order Routing (-4120 Handling)', () => {
@@ -298,6 +313,162 @@ describe('BinanceClient & Broker Adapters Integration', () => {
       expect(closeBody).toContain('reduceOnly=true');
       expect(closeBody).toContain('side=SELL'); // Opposite of LONG position
     });
+
+    it('forwards timeInForce GTX, preserves executedQty=0 on NEW, and re-throws BinanceApiError unwrapped', async () => {
+      const client = new BinanceClient({ apiKey: 'key', apiSecret: 'secret' });
+      const adapter = new BinanceDemoAdapter({ client });
+
+      const capturedOrderBodies: string[] = [];
+      global.fetch = vi.fn().mockImplementation((url: string, opts: any) => {
+        if (url.includes('/fapi/v1/order')) {
+          capturedOrderBodies.push(opts?.body || '');
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({
+            orderId: 555001,
+            clientOrderId: 'tos_abc_ent',
+            status: 'NEW',
+            executedQty: '0',
+            avgPrice: '0',
+            price: '150.0',
+          }),
+        });
+      });
+
+      const res = await adapter.openOrder({
+        symbol: 'SOLUSDT',
+        side: 'BUY',
+        orderType: 'LIMIT',
+        timeInForce: 'GTX',
+        limitPrice: 150,
+        marginUsd: 150,
+        leverage: 10,
+        quantity: 10,
+        clientOrderId: 'tos_abc_ent',
+      });
+
+      expect(capturedOrderBodies[0]).toContain('timeInForce=GTX');
+      expect(res.status).toBe('NEW');
+      expect(res.executedQty).toBe(0);
+
+      // Verify -5022 re-thrown unwrapped as BinanceApiError
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        headers: new Headers(),
+        text: async () =>
+          JSON.stringify({ code: -5022, msg: 'Post Only order would immediately trigger' }),
+      });
+
+      await expect(
+        adapter.openOrder({
+          symbol: 'SOLUSDT',
+          side: 'BUY',
+          orderType: 'LIMIT',
+          timeInForce: 'GTX',
+          limitPrice: 155,
+          marginUsd: 150,
+          leverage: 10,
+          quantity: 10,
+        })
+      ).rejects.toMatchObject({ name: 'BinanceApiError', code: -5022 });
+    });
+
+    it('implements getOrder (-2013 -> null, 5xx -> ExchangeDegradedError), getSymbolUserTrades, and modifyOrder side', async () => {
+      const client = new BinanceClient({ apiKey: 'key', apiSecret: 'secret' });
+      const adapter = new BinanceDemoAdapter({ client });
+
+      // 1. getOrder found
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({
+          orderId: 777,
+          clientOrderId: 'tos_1_ent',
+          status: 'PARTIALLY_FILLED',
+          executedQty: '2.5',
+          avgPrice: '201.2',
+        }),
+      });
+      const ord = await adapter.getOrder('SOLUSDT', '777');
+      expect(ord).toEqual({
+        orderId: '777',
+        clientOrderId: 'tos_1_ent',
+        status: 'PARTIALLY_FILLED',
+        executedQty: 2.5,
+        avgPrice: 201.2,
+      });
+
+      // 2. getOrder -2013 -> null
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        headers: new Headers(),
+        text: async () => JSON.stringify({ code: -2013, msg: 'Order does not exist.' }),
+      });
+      expect(await adapter.getOrder('SOLUSDT', '999')).toBeNull();
+
+      // 3. getOrder 5xx -> ExchangeDegradedError
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        headers: new Headers(),
+        text: async () => 'Service Unavailable',
+      });
+      await expect(adapter.getOrder('SOLUSDT', '999')).rejects.toThrow(ExchangeDegradedError);
+
+      // 4. getSymbolUserTrades
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => [
+          {
+            id: 1001,
+            orderId: 777,
+            symbol: 'SOLUSDT',
+            side: 'SELL',
+            price: '205.0',
+            qty: '2.5',
+            realizedPnl: '9.5',
+            commission: '0.1',
+            commissionAsset: 'USDT',
+            time: 1700000010000,
+          },
+        ],
+      });
+      const fills = await adapter.getSymbolUserTrades('SOLUSDT', 1700000000000);
+      expect(fills).toHaveLength(1);
+      expect(fills[0]).toMatchObject({
+        binance_trade_id: '1001',
+        order_id: '777',
+        symbol: 'SOLUSDT',
+        side: 'SELL',
+        price: 205,
+        qty: 2.5,
+        realized_pnl: 9.5,
+        commission: 0.1,
+        filled_at: 1700000010000,
+      });
+
+      // 5. modifyOrder forwards side to PUT /fapi/v1/order
+      let putBody = '';
+      global.fetch = vi.fn().mockImplementation((_url: string, opts: any) => {
+        putBody = opts?.body || '';
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({ orderId: 777, status: 'NEW' }),
+        });
+      });
+      await adapter.modifyOrder('SOLUSDT', '777', 202, 2.5, 'SELL');
+      expect(putBody).toContain('side=SELL');
+    });
   });
 
   describe('6. LocalPaperAdapter Persistence, Slippage & Ticks', () => {
@@ -382,10 +553,76 @@ describe('BinanceClient & Broker Adapters Integration', () => {
       pos = await adapter.getPosition('SOLUSDT');
       expect(pos).toBeNull();
     });
+
+    it('rests non-crossing LIMIT orders as NEW, throws -5022 on crossing GTX, and tracks getOrder/getSymbolUserTrades', async () => {
+      const adapter = new LocalPaperAdapter({ db, initialBalance: 10000.0 });
+      adapter.onMarkPriceTick('SOLUSDT', 200.0);
+
+      // Crossing GTX BUY (>= mark) throws -5022
+      await expect(
+        adapter.openOrder({
+          symbol: 'SOLUSDT',
+          side: 'BUY',
+          orderType: 'LIMIT',
+          timeInForce: 'GTX',
+          limitPrice: 200.0,
+          marginUsd: 1000,
+          leverage: 1,
+        })
+      ).rejects.toMatchObject({ name: 'BinanceApiError', code: -5022 });
+
+      // Crossing GTX SELL (<= mark) throws -5022
+      await expect(
+        adapter.openOrder({
+          symbol: 'SOLUSDT',
+          side: 'SELL',
+          orderType: 'LIMIT',
+          timeInForce: 'GTX',
+          limitPrice: 199.5,
+          marginUsd: 1000,
+          leverage: 1,
+        })
+      ).rejects.toMatchObject({ name: 'BinanceApiError', code: -5022 });
+
+      // Non-crossing GTX BUY (< mark) rests as NEW in openOrders and ordersById
+      const resting = await adapter.openOrder({
+        symbol: 'SOLUSDT',
+        side: 'BUY',
+        orderType: 'LIMIT',
+        timeInForce: 'GTX',
+        limitPrice: 198.0,
+        marginUsd: 1000,
+        leverage: 1,
+        quantity: 5,
+      });
+      expect(resting.status).toBe('NEW');
+      expect(resting.executedQty).toBe(0);
+      expect(await adapter.getOpenOrders('SOLUSDT')).toHaveLength(1);
+      expect((await adapter.getOrder('SOLUSDT', resting.orderId))?.status).toBe('NEW');
+
+      // Amending to cross mark throws -5022
+      await expect(
+        adapter.modifyOrder('SOLUSDT', resting.orderId, 200.5, 5, 'BUY')
+      ).rejects.toMatchObject({ name: 'BinanceApiError', code: -5022 });
+
+      // Safe amend stays NEW
+      await adapter.modifyOrder('SOLUSDT', resting.orderId, 198.5, 5, 'BUY');
+
+      // Mark drops to 198.5 -> fills resting limit order
+      adapter.onMarkPriceTick('SOLUSDT', 198.5);
+      const filledOrder = await adapter.getOrder('SOLUSDT', resting.orderId);
+      expect(filledOrder?.status).toBe('FILLED');
+      expect(filledOrder?.executedQty).toBe(5);
+      expect(await adapter.getOpenOrders('SOLUSDT')).toHaveLength(0);
+
+      const trades = await adapter.getSymbolUserTrades('SOLUSDT', 0);
+      expect(trades).toHaveLength(1);
+      expect(trades[0].order_id).toBe(resting.orderId);
+    });
   });
 
   describe('7. BrokerFactory Integration', () => {
-    it('returns BinanceDemoAdapter for BINANCE_DEMO and LocalPaperAdapter for LOCAL_PAPER', () => {
+    it('returns BinanceDemoAdapter for BINANCE_DEMO and reuses LOCAL_PAPER unless forceNew is set', () => {
       const db = initializeDatabase(':memory:');
       const client = new BinanceClient({ apiKey: 'key', apiSecret: 'secret' });
 
@@ -393,9 +630,15 @@ describe('BinanceClient & Broker Adapters Integration', () => {
       expect(demo.mode).toBe('BINANCE_DEMO');
       expect(demo instanceof BinanceDemoAdapter).toBe(true);
 
-      const paper = BrokerFactory.getAdapter('LOCAL_PAPER', { db });
-      expect(paper.mode).toBe('LOCAL_PAPER');
-      expect(paper instanceof LocalPaperAdapter).toBe(true);
+      const paper1 = BrokerFactory.getAdapter('LOCAL_PAPER', { db });
+      expect(paper1.mode).toBe('LOCAL_PAPER');
+      expect(paper1 instanceof LocalPaperAdapter).toBe(true);
+
+      const paper2 = BrokerFactory.getAdapter('LOCAL_PAPER', { db });
+      expect(paper2).toBe(paper1);
+
+      const paper3 = BrokerFactory.getAdapter('LOCAL_PAPER', { db, forceNew: true });
+      expect(paper3).not.toBe(paper1);
     });
   });
 

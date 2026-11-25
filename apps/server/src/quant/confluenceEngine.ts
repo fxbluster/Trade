@@ -288,6 +288,8 @@ export class ConfluenceEngine {
     let compositeScore: number;
     let mathBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
     let baseRecommendedAction: 'STRONG_BUY' | 'BUY' | 'WAIT' | 'SELL' | 'STRONG_SELL' = 'WAIT';
+    const isScoreThresholdMode = this.consensusThreshold >= 20;
+    const minConvictionScore = isScoreThresholdMode ? this.consensusThreshold : 60;
 
     if (alphaEval && alphaEval.details && alphaEval.details.length > 0) {
       compositeScore = alphaEval.compositeScore;
@@ -295,9 +297,19 @@ export class ConfluenceEngine {
       if (macroVetoActive) {
         baseRecommendedAction = 'WAIT';
       } else if (mathBias === 'BULLISH') {
-        baseRecommendedAction = compositeScore >= 75 ? 'STRONG_BUY' : compositeScore >= 60 ? 'BUY' : 'WAIT';
+        baseRecommendedAction =
+          compositeScore >= Math.max(75, minConvictionScore)
+            ? 'STRONG_BUY'
+            : compositeScore >= minConvictionScore
+              ? 'BUY'
+              : 'WAIT';
       } else if (mathBias === 'BEARISH') {
-        baseRecommendedAction = compositeScore >= 75 ? 'STRONG_SELL' : compositeScore >= 60 ? 'SELL' : 'WAIT';
+        baseRecommendedAction =
+          compositeScore >= Math.max(75, minConvictionScore)
+            ? 'STRONG_SELL'
+            : compositeScore >= minConvictionScore
+              ? 'SELL'
+              : 'WAIT';
       } else {
         baseRecommendedAction = 'WAIT';
       }
@@ -313,11 +325,13 @@ export class ConfluenceEngine {
     }
 
     // Institutional consensus rule:
-    // 1. Either compositeScore >= 75 (STRONG signal)
-    // 2. OR compositeScore >= 60 AND active directional pillars >= this.consensusThreshold (standard institutional consensus)
-    // 3. No macro veto is active
+    // - Next-Gen % score mode (threshold >= 20, e.g. 60/65/70/75 from Cockpit HUD): compositeScore >= threshold
+    // - Legacy pillar-count mode (threshold < 20, e.g. 4/7 pillars): compositeScore >= 75 OR (>= 60 && >= threshold pillars)
+    // - Blocked if pre-trade gates or macro veto are active
     const directionalCount = mathBias === 'BULLISH' ? bullishCount : mathBias === 'BEARISH' ? bearishCount : 0;
-    const thresholdMet = directionalCount >= this.consensusThreshold;
+    const thresholdMet = isScoreThresholdMode
+      ? compositeScore >= this.consensusThreshold
+      : directionalCount >= this.consensusThreshold;
     const isActionable =
       baseRecommendedAction === 'BUY' ||
       baseRecommendedAction === 'STRONG_BUY' ||
@@ -327,7 +341,9 @@ export class ConfluenceEngine {
     const consensusMet =
       !gateCheck.blocked &&
       !macroVetoActive &&
-      (compositeScore >= 75 || (compositeScore >= 60 && thresholdMet && isActionable));
+      (isScoreThresholdMode
+        ? thresholdMet && isActionable
+        : compositeScore >= 75 || (compositeScore >= 60 && thresholdMet && isActionable));
     const consensusBias = consensusMet ? mathBias : 'NEUTRAL';
     const finalRecommendedAction = gateCheck.blocked ? 'WAIT' : baseRecommendedAction;
 

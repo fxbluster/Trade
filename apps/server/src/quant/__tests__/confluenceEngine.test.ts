@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { LiquidationEngine } from '../liquidationEngine.js';
 import { ConfluenceEngine } from '../confluenceEngine.js';
+import { EconomicEventGuard } from '../economicEventGuard.js';
+import { NoiseBandEngine } from '../noiseBandEngine.js';
 import type { TechnicalSummary, CvdSnapshot, KlineCandle } from '@tradeos/shared';
 
 describe('LiquidationEngine', () => {
@@ -386,6 +388,71 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
       expect(snap.eventBlackoutActive).toBe(true);
       expect(snap.recommendedAction).toBe('WAIT');
       expect(mockEvaluate).not.toHaveBeenCalled();
+    });
+
+    it('honors Next-Gen percentage Quant Conviction Thresholds (60%, 65%, 70%, 75%) in score mode', () => {
+      const isolatedEngine = new ConfluenceEngine({
+        economicEventGuard: new EconomicEventGuard(),
+        noiseBandEngine: new NoiseBandEngine(),
+      });
+      const candles1h: KlineCandle[] = [];
+      for (let i = 0; i < 200; i++) {
+        candles1h.push({
+          time: 1000 + i * 3600,
+          open: 80 + i * 0.1,
+          high: 82 + i * 0.1,
+          low: 79 + i * 0.1,
+          close: 81 + i * 0.1,
+          volume: 1000,
+        });
+      }
+      isolatedEngine.mtfManager.setInitialCandles('SOLUSDT', '1h', candles1h);
+
+      isolatedEngine.setAlphaRegistry({
+        evaluate: () => ({
+          compositeBias: 'BULLISH',
+          compositeScore: 68,
+          rawConviction: 0.36,
+          details: [
+            {
+              factorId: 'ORDER_FLOW_L2',
+              name: 'Order Flow L2',
+              rawAlpha: 0.72,
+              orthogonalAlpha: 0.72,
+              posteriorWeight: 1,
+              bias: 'BULLISH',
+              confidence: 0.85,
+              isCollinear: false,
+              informationRatio: 1.4,
+            },
+          ],
+          evaluatedAt: Date.now(),
+        }),
+      } as any);
+
+      // With threshold = 65%, score 68 MUST pass consensusMet=true
+      isolatedEngine.setConsensusThreshold(65);
+      const snapPass = isolatedEngine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 108,
+        indicators: createMockIndicators(),
+        cvd: null,
+      });
+      expect(snapPass.compositeScore).toBe(68);
+      expect(snapPass.consensusMet).toBe(true);
+      expect(snapPass.recommendedAction).toBe('BUY');
+
+      // With threshold = 70%, score 68 MUST stay WAIT and consensusMet=false
+      isolatedEngine.setConsensusThreshold(70);
+      const snapFail = isolatedEngine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 108,
+        indicators: createMockIndicators(),
+        cvd: null,
+      });
+      expect(snapFail.compositeScore).toBe(68);
+      expect(snapFail.consensusMet).toBe(false);
+      expect(snapFail.recommendedAction).toBe('WAIT');
     });
   });
 });

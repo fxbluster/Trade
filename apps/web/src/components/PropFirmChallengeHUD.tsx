@@ -364,7 +364,7 @@ export const PropFirmChallengeHUD: React.FC = () => {
                       : 'text-[#f0b90b]'
                 }`}
               >
-                {isDailyHalt ? 'HALT' : `${dailyBufferPct.toFixed(1)}% Safe`}
+                {isDailyHalt ? 'HALT' : `${dailyBufferPct.toFixed(1)}% Təhlükəsiz`}
               </span>
             </div>
             <div className="flex items-center justify-between gap-2 text-[10px] whitespace-nowrap tabular-nums leading-tight">

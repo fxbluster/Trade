@@ -1,7 +1,7 @@
 # TradeOS Upcomers $50,000 "1-Step Thunderbolt" Challenge Simulation & Risk Guard Engine
 
 * **Author:** fxbluster
-* **Status:** Implemented
+* **Status:** Implemented (Phase 1 + Phase 2 Hardening)
 * **Date:** 2026-11-25
 * **Target Firm & Account:** Upcomers (upcomers.com) — 1-Step Thunderbolt $50K (MT5 / No Consistency)
 
@@ -37,14 +37,14 @@ The user is preparing to purchase and deploy capital to the **Upcomers 1-Step Th
   * Daily Loss Limit: -$1,500.00 (-3.0%), protected by an internal **pre-violation auto-halt at -$1,250.00 (-2.5%)**.
   * Trailing Loss Limit: -$3,000.00 (-6.0%), protected by an internal **pre-violation auto-halt at -$2,500.00 (-5.0%)**, with floor locking permanently at $50,000 once equity hits $53,000.
 * **G-2 (Fractional Risk Clamping per Trade):** Clamps maximum loss on any single trade to $\le 0.50\%$ ($250.00 max risk) with an algorithmic bracket Stop-Loss submitted within 200ms of entry fill.
-* **G-3 (Testnet Balance Verification & Top-Up Reminder):** If the Binance Testnet account balance is not $50,000 (e.g. current $4,606.01), display an explicit top-up reminder banner with faucet instructions.
+* **G-3 (Testnet Balance Verification & Top-Up Reminder):** If the Binance Testnet account balance is below `$49,000` (e.g. current `$4,606.01`), display a pure Azerbaijani top-up reminder banner with a clickable external link to `Binance Demo Faucet` (`https://testnet.binancefuture.com`).
 * **G-4 (Sadə Dildə Cockpit Challenge Monitor):** Implement a dedicated visual widget in the Cockpit displaying:
   * "Doğurdan Qazanırammı?" (Yes/No, live dollar and percent).
-  * Profit target progress bar: `+$X / +$2,500.00 (X% tamamlandı)`.
-  * Remaining daily safety buffer: `-$X / -$1,250.00 (Safe)`.
-  * Remaining trailing safety buffer: `-$X / -$2,500.00 (Safe)`.
-  * Historical cycle scorecard table showing exact results for every session.
-* **G-5 (5-Cycle Consistency Certification):** Validate the strategy across 5 consecutive profitable cycles before recommending real capital deployment.
+  * Profit target progress bar (`Hədəf: +$2,500.00`, `Qalan`, `Cari`, `% Tamamlandı`).
+  * Remaining daily safety buffer (`Gündəlik Zərər Həddi: $1,250.00`, `Qalan Haqq`, `% Təhlükəsiz` / `HALT`).
+  * Remaining trailing safety buffer (`Maksimum Geriləmə Həddi: $2,500.00`, `Qalan Haqq`, `Çox Təhlükəsiz` / `Təhlükəsiz` / `Diqqət` / `HALT`).
+  * Historical cycle scorecard table and `"Yeni Dövrə Başlat"` cycle rollover control.
+* **G-5 (5-Cycle Consistency Certification):** Validate the strategy across 5 consecutive profitable cycles (`POST /api/propfirm/new-cycle`, `GET /api/propfirm/certificate?format=json|markdown`) before recommending real capital deployment.
 
 ---
 
@@ -90,65 +90,84 @@ flowchart TD
 
 ### Component Details
 
-#### 1. Contract & Sizing Calibration (`apps/server/src/quant/propAccountManager.ts`)
+#### 1. Contract & Sizing Calibration (`apps/server/src/quant/propFirmRiskGuard.ts`, `packages/shared/src/contracts.ts`)
 
 ```typescript
 export interface UpcomersChallengeConfig {
-  accountSizeUsd: 50_000;
-  profitTargetUsd: 2_500;          // +5.0%
-  contractualDailyLossUsd: 1_500;   // -3.0%
-  internalDailyHaltUsd: 1_250;     // -2.5% pre-violation buffer
-  contractualTrailingLossUsd: 3_000;// -6.0%
-  internalTrailingHaltUsd: 2_500;  // -5.0% pre-violation buffer
-  maxRiskPerTradeUsd: 250;         // 0.50% max risk per trade
-  maxConcurrentPositions: 1;
+  accountSizeUsd: number;            // 50_000 default
+  profitTargetUsd: number;           // 2_500 (+5.0%)
+  contractualDailyLossUsd: number;   // 1_500 (-3.0%)
+  internalDailyHaltUsd: number;      // 1_250 (-2.5% pre-violation buffer)
+  contractualTrailingLossUsd: number;// 3_000 (-6.0%)
+  internalTrailingHaltUsd: number;   // 2_500 (-5.0% pre-violation buffer)
+  trailingLockHwmUsd: number;        // 53_000 (HWM lock trigger)
+  lockedTrailingFloorUsd: number;    // 50_000 (locked floor)
+  maxRiskPerTradeUsd: number;        // 250 (0.50% max risk per trade)
+  maxConcurrentPositions: number;    // 1
 }
 ```
 
 * **Dynamic Quantity Formula:**
-  $$	ext{Contract Quantity} = rac{\$250.00}{|	ext{Entry Price} - 	ext{Stop Loss Price}|}$$
+  $$\text{Contract Quantity} = \frac{\$250.00}{|\text{Entry Price} - \text{Stop Loss Price}|}$$
   Ensures that even if Stop Loss is hit, the loss is mathematically capped to $\$250.00$ ($0.50\%$).
 * **Trailing Floor Lock Rule:**
-  $$	ext{Trailing Floor} = egin{cases} 
-  HWM_t - \$3,000 & 	ext{if } HWM_t < \$53,000 \ 
-  \$50,000.00 & 	ext{if } HWM_t \ge \$53,000 	ext{ (Locked Floor)}
+  $$\text{Trailing Floor} = \begin{cases}
+  HWM_t - \$3,000 & \text{if } HWM_t < \$53,000 \\
+  \$50,000.00 & \text{if } HWM_t \ge \$53,000 \text{ (Locked Floor)}
   \end{cases}$$
+* **Two-Phase Target Settlement (`PROPFIRM_TARGET_REACHED`):**
+  * When an open position lifts simulated equity (including ~5 bps `estimatedCloseFeeUsd` exit taker cushion) to `>= $52,500.00`, `evaluateLiveEquity({ ..., hasOpenPosition: true, estimatedCloseFeeUsd })` keeps the cycle `'ACTIVE'` and returns `emergencyExitReason: 'PROPFIRM_TARGET_REACHED'`.
+  * `AutoPilotManager` closes the position via `tradeManager.closePosition(symbol, 'PROPFIRM_TARGET_REACHED')` (restoring prior active `trade.status` if close fails transiently). Once settled realized equity confirms `>= $52,500.00` with `hasOpenPosition: false`, `recordTradeClosed()` finalizes the cycle as `'PASSED'`.
 
 #### 2. Cockpit Monitor: "Upcomers $50K Challenge (Sadə Dildə)" (`apps/web/src/components/PropFirmChallengeHUD.tsx`)
 
-Mounted prominently above the Confluence Matrix, providing total visual clarity:
+Mounted prominently above the Confluence Matrix in a responsive 12-column grid (`lg:col-span-3` / `lg:col-span-4` / `lg:col-span-5`) without `truncate` clipping on dollar values:
 
-1. **"Doğurdan Qazanırammı?" Status Box:**
+1. **Testnet Top-Up Banner (`propfirm-topup-banner`):**
+   * Rendered in pure Azerbaijani when `status.needsTopUp` is true (`Balans {formatUsd(...)} / $50,000.00 — Simulyasiya $50,000.00 kapitala sabitlənib; real test üçün tamamlayın:`) alongside a clickable `<a data-testid="propfirm-faucet-link" href="https://testnet.binancefuture.com" target="_blank" rel="noopener noreferrer">Binance Demo Faucet ↗</a>`.
+2. **"Doğurdan Qazanırammı?" Status Box (`lg:col-span-3`):**
    * **BƏLİ, QAZANCDASAN** (Yaşıl qutu) əgər xalis PnL $> 0$ (məs: `+$840.50 (+1.68%)`).
    * **XEYR, ZƏRƏRDƏSƏN** (Qırmızı qutu) əgər xalis PnL $< 0$ (məs: `-$120.00 (-0.24%)`).
    * **GÖZLƏMƏDƏ** (Boz qutu) əməliyyat yoxdursa.
-2. **Upcomers $2,500 Hədəf Barı:**
-   * `Hədəf: +$2,500.00 | Cari: +$1,450.00 (58.0% Tamamlandı) | Qalan: $1,050.00`
-   * Canlı rəngli tərəqqi xətti.
-3. **Gündəlik Təhlükəsizlik Zolağı:**
-   * `Gündəlik Zərər Həddi: $1,250.00 | Qalan Haqq: $1,130.00 (90.4% Təhlükəsiz)`
-4. **Hesabın Yanma Riski (Ümumi Geriləmə):**
-   * `Maksimum Geriləmə Həddi: $2,500.00 | Qalan Haqq: $2,180.00 (Çox Təhlükəsiz)`
-5. **Açılan Tarixçə Cədvəli:**
-   * Hər tamamlanmış sessiyanın nəticəsi: Dövrə #, Qazanc/Ziyan, Max Drawdown, Tarix, Status (`✓ UĞURLU` / `LİMİT HALT`).
+3. **Upcomers $2,500 Hədəf Kartı (`lg:col-span-4`, 2 sətir + bar):**
+   * Sətir 1: `Hədəf: +$2,500.00` / `Qalan: $1,050.00`
+   * Sətir 2: `Cari: +$1,450.00` / `58.0% Tamamlandı` + rəngli tərəqqi xətti.
+4. **Gündəlik və Ümumi Təhlükəsizlik Zolaqları (`lg:col-span-5`, hər biri 2 sətir):**
+   * Gündəlik: Sətir 1 `Gündəlik Zərər Həddi: $1,250.00` / `{dailyBufferPct.toFixed(1)}% Təhlükəsiz` (və ya `HALT`); Sətir 2 `Qalan Haqq: $1,130.00` + sətiriçi `flex-1 h-1` progress bar.
+   * Geriləmə: Sətir 1 `Maksimum Geriləmə Həddi: $2,500.00` / `{trailingStatusLabel}` (`HALT` | `Çox Təhlükəsiz` | `Təhlükəsiz` | `Diqqət`); Sətir 2 `Qalan Haqq: $2,180.00` + sətiriçi `flex-1 h-1` progress bar.
+5. **Dövrə Yeniləmə Düyməsi (`propfirm-new-cycle-btn`) & Açılan Tarixçə Cədvəli (`propfirm-history-table`):**
+   * `"Yeni Dövrə Başlat"` button appears for `PASSED`, `FAILED_DAILY`, `FAILED_TRAILING`, and `HALTED_TRAILING_BUFFER` cycles, stays disabled while an active position or in-flight Auto-Pilot order exists, and surfaces dismissible inline conflict/error alerts (`propfirm-new-cycle-error`).
+   * History table shows each cycle's `Dövrə #`, `Qazanc/Ziyan`, `Max Drawdown`, `Tarix`, and `Status` (`✓ UĞURLU`, `LİMİT HALT`, `LİMİT AŞILDI`, `AKTİV`).
 
 ---
 
-## Detailed Implementation Plan (5 Buildable Phases)
+## Detailed Implementation Plan
 
-* **Phase 1 (Contracts & Types):** Add Upcomers challenge types and error reasons (`UPCOMERS_DAILY_HALT`, `UPCOMERS_TRAILING_HALT`) in `packages/shared/src/contracts.ts`.
-* **Phase 2 (Database & Persistence):** Create `propfirm_challenge_cycles` and `propfirm_daily_snapshots` in SQLite.
-* **Phase 3 (Risk Guard & Engine):** Implement `PropFirmRiskGuard.ts` ($1,250 daily halt, $2,500 trailing halt, $250 max risk clamp) and wire into `AutoPilotManager`.
-* **Phase 4 (API Layer):** Implement `GET /api/propfirm/status` and `GET /api/propfirm/certificate`.
-* **Phase 5 (Cockpit HUD):** Build `PropFirmChallengeHUD.tsx` with "Sadə Dildə" question boxes, drawdown gauges, and top-up reminder banner. Verify live on Chrome DevTools (`http://127.0.0.1:3400`).
+### Phase 1: Core Challenge Simulation & Guard Engine
+* **Contracts & Types (`packages/shared/src/contracts.ts`, `packages/shared/src/types.ts`):** Define Upcomers config/status/certificate interfaces, `ExitReason` (`UPCOMERS_DAILY_HALT`, `UPCOMERS_TRAILING_HALT`), and `BlockReason`.
+* **Database & Persistence (`apps/server/src/db/sqlite.ts`):** Create `propfirm_challenge_cycles` and `propfirm_daily_snapshots` tables and `PropFirmRepo`.
+* **Risk Guard & Engine (`apps/server/src/quant/propFirmRiskGuard.ts`, `apps/server/src/services/autoPilotManager.ts`):** Enforce $1,250 daily halt, $2,500 trailing halt, $53K -> $50K floor lock, and $250 per-trade risk clamp in `AutoPilotManager`.
+* **API Layer (`apps/server/src/api/routes.ts`):** Implement authenticated `GET /api/propfirm/status` and `GET /api/propfirm/certificate`.
+* **Cockpit HUD (`apps/web/src/components/PropFirmChallengeHUD.tsx`):** Build initial "Sadə Dildə" Upcomers monitor above `ConfluenceHUD`.
+
+### Phase 2: Remediation & Hardening
+* **Shared Types & Contracts (`packages/shared/src/types.ts`, `packages/shared/src/contracts.ts`):** Add `'PROPFIRM_TARGET_REACHED'` to `ExitReason`, `'CYCLE_TERMINAL'` to `BlockReason`, and `realizedPnlUsd?: number` to `PropFirmChallengeCycle`.
+* **SQLite Crash-Safe Realized PnL & Atomic Rollover (`apps/server/src/db/sqlite.ts`):** Add additive `realized_pnl_usd REAL NOT NULL DEFAULT 0` column to `propfirm_challenge_cycles` and implement `PropFirmRepo.rolloverCycle()` inside `BEGIN IMMEDIATE` transaction (rejecting open/in-flight trades or non-terminal cycles, finalizing `HALTED_TRAILING_BUFFER` -> `FAILED_TRAILING`, and creating Cycle `N+1`).
+* **Two-Phase Target Close & Ledger Settlement (`propFirmRiskGuard.ts`, `tradeManager.ts`, `autoPilotManager.ts`, `index.ts`):**
+  * Add `hasOpenPosition` and `estimatedCloseFeeUsd` (~5 bps cushion) handling to `PropFirmRiskGuard.evaluateLiveEquity()`, keeping cycles `'ACTIVE'` on unrealized target breach until `TradeManager.onTradeClosed` (plus an idempotent `recordedClosedTradeIds` fallback in `AutoPilotManager.handlePositionClosed()` for standalone unit tests) settles closed fills cleanly via deduplicated `recordTradeClosed({ tradeId })`.
+  * Add `AutoPilotManager.clearPropFirmBlock()`, map `CYCLE_TERMINAL`, guard `manageOpenPosition()` with `isManagingPosition` latch and transient close-failure recovery, and skip legacy `cachedBalance * dailyDrawdownLimitPct` cooldowns when `propFirmRiskGuard` is active (`if (!this.propFirmRiskGuard)`).
+* **Rollover, Guard & Markdown Certificate Routes (`apps/server/src/api/routes.ts`):**
+  * Extract shared `resolvePropFirmWalletBalance(ctx)`, add authenticated `POST /api/propfirm/new-cycle` (calling `ctx.autoPilotManager?.clearPropFirmBlock()` on success and returning localized `409` JSON errors), extend `GET /api/propfirm/certificate?format=json|markdown` (`formatPropFirmCertificateMarkdown()`), and enforce the `409` active-position guard on `POST /api/symbol`.
+* **Frontend Client, Store & Unclipped HUD (`apiClient.ts`, `useMarketStore.ts`, `PropFirmChallengeHUD.tsx`):** Extract `{ message, error, code }` cleanly, add `startNewPropFirmCycle()`, refactor metric cards to compact unclipped 2-row flex layout (`<= 116px` / `<= 148px` with top-up banner), localize daily status to `% Təhlükəsiz`, render clickable `Binance Demo Faucet ↗`, and wire `"Yeni Dövrə Başlat"`.
 
 ---
 
 ## Verification Plan
 
-* **Unit Tests:** Validate $250 risk clamping, $1,250 daily auto-halt, $2,500 trailing halt with floor lock at $50k.
-* **Build:** `npm run build` passes 100%.
-* **Live Cockpit Inspection:** Chrome DevTools screenshot verifying the "Sadə Dildə" Upcomers monitor on `127.0.0.1:3400`.
+* **Typechecks:** `npx tsc --noEmit` passes across `packages/shared`, `apps/server`, and `apps/web`.
+* **Unit & Integration Tests:** `npx vitest run` passes across all workspace tests (`propFirmRiskGuard.test.ts`, `propFirmRuntime.test.ts`, `propFirmRoutes.test.ts`, `PropFirmChallengeHUD.test.tsx`).
+* **Build:** `npm run build` passes cleanly and outputs `apps/web/dist/`.
+* **Live Cockpit Inspection:** Verify `http://127.0.0.1:3400` endpoints and Playwright screenshots (`1280×768` and `1920×1080`) with zero truncated dollar amounts, pure Azerbaijani copy, clickable Faucet link, and compliant collapsed height (`<= 148px`).
 
 ---
 

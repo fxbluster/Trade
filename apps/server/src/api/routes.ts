@@ -792,7 +792,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     try {
       const walletBalance = await resolvePropFirmWalletBalance(ctx);
       const status = ctx.propFirmRiskGuard.startNewCycle(walletBalance);
-      (ctx.autoPilotManager as { clearPropFirmBlock?: () => void } | undefined)?.clearPropFirmBlock?.();
+      ctx.autoPilotManager?.clearPropFirmBlock();
       sendJson(res, 200, {
         ok: true,
         status,

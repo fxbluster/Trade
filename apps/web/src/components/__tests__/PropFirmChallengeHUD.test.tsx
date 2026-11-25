@@ -259,6 +259,7 @@ describe('PropFirmChallengeHUD', () => {
 
     expect(text).toContain('Gündəlik Zərər Həddi: $1,250.00');
     expect(text).toContain('Qalan Haqq: $1,130.00');
+    expect(text).toContain('90.4% Təhlükəsiz');
 
     expect(text).toContain('Maksimum Geriləmə Həddi: $2,500.00');
     expect(text).toContain('Qalan Haqq: $2,180.00');

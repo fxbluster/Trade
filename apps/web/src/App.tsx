@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { TopBar } from './components/TopBar';
+import { PropFirmChallengeHUD } from './components/PropFirmChallengeHUD';
 import { ConfluenceHUD } from './components/ConfluenceHUD';
 import { AutoPilotControls } from './components/AutoPilotControls';
 import { ChartCanvas } from './components/ChartCanvas';
@@ -40,6 +41,7 @@ export const App: React.FC = () => {
       .then(() => marketStore.refreshKlines())
       .catch((err) => console.warn('Initial state/klines fetch error:', err));
     marketStore.refreshConfluence().catch(() => {});
+    marketStore.refreshPropFirmStatus().catch(() => {});
 
     // 2. Configure WebSocket Handlers
     wsClient.setHandlers({
@@ -77,6 +79,9 @@ export const App: React.FC = () => {
       onFactorTelemetry: (ev) => {
         useMarketStore.getState().addTelemetryEvent(ev);
       },
+      onPropFirmStatus: (status) => {
+        useMarketStore.getState().setPropFirmStatus(status);
+      },
       onStatusChange: (status) => {
         useMarketStore.getState().setWsStatus(status);
       },
@@ -108,6 +113,11 @@ export const App: React.FC = () => {
       <main className="flex-1 flex overflow-hidden p-2 gap-2">
         {/* Left / Center Zone (70%): Confluence HUD, Chart & Cockpit Bottom Tabs */}
         <section className="flex-[7] flex flex-col min-w-0 h-full gap-2 overflow-hidden">
+          {/* Upcomers $50K Prop Firm Challenge Monitor (Sadə Dildə) */}
+          <div className="flex-shrink-0">
+            <PropFirmChallengeHUD />
+          </div>
+
           {/* 6+1 Confluence Decision Engine HUD */}
           <div className="flex-shrink-0">
             <ConfluenceHUD />

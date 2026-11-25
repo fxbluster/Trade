@@ -44,4 +44,12 @@ export type {
   DailyAuditResponse,
   ConfluenceSnapshot,
   WsServerMessage,
+  UpcomersChallengeConfig,
+  PropFirmCycleStatus,
+  PropFirmQuestionVerdict,
+  PropFirmChallengeCycle,
+  PropFirmDailySnapshot,
+  PropFirmStatusResponse,
+  PropFirmCertificateResponse,
 } from './contracts.js';
+export { UPCOMERS_1STEP_50K_DEFAULT } from './contracts.js';

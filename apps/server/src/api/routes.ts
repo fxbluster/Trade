@@ -51,6 +51,7 @@ import type { AutoPilotManager } from '../services/autoPilotManager.js';
 import type { DecisionAuditService } from '../services/decisionAuditService.js';
 import type { PillarAttributionService } from '../services/pillarAttributionService.js';
 import type { PnlService } from '../services/pnlService.js';
+import type { PropFirmRiskGuard } from '../quant/propFirmRiskGuard.js';
 
 export interface AppContext {
   tradeManager: TradeManager;
@@ -63,6 +64,8 @@ export interface AppContext {
   decisionAuditService?: DecisionAuditService;
   pillarAttributionService?: PillarAttributionService;
   pnlService?: PnlService;
+  propFirmRiskGuard?: PropFirmRiskGuard;
+  getPropFirmWalletBalance?: () => number;
   activeSymbol?: string;
   getMarkPrice?: (symbol: string) => number;
   setActiveSymbol?: (symbol: string) => void;
@@ -671,6 +674,55 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { error: `Failed to generate PnL summary: ${msg}` });
+    }
+  });
+
+  // 24. GET /api/propfirm/status — Live Upcomers $50K Challenge status & safety buffers
+  app.get('/api/propfirm/status', async (_req: Request, res: Response) => {
+    if (!ctx.propFirmRiskGuard) {
+      return sendJson(res, 503, { error: 'PropFirmRiskGuard not initialized' });
+    }
+    try {
+      let walletBalance = 0;
+      try {
+        const cached = ctx.getPropFirmWalletBalance?.();
+        if (typeof cached === 'number' && Number.isFinite(cached) && cached > 0) {
+          walletBalance = cached;
+        }
+      } catch {
+        walletBalance = 0;
+      }
+
+      if (walletBalance <= 0 && typeof ctx.broker?.getAccount === 'function') {
+        try {
+          const account = await ctx.broker.getAccount();
+          if (account && Number.isFinite(account.walletBalance) && account.walletBalance > 0) {
+            walletBalance = account.walletBalance;
+          }
+        } catch {
+          // Tolerate transient exchange errors without returning 500
+        }
+      }
+
+      const status = ctx.propFirmRiskGuard.getStatus(walletBalance);
+      sendJson(res, 200, status);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: `Failed to retrieve prop firm status: ${msg}` });
+    }
+  });
+
+  // 25. GET /api/propfirm/certificate — 5-cycle consistency certification status
+  app.get('/api/propfirm/certificate', (_req: Request, res: Response) => {
+    if (!ctx.propFirmRiskGuard) {
+      return sendJson(res, 503, { error: 'PropFirmRiskGuard not initialized' });
+    }
+    try {
+      const certificate = ctx.propFirmRiskGuard.getCertificateStatus();
+      sendJson(res, 200, certificate);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: `Failed to retrieve prop firm certificate: ${msg}` });
     }
   });
 

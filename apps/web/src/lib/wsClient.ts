@@ -14,6 +14,7 @@ import type {
   ChasingOrderState,
   SizingBreakdown,
   FactorTelemetryEvent,
+  PropFirmStatusResponse,
 } from '@tradeos/shared';
 import { getSessionToken, invalidateSessionToken } from './apiClient';
 
@@ -68,6 +69,7 @@ type MessageHandlers = {
   onConfluence?: (data: ConfluenceSnapshot) => void;
   onAutoPilotStatus?: (data: AutoPilotStatusData) => void;
   onFactorTelemetry?: (data: FactorTelemetryEvent) => void;
+  onPropFirmStatus?: (status: PropFirmStatusResponse) => void;
   onStatusChange?: (status: WsStatus) => void;
 };
 
@@ -193,6 +195,9 @@ class WsClient {
               break;
             case 'FACTOR_TELEMETRY':
               this.handlers.onFactorTelemetry?.(msg.data);
+              break;
+            case 'PROPFIRM_STATUS':
+              this.handlers.onPropFirmStatus?.(msg.data);
               break;
           }
         } catch (err) {

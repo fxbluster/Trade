@@ -16,6 +16,8 @@ import type {
   PillarAttributionResponse,
   DailyAuditResponse,
   PnlSummaryResponse,
+  PropFirmStatusResponse,
+  PropFirmCertificateResponse,
 } from '@tradeos/shared';
 
 let sessionToken: string | null = null;
@@ -256,6 +258,14 @@ export const apiClient = {
   async getPnlSummary(symbol?: string): Promise<PnlSummaryResponse> {
     const sym = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
     return request<PnlSummaryResponse>(`/api/pnl/summary${sym}`);
+  },
+
+  async getPropFirmStatus(): Promise<PropFirmStatusResponse> {
+    return request<PropFirmStatusResponse>('/api/propfirm/status');
+  },
+
+  async getPropFirmCertificate(): Promise<PropFirmCertificateResponse> {
+    return request<PropFirmCertificateResponse>('/api/propfirm/certificate');
   },
 };
 

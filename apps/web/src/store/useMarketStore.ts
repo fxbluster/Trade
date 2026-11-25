@@ -19,6 +19,7 @@ import type {
   OrderBlock,
   LiquiditySweep,
   FactorTelemetryEvent,
+  PropFirmStatusResponse,
 } from '@tradeos/shared';
 import type { WsStatus, TickData, AnalysisData, PositionEventData, AutoPilotStatusData } from '../lib/wsClient';
 import { apiClient } from '../lib/apiClient';
@@ -82,6 +83,9 @@ export interface MarketStoreState {
   // Next-Gen Orthogonal Quant Telemetry Stream (bounded 50-item sliding window)
   telemetryEvents: FactorTelemetryEvent[];
 
+  // Upcomers $50K Prop Firm Challenge Status
+  propFirmStatus: PropFirmStatusResponse | null;
+
   // Actions
   setSymbol: (symbol: string) => Promise<void>;
   setCandleInterval: (interval: '1m' | '5m' | '15m' | '1h') => Promise<void>;
@@ -107,6 +111,8 @@ export interface MarketStoreState {
   toggleShowSmcOverlay: () => void;
   setTelemetryEvents: (events: FactorTelemetryEvent[]) => void;
   addTelemetryEvent: (event: FactorTelemetryEvent) => void;
+  setPropFirmStatus: (status: PropFirmStatusResponse | null) => void;
+  refreshPropFirmStatus: () => Promise<void>;
 }
 
 const defaultAccount: AccountInfo = {
@@ -184,6 +190,9 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
   // Next-Gen Orthogonal Quant Telemetry Stream
   telemetryEvents: [],
+
+  // Upcomers $50K Prop Firm Challenge Status
+  propFirmStatus: null,
 
   setSymbol: async (symbol: string) => {
     const sym = symbol.toUpperCase();
@@ -415,5 +424,19 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     set((state) => ({
       telemetryEvents: [normalized, ...state.telemetryEvents].slice(0, MAX_TELEMETRY_EVENTS),
     }));
+  },
+
+  setPropFirmStatus: (status: PropFirmStatusResponse | null) => {
+    set({ propFirmStatus: status });
+  },
+
+  refreshPropFirmStatus: async () => {
+    try {
+      if (typeof apiClient.getPropFirmStatus !== 'function') return;
+      const status = await apiClient.getPropFirmStatus();
+      set({ propFirmStatus: status });
+    } catch {
+      // Prop Firm endpoint may not be online yet in test/offline dev
+    }
   },
 }));

@@ -30,6 +30,9 @@ import type {
   FactorTelemetryTriggerType,
   FactorStateDetail,
   QuantConvictionArchetype,
+  PropFirmChallengeCycle,
+  PropFirmCycleStatus,
+  PropFirmDailySnapshot,
 } from '@tradeos/shared';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -112,6 +115,7 @@ export function initializeDatabase(dbPath: string): DatabaseSync {
   } catch {}
 
   ensureNextGenTelemetrySchema(db);
+  ensurePropFirmSchema(db);
 
   return db;
 }
@@ -172,6 +176,53 @@ export function ensureNextGenTelemetrySchema(db: DatabaseSync): void {
   try {
     db.exec(FACTOR_TELEMETRY_RECORDS_DDL);
   } catch {}
+}
+
+const PROPFIRM_SCHEMA_DDL = `
+  CREATE TABLE IF NOT EXISTS propfirm_challenge_cycles (
+    id TEXT PRIMARY KEY,
+    cycle_number INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    starting_balance_usd REAL NOT NULL,
+    current_equity_usd REAL NOT NULL,
+    high_water_mark_usd REAL NOT NULL,
+    contractual_trailing_floor_usd REAL NOT NULL,
+    internal_trailing_floor_usd REAL NOT NULL,
+    is_floor_locked INTEGER NOT NULL DEFAULT 0,
+    profit_target_usd REAL NOT NULL,
+    net_pnl_usd REAL NOT NULL DEFAULT 0,
+    net_pnl_pct REAL NOT NULL DEFAULT 0,
+    max_drawdown_usd REAL NOT NULL DEFAULT 0,
+    trades_count INTEGER NOT NULL DEFAULT 0,
+    win_count INTEGER NOT NULL DEFAULT 0,
+    loss_count INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL,
+    closed_at INTEGER
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_propfirm_cycles_num ON propfirm_challenge_cycles(cycle_number DESC);
+  CREATE INDEX IF NOT EXISTS idx_propfirm_cycles_status ON propfirm_challenge_cycles(status);
+
+  CREATE TABLE IF NOT EXISTS propfirm_daily_snapshots (
+    utc_date TEXT NOT NULL,
+    cycle_id TEXT NOT NULL REFERENCES propfirm_challenge_cycles(id) ON DELETE CASCADE,
+    day_start_equity_usd REAL NOT NULL,
+    current_equity_usd REAL NOT NULL,
+    daily_pnl_usd REAL NOT NULL DEFAULT 0,
+    daily_min_equity_usd REAL NOT NULL,
+    daily_halted INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (utc_date, cycle_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_propfirm_daily_date ON propfirm_daily_snapshots(utc_date DESC);
+`;
+
+/**
+ * Idempotently creates Upcomers $50K Prop Firm challenge tables and indexes.
+ */
+export function ensurePropFirmSchema(db: DatabaseSync): void {
+  db.exec(PROPFIRM_SCHEMA_DDL);
 }
 
 /**
@@ -1749,6 +1800,281 @@ export class FactorTelemetryRecordsRepo {
     `);
     const result = stmt.run(cutoffMs) as { changes?: number | bigint };
     return Number(result.changes ?? 0);
+  }
+}
+
+interface PropFirmChallengeCycleRow {
+  id: string;
+  cycle_number: number;
+  status: string;
+  starting_balance_usd: number;
+  current_equity_usd: number;
+  high_water_mark_usd: number;
+  contractual_trailing_floor_usd: number;
+  internal_trailing_floor_usd: number;
+  is_floor_locked: number;
+  profit_target_usd: number;
+  net_pnl_usd: number;
+  net_pnl_pct: number;
+  max_drawdown_usd: number;
+  trades_count: number;
+  win_count: number;
+  loss_count: number;
+  started_at: number;
+  closed_at: number | null;
+}
+
+interface PropFirmDailySnapshotRow {
+  utc_date: string;
+  cycle_id: string;
+  day_start_equity_usd: number;
+  current_equity_usd: number;
+  daily_pnl_usd: number;
+  daily_min_equity_usd: number;
+  daily_halted: number;
+  updated_at: number;
+}
+
+function mapPropFirmCycleRow(row: PropFirmChallengeCycleRow): PropFirmChallengeCycle {
+  return {
+    id: row.id,
+    cycleNumber: Number(row.cycle_number),
+    status: row.status as PropFirmCycleStatus,
+    startingBalanceUsd: Number(row.starting_balance_usd),
+    currentEquityUsd: Number(row.current_equity_usd),
+    highWaterMarkUsd: Number(row.high_water_mark_usd),
+    contractualTrailingFloorUsd: Number(row.contractual_trailing_floor_usd),
+    internalTrailingFloorUsd: Number(row.internal_trailing_floor_usd),
+    isFloorLocked: Boolean(row.is_floor_locked),
+    profitTargetUsd: Number(row.profit_target_usd),
+    netPnlUsd: Number(row.net_pnl_usd),
+    netPnlPct: Number(row.net_pnl_pct),
+    maxDrawdownUsd: Number(row.max_drawdown_usd),
+    tradesCount: Number(row.trades_count),
+    winCount: Number(row.win_count),
+    lossCount: Number(row.loss_count),
+    startedAt: Number(row.started_at),
+    closedAt: row.closed_at === null || row.closed_at === undefined ? null : Number(row.closed_at),
+  };
+}
+
+function mapPropFirmDailySnapshotRow(row: PropFirmDailySnapshotRow): PropFirmDailySnapshot {
+  return {
+    utcDate: row.utc_date,
+    cycleId: row.cycle_id,
+    dayStartEquityUsd: Number(row.day_start_equity_usd),
+    currentEquityUsd: Number(row.current_equity_usd),
+    dailyPnlUsd: Number(row.daily_pnl_usd),
+    dailyMinEquityUsd: Number(row.daily_min_equity_usd),
+    dailyHalted: Boolean(row.daily_halted),
+    updatedAt: Number(row.updated_at),
+  };
+}
+
+const PROPFIRM_CYCLE_PATCH_COLUMNS: ReadonlyArray<{
+  key: keyof Omit<PropFirmChallengeCycle, 'id'>;
+  column: string;
+  isBoolean?: boolean;
+}> = [
+  { key: 'cycleNumber', column: 'cycle_number' },
+  { key: 'status', column: 'status' },
+  { key: 'startingBalanceUsd', column: 'starting_balance_usd' },
+  { key: 'currentEquityUsd', column: 'current_equity_usd' },
+  { key: 'highWaterMarkUsd', column: 'high_water_mark_usd' },
+  { key: 'contractualTrailingFloorUsd', column: 'contractual_trailing_floor_usd' },
+  { key: 'internalTrailingFloorUsd', column: 'internal_trailing_floor_usd' },
+  { key: 'isFloorLocked', column: 'is_floor_locked', isBoolean: true },
+  { key: 'profitTargetUsd', column: 'profit_target_usd' },
+  { key: 'netPnlUsd', column: 'net_pnl_usd' },
+  { key: 'netPnlPct', column: 'net_pnl_pct' },
+  { key: 'maxDrawdownUsd', column: 'max_drawdown_usd' },
+  { key: 'tradesCount', column: 'trades_count' },
+  { key: 'winCount', column: 'win_count' },
+  { key: 'lossCount', column: 'loss_count' },
+  { key: 'startedAt', column: 'started_at' },
+  { key: 'closedAt', column: 'closed_at' },
+];
+
+/**
+ * Repository for Upcomers $50K Prop Firm challenge cycles and UTC daily snapshots.
+ */
+export class PropFirmRepo {
+  constructor(private db: DatabaseSync) {}
+
+  public createCycle(cycle: PropFirmChallengeCycle): PropFirmChallengeCycle {
+    const normalized: PropFirmChallengeCycle = {
+      ...cycle,
+      isFloorLocked: Boolean(cycle.isFloorLocked),
+      closedAt: cycle.closedAt ?? null,
+    };
+
+    const stmt = this.db.prepare(`
+      INSERT INTO propfirm_challenge_cycles (
+        id, cycle_number, status, starting_balance_usd, current_equity_usd,
+        high_water_mark_usd, contractual_trailing_floor_usd, internal_trailing_floor_usd,
+        is_floor_locked, profit_target_usd, net_pnl_usd, net_pnl_pct,
+        max_drawdown_usd, trades_count, win_count, loss_count,
+        started_at, closed_at
+      ) VALUES (
+        ?, ?, ?, ?, ?,
+        ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?
+      )
+    `);
+
+    stmt.run(
+      normalized.id,
+      normalized.cycleNumber,
+      normalized.status,
+      normalized.startingBalanceUsd,
+      normalized.currentEquityUsd,
+      normalized.highWaterMarkUsd,
+      normalized.contractualTrailingFloorUsd,
+      normalized.internalTrailingFloorUsd,
+      normalized.isFloorLocked ? 1 : 0,
+      normalized.profitTargetUsd,
+      normalized.netPnlUsd,
+      normalized.netPnlPct,
+      normalized.maxDrawdownUsd,
+      normalized.tradesCount,
+      normalized.winCount,
+      normalized.lossCount,
+      normalized.startedAt,
+      normalized.closedAt
+    );
+
+    return normalized;
+  }
+
+  public getActiveCycle(): PropFirmChallengeCycle | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM propfirm_challenge_cycles
+      WHERE status IN ('ACTIVE', 'HALTED_DAILY_BUFFER', 'HALTED_TRAILING_BUFFER')
+      ORDER BY cycle_number DESC, started_at DESC
+      LIMIT 1
+    `);
+    const row = stmt.get() as PropFirmChallengeCycleRow | undefined;
+    return row ? mapPropFirmCycleRow(row) : null;
+  }
+
+  public getLatestCycle(): PropFirmChallengeCycle | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM propfirm_challenge_cycles
+      ORDER BY cycle_number DESC, started_at DESC
+      LIMIT 1
+    `);
+    const row = stmt.get() as PropFirmChallengeCycleRow | undefined;
+    return row ? mapPropFirmCycleRow(row) : null;
+  }
+
+  public listCycles(limit: number = 50): PropFirmChallengeCycle[] {
+    const safeLimit = Math.max(0, Math.floor(limit));
+    if (safeLimit === 0) return [];
+
+    const stmt = this.db.prepare(`
+      SELECT * FROM propfirm_challenge_cycles
+      ORDER BY cycle_number DESC, started_at DESC
+      LIMIT ?
+    `);
+    const rows = stmt.all(safeLimit) as unknown as PropFirmChallengeCycleRow[];
+    return rows.map(mapPropFirmCycleRow);
+  }
+
+  public updateCycle(id: string, patch: Partial<PropFirmChallengeCycle>): void {
+    const clauses: string[] = [];
+    const values: Array<string | number | null> = [];
+
+    for (const { key, column, isBoolean } of PROPFIRM_CYCLE_PATCH_COLUMNS) {
+      const val = patch[key];
+      if (val !== undefined) {
+        clauses.push(`${column} = ?`);
+        if (isBoolean) {
+          values.push(val ? 1 : 0);
+        } else {
+          values.push((val as string | number | null) ?? null);
+        }
+      }
+    }
+
+    if (clauses.length === 0) return;
+
+    const stmt = this.db.prepare(
+      `UPDATE propfirm_challenge_cycles SET ${clauses.join(', ')} WHERE id = ?`
+    );
+    stmt.run(...values, id);
+  }
+
+  public getNextCycleNumber(): number {
+    const stmt = this.db.prepare(
+      'SELECT COALESCE(MAX(cycle_number), 0) AS max_num FROM propfirm_challenge_cycles'
+    );
+    const row = stmt.get() as { max_num: number } | undefined;
+    return Number(row?.max_num ?? 0) + 1;
+  }
+
+  public countConsecutivePassedCycles(): number {
+    const stmt = this.db.prepare(`
+      SELECT status FROM propfirm_challenge_cycles
+      ORDER BY cycle_number DESC, started_at DESC
+    `);
+    const rows = stmt.all() as unknown as Array<{ status: PropFirmCycleStatus }>;
+
+    let consecutive = 0;
+    let seenTerminal = false;
+
+    for (const row of rows) {
+      if (row.status === 'PASSED') {
+        seenTerminal = true;
+        consecutive += 1;
+      } else if (row.status === 'FAILED_DAILY' || row.status === 'FAILED_TRAILING') {
+        break;
+      } else if (!seenTerminal) {
+        // Skip non-terminal active/halted cycle(s) at the head
+        continue;
+      } else {
+        break;
+      }
+    }
+
+    return consecutive;
+  }
+
+  public getDailySnapshot(utcDate: string, cycleId: string): PropFirmDailySnapshot | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM propfirm_daily_snapshots
+      WHERE utc_date = ? AND cycle_id = ?
+    `);
+    const row = stmt.get(utcDate, cycleId) as PropFirmDailySnapshotRow | undefined;
+    return row ? mapPropFirmDailySnapshotRow(row) : null;
+  }
+
+  public upsertDailySnapshot(snapshot: PropFirmDailySnapshot): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO propfirm_daily_snapshots (
+        utc_date, cycle_id, day_start_equity_usd, current_equity_usd,
+        daily_pnl_usd, daily_min_equity_usd, daily_halted, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(utc_date, cycle_id) DO UPDATE SET
+        day_start_equity_usd = excluded.day_start_equity_usd,
+        current_equity_usd = excluded.current_equity_usd,
+        daily_pnl_usd = excluded.daily_pnl_usd,
+        daily_min_equity_usd = excluded.daily_min_equity_usd,
+        daily_halted = excluded.daily_halted,
+        updated_at = excluded.updated_at
+    `);
+
+    stmt.run(
+      snapshot.utcDate,
+      snapshot.cycleId,
+      snapshot.dayStartEquityUsd,
+      snapshot.currentEquityUsd,
+      snapshot.dailyPnlUsd,
+      snapshot.dailyMinEquityUsd,
+      snapshot.dailyHalted ? 1 : 0,
+      snapshot.updatedAt
+    );
   }
 }
 

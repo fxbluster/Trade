@@ -24,6 +24,7 @@ import { TradeManager } from './tradeManager.js';
 import type { BrokerAdapter } from '../exchange/broker.js';
 import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
 import type { AdaptiveSizingEngine } from '../quant/adaptiveSizingEngine.js';
+import type { PropFirmRiskGuard } from '../quant/propFirmRiskGuard.js';
 import type { ChasingExecutionEngine } from './chasingExecutionEngine.js';
 import type { TwapExecutionSlicer } from './twapExecutionSlicer.js';
 
@@ -60,6 +61,7 @@ export interface AutoPilotManagerOptions {
   broadcastWs?: (msg: WsServerMessage) => void;
   config?: Partial<AutoPilotConfig>;
   adaptiveSizingEngine?: AdaptiveSizingEngine;
+  propFirmRiskGuard?: PropFirmRiskGuard;
   chasingExecutionEngine?: ChasingExecutionEngine;
   twapExecutionSlicer?: TwapExecutionSlicer;
   executionChaseLogsRepo?: ExecutionChaseLogsRepo;
@@ -97,6 +99,7 @@ export class AutoPilotManager {
   private settingsRepo: SettingsRepo;
   public readonly executionChaseLogsRepo: ExecutionChaseLogsRepo;
   public readonly adaptiveSizingEngine?: AdaptiveSizingEngine;
+  public readonly propFirmRiskGuard?: PropFirmRiskGuard;
   public readonly chasingExecutionEngine?: ChasingExecutionEngine;
   public readonly twapExecutionSlicer?: TwapExecutionSlicer;
   private latestSizingBreakdown: SizingBreakdown | null = null;
@@ -136,6 +139,7 @@ export class AutoPilotManager {
   private cooldownUntil: number = 0;
   private oppositeConsensusTickCount: number = 0;
   private peakPriceByTrade: Map<string, number> = new Map();
+  private recordedClosedTradeIds: Set<string> = new Set();
 
   constructor(options: AutoPilotManagerOptions) {
     this.db = options.db;
@@ -149,6 +153,7 @@ export class AutoPilotManager {
     this.onTelemetryEvent = options.onTelemetryEvent;
     this.onStateTransition = options.onStateTransition;
     this.adaptiveSizingEngine = options.adaptiveSizingEngine;
+    this.propFirmRiskGuard = options.propFirmRiskGuard;
     this.chasingExecutionEngine = options.chasingExecutionEngine;
     this.twapExecutionSlicer = options.twapExecutionSlicer;
     this.executionChaseLogsRepo =
@@ -533,6 +538,7 @@ export class AutoPilotManager {
 
     if (!this.config.enabled) return;
     if (this.isCooldownActive()) return;
+    if (this.state === 'CLOSING') return;
 
     // Position Management Branch: when position is open or while in LIMIT_CHASING
     if (this.openTradeId) {
@@ -561,6 +567,34 @@ export class AutoPilotManager {
     // Re-entry lockout check (180s mandatory cooldown after position exit)
     if (Date.now() - this.lastExitTime < 180_000) {
       return;
+    }
+
+    // 0. Upcomers Prop Firm Challenge Risk Guard Pre-Entry Gate
+    if (this.propFirmRiskGuard) {
+      const guardCheck = this.propFirmRiskGuard.canOpenTrade();
+      if (!guardCheck.allowed) {
+        const nextBlockReason: BlockReason =
+          guardCheck.reason === 'UPCOMERS_DAILY_HALT' ||
+          guardCheck.reason === 'UPCOMERS_TRAILING_HALT'
+            ? guardCheck.reason
+            : 'BLOCKED_DAILY_MAX_LOSS';
+        const nextMsg =
+          guardCheck.details ??
+          `Upcomers Risk Guard blocked entry (${guardCheck.reason ?? 'HALTED'})`;
+        if (this.blockReason !== nextBlockReason || this.statusMessage !== nextMsg) {
+          this.blockReason = nextBlockReason;
+          this.statusMessage = nextMsg;
+          this.broadcastStatus();
+        }
+        return;
+      } else if (
+        this.blockReason === 'UPCOMERS_DAILY_HALT' ||
+        this.blockReason === 'UPCOMERS_TRAILING_HALT'
+      ) {
+        this.blockReason = null;
+        this.statusMessage = null;
+        this.broadcastStatus();
+      }
     }
 
     const nowUtc = new Date();
@@ -762,9 +796,55 @@ export class AutoPilotManager {
         }
       }
 
-      const notionalUsd = marginUsd * leverage;
-      const targetQty = Number((notionalUsd / markPrice).toFixed(4));
+      let notionalUsd = marginUsd * leverage;
+      let targetQty = Number((notionalUsd / markPrice).toFixed(4));
       const refPrice = this.chasingExecutionEngine ? markPrice : limitPrice;
+
+      // Dead-SL Armor Clamping:
+      const estLiq = calculateLiquidationPrice(side, refPrice, leverage, 0.005);
+      const rawSl = side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr;
+      const stopLoss = Number(
+        (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(2)
+      );
+
+      // Upcomers $250/trade max risk quantity clamp (fail-closed if <= 0)
+      if (this.propFirmRiskGuard) {
+        const clamped = this.propFirmRiskGuard.clampEntryQuantity({
+          desiredQty: targetQty,
+          entryPrice: refPrice,
+          stopLossPrice: stopLoss,
+        });
+        if (clamped.qty <= 0) {
+          this.state = 'IDLE';
+          this.activeEntryContext = null;
+          this.broadcastStatus();
+          this.emitStateTransition('IDLE');
+          this.onOrderDispatched?.({
+            symbol,
+            side,
+            action: 'FAILED',
+            price: refPrice,
+            marginUsd: 0,
+            leverage,
+            atr,
+            errorMessage:
+              'UPCOMERS_RISK_CLAMP_ZERO_QTY: Invalid or zero stop-loss distance failed $250 max risk clamp',
+            compositeScore: snapshot?.compositeScore,
+            pillarsJson: snapshot?.pillars ? JSON.stringify(snapshot.pillars) : undefined,
+            macroRegime: snapshot?.macroRegime,
+            macroVetoActive: snapshot?.macroVetoActive,
+          });
+          return;
+        }
+        if (clamped.clampedByRisk) {
+          targetQty = clamped.qty;
+          notionalUsd = Number((targetQty * refPrice).toFixed(2));
+          marginUsd = Number((notionalUsd / leverage).toFixed(2));
+          if (balance > 0) {
+            marginAllocationPct = Number(((marginUsd / balance) * 100).toFixed(2));
+          }
+        }
+      }
 
       const sizingTelemetry = this.buildSizingTelemetry(
         this.adaptiveSizingEngine ? this.latestSizingBreakdown : null,
@@ -794,13 +874,6 @@ export class AutoPilotManager {
       const serializedFactorTelemetry = JSON.stringify(signalConfirmedEvent.activeFactors);
       const serializedSizingBreakdown = JSON.stringify(sizingTelemetry);
       const noiseBandState = signalConfirmedEvent.noiseBandActive ? 1 : 0;
-
-      // Dead-SL Armor Clamping:
-      const estLiq = calculateLiquidationPrice(side, refPrice, leverage, 0.005);
-      const rawSl = side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr;
-      const stopLoss = Number(
-        (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(2)
-      );
 
       // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
       const risk = Math.abs(refPrice - stopLoss);
@@ -1244,6 +1317,41 @@ export class AutoPilotManager {
       return;
     }
 
+    // Case 1b: Upcomers Intra-Tick Floating Drawdown Watchdog ($1,250 Daily / $2,500 Trailing)
+    if (this.propFirmRiskGuard) {
+      const qty = trade.remaining_qty > 0 ? trade.remaining_qty : trade.quantity;
+      const rawUnrealizedPnl =
+        trade.side === 'BUY'
+          ? (markPrice - trade.entry_price) * qty
+          : (trade.entry_price - markPrice) * qty;
+      const unrealizedPnlUsd = Number(
+        (rawUnrealizedPnl + (trade.realized_pnl ?? 0) - (trade.fees_usd ?? 0)).toFixed(2)
+      );
+      const evalResult = this.propFirmRiskGuard.evaluateLiveEquity({
+        realizedCyclePnlUsd: this.propFirmRiskGuard.getCurrentRealizedCyclePnl(),
+        unrealizedPnlUsd,
+        liveWalletBalanceUsd: this.cachedBalance,
+      });
+
+      if (evalResult.emergencyExitReason) {
+        console.warn(
+          `[AutoPilot PropFirm Guard] ${evalResult.emergencyExitReason} triggered on ${symbol} (floating=${unrealizedPnlUsd.toFixed(2)}). Emergency closing.`
+        );
+        this.state = 'CLOSING';
+        this.blockReason = evalResult.emergencyExitReason;
+        this.statusMessage = `Upcomers Risk Guard Halt (${evalResult.emergencyExitReason}) — emergency closing position`;
+        this.tradesRepo.update(trade.id, { status: 'CLOSING_IN_PROGRESS' });
+        this.broadcastStatus();
+        try {
+          await this.tradeManager.closePosition(symbol, evalResult.emergencyExitReason);
+        } finally {
+          const updated = this.tradesRepo.getById(this.openTradeId);
+          this.handlePositionClosed(updated);
+        }
+        return;
+      }
+    }
+
     if (trade.stop_loss && trade.stop_loss > 0) {
       if (trade.side === 'BUY' && markPrice <= trade.stop_loss) {
         console.warn(`[AutoPilot Watchdog] Long markPrice ${markPrice} <= SL ${trade.stop_loss}. Emergency closing.`);
@@ -1455,6 +1563,22 @@ export class AutoPilotManager {
    * Post-exit handling: evaluates consecutive losses, circuit breaker, and 180s re-entry lockout.
    */
   private handlePositionClosed(trade: TradeRecord | null): void {
+    if (
+      this.propFirmRiskGuard &&
+      trade &&
+      trade.status === 'CLOSED' &&
+      !this.recordedClosedTradeIds.has(trade.id)
+    ) {
+      this.recordedClosedTradeIds.add(trade.id);
+      const realizedNetPnlUsd = Number(
+        ((trade.realized_pnl ?? 0) - (trade.fees_usd ?? 0)).toFixed(2)
+      );
+      this.propFirmRiskGuard.recordTradeClosed({
+        realizedNetPnlUsd,
+        liveWalletBalanceUsd: this.cachedBalance,
+      });
+    }
+
     const isLoss = trade ? trade.realized_pnl < 0 : false;
 
     if (isLoss) {

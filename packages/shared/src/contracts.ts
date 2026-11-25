@@ -492,6 +492,10 @@ export type WsServerMessage =
   | {
       type: 'FACTOR_TELEMETRY';
       data: FactorTelemetryEvent;
+    }
+  | {
+      type: 'PROPFIRM_STATUS';
+      data: PropFirmStatusResponse;
     };
 
 // ----------------------------------------------------------------------------
@@ -871,6 +875,112 @@ export interface FactorTelemetryDbRecord {
   post_15m_mae: number | null;
   post_1h_mfe: number | null;
   post_1h_mae: number | null;
+}
+
+// ----------------------------------------------------------------------------
+// Upcomers $50,000 1-Step Thunderbolt Prop Firm Challenge Contracts
+// ----------------------------------------------------------------------------
+
+export interface UpcomersChallengeConfig {
+  accountSizeUsd: number;
+  profitTargetUsd: number;
+  contractualDailyLossUsd: number;
+  internalDailyHaltUsd: number;
+  contractualTrailingLossUsd: number;
+  internalTrailingHaltUsd: number;
+  trailingLockHwmUsd: number;
+  lockedTrailingFloorUsd: number;
+  maxRiskPerTradeUsd: number;
+  maxConcurrentPositions: number;
+}
+
+export const UPCOMERS_1STEP_50K_DEFAULT: UpcomersChallengeConfig = {
+  accountSizeUsd: 50_000,
+  profitTargetUsd: 2_500,
+  contractualDailyLossUsd: 1_500,
+  internalDailyHaltUsd: 1_250,
+  contractualTrailingLossUsd: 3_000,
+  internalTrailingHaltUsd: 2_500,
+  trailingLockHwmUsd: 53_000,
+  lockedTrailingFloorUsd: 50_000,
+  maxRiskPerTradeUsd: 250,
+  maxConcurrentPositions: 1,
+} as const;
+
+export type PropFirmCycleStatus =
+  | 'ACTIVE'
+  | 'PASSED'
+  | 'FAILED_DAILY'
+  | 'FAILED_TRAILING'
+  | 'HALTED_DAILY_BUFFER'
+  | 'HALTED_TRAILING_BUFFER';
+
+export type PropFirmQuestionVerdict = 'YES_PROFIT' | 'NO_LOSS' | 'WAITING';
+
+export interface PropFirmChallengeCycle {
+  id: string;
+  cycleNumber: number;
+  status: PropFirmCycleStatus;
+  startingBalanceUsd: number;
+  currentEquityUsd: number;
+  highWaterMarkUsd: number;
+  contractualTrailingFloorUsd: number;
+  internalTrailingFloorUsd: number;
+  isFloorLocked: boolean;
+  profitTargetUsd: number;
+  netPnlUsd: number;
+  netPnlPct: number;
+  maxDrawdownUsd: number;
+  tradesCount: number;
+  winCount: number;
+  lossCount: number;
+  startedAt: number;
+  closedAt: number | null;
+}
+
+export interface PropFirmDailySnapshot {
+  utcDate: string;
+  cycleId: string;
+  dayStartEquityUsd: number;
+  currentEquityUsd: number;
+  dailyPnlUsd: number;
+  dailyMinEquityUsd: number;
+  dailyHalted: boolean;
+  updatedAt: number;
+}
+
+export interface PropFirmStatusResponse {
+  cycle: PropFirmChallengeCycle;
+  verdict: PropFirmQuestionVerdict;
+  dailyBaselineEquityUsd: number;
+  dailyPnlUsd: number;
+  dailyLossUsedUsd: number;
+  dailyBufferRemainingUsd: number;
+  dailyBufferRemainingPct: number;
+  trailingLossUsedUsd: number;
+  trailingBufferRemainingUsd: number;
+  trailingBufferRemainingPct: number;
+  targetProgressPct: number;
+  targetRemainingUsd: number;
+  liveWalletBalanceUsd: number;
+  needsTopUp: boolean;
+  topUpMessage: string | null;
+  consecutivePassedCycles: number;
+  requiredPassedCycles: number;
+  canTrade: boolean;
+  haltReason: BlockReason | string | null;
+  cycles: PropFirmChallengeCycle[];
+  updatedAt: number;
+}
+
+export interface PropFirmCertificateResponse {
+  certified: boolean;
+  consecutivePassedCycles: number;
+  requiredPassedCycles: number;
+  remainingCycles: number;
+  totalCompletedCycles: number;
+  cycles: PropFirmChallengeCycle[];
+  generatedAt: number;
 }
 
 export type {

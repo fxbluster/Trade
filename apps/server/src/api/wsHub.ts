@@ -12,6 +12,7 @@ import type {
   ConfluenceSnapshot,
   AutoPilotConfig,
   FactorTelemetryEvent,
+  PropFirmStatusResponse,
 } from '@tradeos/shared';
 import { SESSION_TOKEN } from '../config.js';
 
@@ -59,6 +60,11 @@ export class WsHub {
   private lastConfluenceBroadcastTime = 0;
   private pendingConfluence: ConfluenceSnapshot | null = null;
   private confluenceThrottleTimer: NodeJS.Timeout | null = null;
+
+  // 2Hz (500ms) rate throttling for PROPFIRM_STATUS broadcasts
+  private lastPropFirmBroadcastTime = 0;
+  private pendingPropFirmStatus: PropFirmStatusResponse | null = null;
+  private propFirmThrottleTimer: NodeJS.Timeout | null = null;
 
   constructor(options: WsHubOptions = {}) {
     this.sessionToken = options.sessionToken || SESSION_TOKEN;
@@ -308,6 +314,35 @@ export class WsHub {
   }
 
   /**
+   * Broadcasts Upcomers $50K Prop Firm status at a throttled rate of <= 2Hz (min 500ms interval).
+   */
+  public broadcastPropFirmStatus(status: PropFirmStatusResponse): void {
+    const now = Date.now();
+    this.pendingPropFirmStatus = status;
+
+    if (now - this.lastPropFirmBroadcastTime >= 500) {
+      this.flushPropFirmStatus();
+    } else if (!this.propFirmThrottleTimer) {
+      const delay = Math.max(10, 500 - (now - this.lastPropFirmBroadcastTime));
+      this.propFirmThrottleTimer = setTimeout(() => {
+        this.propFirmThrottleTimer = null;
+        this.flushPropFirmStatus();
+      }, delay);
+    }
+  }
+
+  private flushPropFirmStatus(): void {
+    if (!this.pendingPropFirmStatus) return;
+    this.lastPropFirmBroadcastTime = Date.now();
+    const msg: WsServerMessage = {
+      type: 'PROPFIRM_STATUS',
+      data: this.pendingPropFirmStatus,
+    };
+    this.pendingPropFirmStatus = null;
+    this.broadcast(msg);
+  }
+
+  /**
    * Broadcasts Auto-Pilot state machine status.
    */
   public broadcastAutoPilotStatus(data: {
@@ -456,6 +491,11 @@ export class WsHub {
       clearTimeout(this.confluenceThrottleTimer);
       this.confluenceThrottleTimer = null;
     }
+    if (this.propFirmThrottleTimer) {
+      clearTimeout(this.propFirmThrottleTimer);
+      this.propFirmThrottleTimer = null;
+    }
+    this.pendingPropFirmStatus = null;
     for (const client of this.clients) {
       if (client.authTimer) {
         clearTimeout(client.authTimer);

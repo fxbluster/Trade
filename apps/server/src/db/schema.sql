@@ -267,6 +267,45 @@ CREATE INDEX IF NOT EXISTS idx_factor_telemetry_factor_time ON factor_telemetry_
 CREATE INDEX IF NOT EXISTS idx_factor_telemetry_status ON factor_telemetry_records(status, symbol, timestamp);
 CREATE INDEX IF NOT EXISTS idx_factor_telemetry_event_id ON factor_telemetry_records(event_id);
 
+CREATE TABLE IF NOT EXISTS propfirm_challenge_cycles (
+  id TEXT PRIMARY KEY,
+  cycle_number INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  starting_balance_usd REAL NOT NULL,
+  current_equity_usd REAL NOT NULL,
+  high_water_mark_usd REAL NOT NULL,
+  contractual_trailing_floor_usd REAL NOT NULL,
+  internal_trailing_floor_usd REAL NOT NULL,
+  is_floor_locked INTEGER NOT NULL DEFAULT 0,
+  profit_target_usd REAL NOT NULL,
+  net_pnl_usd REAL NOT NULL DEFAULT 0,
+  net_pnl_pct REAL NOT NULL DEFAULT 0,
+  max_drawdown_usd REAL NOT NULL DEFAULT 0,
+  trades_count INTEGER NOT NULL DEFAULT 0,
+  win_count INTEGER NOT NULL DEFAULT 0,
+  loss_count INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER NOT NULL,
+  closed_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_propfirm_cycles_num ON propfirm_challenge_cycles(cycle_number DESC);
+CREATE INDEX IF NOT EXISTS idx_propfirm_cycles_status ON propfirm_challenge_cycles(status);
+
+CREATE TABLE IF NOT EXISTS propfirm_daily_snapshots (
+  utc_date TEXT NOT NULL,
+  cycle_id TEXT NOT NULL REFERENCES propfirm_challenge_cycles(id) ON DELETE CASCADE,
+  day_start_equity_usd REAL NOT NULL,
+  current_equity_usd REAL NOT NULL,
+  daily_pnl_usd REAL NOT NULL DEFAULT 0,
+  daily_min_equity_usd REAL NOT NULL,
+  daily_halted INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (utc_date, cycle_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_propfirm_daily_date ON propfirm_daily_snapshots(utc_date DESC);
+
+
 
 
 

@@ -28,6 +28,7 @@ import {
   FactorTelemetryRepo,
   FactorTelemetryRecordsRepo,
   ExecutionChaseLogsRepo,
+  PropFirmRepo,
 } from './db/sqlite.js';
 import { DecisionAuditService, computeSpearmanIC } from './services/decisionAuditService.js';
 import { PillarAttributionService } from './services/pillarAttributionService.js';
@@ -57,6 +58,7 @@ import { AdaptiveSizingEngine } from './quant/adaptiveSizingEngine.js';
 import { ChasingExecutionEngine } from './services/chasingExecutionEngine.js';
 import { TwapExecutionSlicer } from './services/twapExecutionSlicer.js';
 import { StrategyDecayEngine } from './quant/strategyDecayEngine.js';
+import { PropFirmRiskGuard } from './quant/propFirmRiskGuard.js';
 import { TradeManager } from './services/tradeManager.js';
 import { AutoPilotManager } from './services/autoPilotManager.js';
 import { PnlService } from './services/pnlService.js';
@@ -104,6 +106,7 @@ export async function bootstrapServer(): Promise<{
   strategyDecayEngine?: StrategyDecayEngine;
   factorTelemetryRepo?: FactorTelemetryRepo;
   executionChaseLogsRepo?: ExecutionChaseLogsRepo;
+  propFirmRiskGuard: PropFirmRiskGuard;
   close: () => Promise<void>;
 }> {
   // 1. Initialize SQLite WAL Database Engine
@@ -115,7 +118,11 @@ export async function bootstrapServer(): Promise<{
   const factorTelemetryRepo = new FactorTelemetryRepo(db);
   const factorTelemetryRecordsRepo = new FactorTelemetryRecordsRepo(db);
   const executionChaseLogsRepo = new ExecutionChaseLogsRepo(db);
+  const propFirmRepo = new PropFirmRepo(db);
   let wsHub: WsHub | null = null;
+  const propFirmRiskGuard = new PropFirmRiskGuard(propFirmRepo, {}, (st) =>
+    wsHub?.broadcastPropFirmStatus(st)
+  );
   const decisionAuditService = new DecisionAuditService(decisionLogsRepo, pillarRepo, {
     factorTelemetryRecordsRepo,
     executionChaseLogsRepo,
@@ -148,6 +155,8 @@ export async function bootstrapServer(): Promise<{
 
   // 3. State and Cache Management
   let activeSymbol = 'SOLUSDT';
+  let lastWalletBalanceUsd = 0;
+  let lastPropFirmEvalAt = 0;
   const markPriceMap = new Map<string, number>([['SOLUSDT', 0]]);
   const fundingRateMap = new Map<string, { rate: number | null; nextTime: number | null }>();
   const candleHistoryMap = new Map<string, KlineCandle[]>();
@@ -183,6 +192,9 @@ export async function bootstrapServer(): Promise<{
       unrealizedPnl: 0,
       currency: 'USDT',
     }));
+    if (Number.isFinite(account.walletBalance) && account.walletBalance > 0) {
+      lastWalletBalanceUsd = account.walletBalance;
+    }
 
     let activePosition = tradesRepo.getActivePosition(activeBroker.mode, sym);
     if (activePosition) {
@@ -370,6 +382,7 @@ export async function bootstrapServer(): Promise<{
     broker: activeBroker,
     confluenceEngine,
     adaptiveSizingEngine,
+    propFirmRiskGuard,
     chasingExecutionEngine,
     twapExecutionSlicer,
     executionChaseLogsRepo,
@@ -401,7 +414,13 @@ export async function bootstrapServer(): Promise<{
     (sym) => markPriceMap.get(sym) || 0,
     () => ({
       mode: activeBroker.mode,
-      getAccount: () => activeBroker.getAccount(),
+      getAccount: async () => {
+        const acc = await activeBroker.getAccount();
+        if (acc && Number.isFinite(acc.walletBalance) && acc.walletBalance > 0) {
+          lastWalletBalanceUsd = acc.walletBalance;
+        }
+        return acc;
+      },
     })
   );
 
@@ -510,8 +529,33 @@ export async function bootstrapServer(): Promise<{
       latestCandle
     );
 
-    // Autonomous Auto-Pilot Tick Evaluation
-    autoPilotManager.onTick(event.symbol, event.markPrice).catch(() => {});
+    // Autonomous Auto-Pilot Tick Evaluation & Live Prop Firm Equity Watchdog
+    autoPilotManager
+      .onTick(event.symbol, event.markPrice)
+      .catch(() => {})
+      .finally(() => {
+        const nowPropFirmTs = Date.now();
+        if (nowPropFirmTs - lastPropFirmEvalAt >= 500) {
+          lastPropFirmEvalAt = nowPropFirmTs;
+          const openPos = tradesRepo.getActivePosition(activeBroker.mode, event.symbol);
+          let liveUnrealizedPnl = 0;
+          if (openPos && openPos.remaining_qty > 0) {
+            const rawFloating =
+              openPos.side === 'BUY'
+                ? (event.markPrice - openPos.entry_price) * openPos.remaining_qty
+                : (openPos.entry_price - event.markPrice) * openPos.remaining_qty;
+            liveUnrealizedPnl = Number(
+              (rawFloating + (openPos.realized_pnl ?? 0) - (openPos.fees_usd ?? 0)).toFixed(2)
+            );
+          }
+          propFirmRiskGuard.evaluateLiveEquity({
+            realizedCyclePnlUsd: propFirmRiskGuard.getCurrentRealizedCyclePnl(),
+            unrealizedPnlUsd: liveUnrealizedPnl,
+            liveWalletBalanceUsd: lastWalletBalanceUsd,
+            nowMs: nowPropFirmTs,
+          });
+        }
+      });
   });
 
   streamsManager.onKline((event) => {
@@ -640,12 +684,14 @@ export async function bootstrapServer(): Promise<{
     tradeManager.reconcileWithExchange().catch(() => {});
   });
 
-  // 10. Register 16 REST API Endpoints
+  // 10. Register REST API Endpoints
   registerRoutes(app, {
     tradeManager,
     decisionAuditService,
     pillarAttributionService,
     pnlService,
+    propFirmRiskGuard,
+    getPropFirmWalletBalance: () => lastWalletBalanceUsd,
     get broker() {
       return activeBroker;
     },
@@ -654,6 +700,14 @@ export async function bootstrapServer(): Promise<{
     },
     onBrokerModeChange: (newAdapter) => {
       activeBroker = newAdapter;
+      newAdapter
+        .getAccount()
+        .then((acc) => {
+          if (acc && Number.isFinite(acc.walletBalance) && acc.walletBalance > 0) {
+            lastWalletBalanceUsd = acc.walletBalance;
+          }
+        })
+        .catch(() => null);
     },
     db,
     streamsManager,
@@ -799,6 +853,17 @@ export async function bootstrapServer(): Promise<{
 
   // Start Binance WebSocket streams for active symbol
   await streamsManager.start([activeSymbol]);
+
+  // Seed live wallet balance cache once on startup for PropFirmRiskGuard HUD
+  activeBroker
+    .getAccount()
+    .then((acc) => {
+      if (acc && Number.isFinite(acc.walletBalance) && acc.walletBalance > 0) {
+        lastWalletBalanceUsd = acc.walletBalance;
+        wsHub?.broadcastPropFirmStatus(propFirmRiskGuard.getStatus(lastWalletBalanceUsd));
+      }
+    })
+    .catch(() => null);
 
   // Pre-fetch initial mark price and candle history
   try {
@@ -963,6 +1028,7 @@ export async function bootstrapServer(): Promise<{
     strategyDecayEngine,
     factorTelemetryRepo,
     executionChaseLogsRepo,
+    propFirmRiskGuard,
     close,
   };
 }

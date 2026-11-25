@@ -4,10 +4,11 @@ import http from 'node:http';
 import WebSocket from 'ws';
 import polka, { type Request, type Response } from 'polka';
 import type { DatabaseSync } from 'node:sqlite';
-import type { AccountInfo, OpenOrderInfo, PropFirmStatusResponse } from '@tradeos/shared';
-import { initializeDatabase, PropFirmRepo } from '../../db/sqlite.js';
+import type { AccountInfo, OpenOrderInfo, PropFirmStatusResponse, TradeRecord } from '@tradeos/shared';
+import { initializeDatabase, PropFirmRepo, TradesRepo } from '../../db/sqlite.js';
 import { PropFirmRiskGuard } from '../../quant/propFirmRiskGuard.js';
 import { TradeManager } from '../../services/tradeManager.js';
+import type { AutoPilotManager } from '../../services/autoPilotManager.js';
 import { registerRoutes, type AppContext } from '../routes.js';
 import { WsHub } from '../wsHub.js';
 import { SESSION_TOKEN, PORT } from '../../config.js';
@@ -108,7 +109,8 @@ function createRouteInvoker(app: ReturnType<typeof polka>) {
 
       app.handler(req, res, {
         pathname: parsedUrl.pathname,
-        query: Object.fromEntries(parsedUrl.searchParams),
+        search: parsedUrl.search,
+        query: parsedUrl.searchParams.toString(),
       });
 
       process.nextTick(() => {
@@ -118,6 +120,40 @@ function createRouteInvoker(app: ReturnType<typeof polka>) {
         emitter.emit('end');
       });
     });
+  };
+}
+
+function makeOpenTrade(id: string, symbol: string = 'SOLUSDT'): TradeRecord {
+  return {
+    id,
+    symbol,
+    broker_mode: 'BINANCE_DEMO',
+    side: 'BUY',
+    status: 'OPEN',
+    entry_price: 150,
+    exit_price: null,
+    quantity: 10,
+    remaining_qty: 10,
+    leverage: 5,
+    margin_usd: 300,
+    stop_loss: null,
+    tp1: null,
+    tp2: null,
+    be_price: null,
+    is_breakeven: 0,
+    client_order_id: null,
+    client_sl_id: null,
+    client_tp1_id: null,
+    client_tp2_id: null,
+    entry_order_id: null,
+    sl_algo_id: null,
+    tp1_algo_id: null,
+    tp2_algo_id: null,
+    realized_pnl: 0,
+    fees_usd: 0,
+    exit_reason: null,
+    opened_at: Date.now(),
+    closed_at: null,
   };
 }
 
@@ -247,6 +283,157 @@ describe('Prop Firm REST Routes (/api/propfirm/*)', () => {
 
     const certRes = await invokeWithoutGuard('GET', '/api/propfirm/certificate');
     expect(certRes.status).toBe(503);
+
+    const newCycleRes = await invokeWithoutGuard('POST', '/api/propfirm/new-cycle');
+    expect(newCycleRes.status).toBe(503);
+  });
+
+  it('newCycle_requiresAuthAndRejectsOpenOrActiveAndAllowsTerminalOrTrailingHalt', async () => {
+    // 1. Unauthenticated POST /api/propfirm/new-cycle -> 401
+    const unauthRes = await invokeRoute('POST', '/api/propfirm/new-cycle', {}, {
+      authorization: '',
+    });
+    expect(unauthRes.status).toBe(401);
+
+    // 2. While Cycle #1 is ACTIVE -> 409 CYCLE_STILL_ACTIVE with Azerbaijani error
+    const activeRes = await invokeRoute('POST', '/api/propfirm/new-cycle', {});
+    expect(activeRes.status).toBe(409);
+    expect(activeRes.body.code).toBe('CYCLE_STILL_ACTIVE');
+    expect(typeof activeRes.body.error).toBe('string');
+    expect(activeRes.body.error).toMatch(/dövrə/i);
+
+    // 3. While Cycle #1 is HALTED_DAILY_BUFFER -> 409 CYCLE_STILL_ACTIVE
+    propFirmRiskGuard.recordTradeClosed({
+      realizedNetPnlUsd: -1250,
+      liveWalletBalanceUsd: walletBalance,
+    });
+    expect(propFirmRepo.getLatestCycle()?.status).toBe('HALTED_DAILY_BUFFER');
+
+    const haltedDailyRes = await invokeRoute('POST', '/api/propfirm/new-cycle', {});
+    expect(haltedDailyRes.status).toBe(409);
+    expect(haltedDailyRes.body.code).toBe('CYCLE_STILL_ACTIVE');
+
+    // 4. Transition Cycle #1 to HALTED_TRAILING_BUFFER, but with an open trade in SQLite -> 409 OPEN_POSITION_EXISTS
+    const cycle1 = propFirmRepo.getLatestCycle()!;
+    propFirmRepo.updateCycle(cycle1.id, { status: 'HALTED_TRAILING_BUFFER' });
+
+    const tradesRepo = new TradesRepo(db);
+    tradesRepo.insert(makeOpenTrade('open-trade-1', 'SOLUSDT'));
+
+    const openDbTradeRes = await invokeRoute('POST', '/api/propfirm/new-cycle', {});
+    expect(openDbTradeRes.status).toBe(409);
+    expect(openDbTradeRes.body.code).toBe('OPEN_POSITION_EXISTS');
+
+    // Close the SQLite trade so DB is flat
+    tradesRepo.update('open-trade-1', { status: 'CLOSED', closed_at: Date.now() });
+
+    // 5. Mock autoPilotManager in-flight states -> 409 OPEN_POSITION_EXISTS
+    let mockApState: string = 'PLACING_ORDER';
+    const clearPropFirmBlock = vi.fn(() => {
+      mockApState = 'IDLE';
+    });
+    const mockAutoPilotManager = {
+      getState: vi.fn(() => mockApState),
+      clearPropFirmBlock,
+    } as unknown as AutoPilotManager & { clearPropFirmBlock: ReturnType<typeof vi.fn> };
+
+    const apApp = polka();
+    registerRoutes(apApp, {
+      tradeManager,
+      broker: mockBroker,
+      db,
+      activeSymbol: 'SOLUSDT',
+      propFirmRiskGuard,
+      getPropFirmWalletBalance: () => walletBalance,
+      autoPilotManager: mockAutoPilotManager,
+    });
+    const invokeApRoute = createRouteInvoker(apApp);
+
+    for (const busyState of ['PLACING_ORDER', 'LIMIT_CHASING', 'POSITION_OPEN', 'CLOSING']) {
+      mockApState = busyState;
+      const busyRes = await invokeApRoute('POST', '/api/propfirm/new-cycle', {});
+      expect(busyRes.status).toBe(409);
+      expect(busyRes.body.code).toBe('OPEN_POSITION_EXISTS');
+    }
+
+    // 6. Flat & HALTED_TRAILING_BUFFER -> 200, finalizes Cycle #1 as FAILED_TRAILING, clears block, starts Cycle #2 ACTIVE
+    mockApState = 'IDLE';
+    const rolloverFromTrailingRes = await invokeApRoute('POST', '/api/propfirm/new-cycle', {});
+    expect(rolloverFromTrailingRes.status).toBe(200);
+    expect(rolloverFromTrailingRes.body.ok).toBe(true);
+    expect(rolloverFromTrailingRes.body.status.cycle.cycleNumber).toBe(2);
+    expect(rolloverFromTrailingRes.body.status.cycle.status).toBe('ACTIVE');
+    expect(rolloverFromTrailingRes.body.autoPilotState).toBe('IDLE');
+    expect(clearPropFirmBlock).toHaveBeenCalledTimes(1);
+
+    const cyclesAfterTrailing = propFirmRepo.listCycles(10);
+    const finalizedCycle1 = cyclesAfterTrailing.find((c) => c.cycleNumber === 1);
+    expect(finalizedCycle1?.status).toBe('FAILED_TRAILING');
+    expect(finalizedCycle1?.closedAt).not.toBeNull();
+
+    // 7. Pass Cycle #2, then fire concurrent Promise.all two POST /api/propfirm/new-cycle calls -> one 200, one 409, only 1 Cycle #3
+    propFirmRiskGuard.recordTradeClosed({
+      realizedNetPnlUsd: 2500,
+      liveWalletBalanceUsd: 52500,
+    });
+    expect(propFirmRepo.getLatestCycle()?.status).toBe('PASSED');
+
+    const [c1, c2] = await Promise.all([
+      invokeApRoute('POST', '/api/propfirm/new-cycle', {}),
+      invokeApRoute('POST', '/api/propfirm/new-cycle', {}),
+    ]);
+    const statuses = [c1.status, c2.status].sort((a, b) => a - b);
+    expect(statuses).toEqual([200, 409]);
+
+    const cyclesAfterConcurrent = propFirmRepo.listCycles(10);
+    const cycle3Rows = cyclesAfterConcurrent.filter((c) => c.cycleNumber === 3);
+    expect(cycle3Rows.length).toBe(1);
+    expect(cycle3Rows[0]?.status).toBe('ACTIVE');
+  });
+
+  it('certificate_supportsMarkdownAndRejectsInvalidFormat', async () => {
+    // Cycle #1 failed (-$1,520.00)
+    propFirmRiskGuard.recordTradeClosed({
+      realizedNetPnlUsd: -1520,
+      liveWalletBalanceUsd: walletBalance,
+    });
+    const c1 = propFirmRepo.getLatestCycle()!;
+    propFirmRepo.updateCycle(c1.id, {
+      status: 'FAILED_DAILY',
+      netPnlUsd: -1520,
+      realizedPnlUsd: -1520,
+      closedAt: Date.now(),
+    });
+
+    // Cycle #2 passed (+$2,510.00)
+    propFirmRiskGuard.startNewCycle(50_000);
+    propFirmRiskGuard.recordTradeClosed({
+      realizedNetPnlUsd: 2510,
+      liveWalletBalanceUsd: 52_510,
+    });
+
+    const mdRes = await invokeRoute('GET', '/api/propfirm/certificate?format=markdown');
+    expect(mdRes.status).toBe(200);
+    expect(mdRes.headers['content-type']).toBe('text/markdown; charset=utf-8');
+    expect(mdRes.headers['content-disposition']).toMatch(
+      /^attachment; filename="upcomers-50k-certificate-\d{4}-\d{2}-\d{2}\.md"$/
+    );
+    expect(typeof mdRes.body).toBe('string');
+    expect(mdRes.body).toContain('-$1,520.00');
+    expect(mdRes.body).toContain('+$2,510.00');
+    expect(mdRes.body).not.toContain('$-');
+
+    const badRes = await invokeRoute('GET', '/api/propfirm/certificate?format=xml');
+    expect(badRes.status).toBe(400);
+    expect(typeof badRes.body.error).toBe('string');
+  });
+
+  it('symbol_rejectsSwitchWhenPositionOpen', async () => {
+    const tradesRepo = new TradesRepo(db);
+    tradesRepo.insert(makeOpenTrade('open-trade-sym-1', 'SOLUSDT'));
+
+    const res = await invokeRoute('POST', '/api/symbol', { symbol: 'BTCUSDT' });
+    expect(res.status).toBe(409);
   });
 });
 

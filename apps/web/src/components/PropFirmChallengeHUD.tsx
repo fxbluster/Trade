@@ -6,12 +6,21 @@ import {
   ChevronDown,
   ChevronUp,
   Lock,
+  RotateCcw,
   ShieldCheck,
   Target,
   Trophy,
+  X,
 } from 'lucide-react';
 import { useMarketStore } from '../store/useMarketStore';
 import { formatUsd } from '../lib/formatters';
+
+const ACTIVE_AUTOPILOT_STATES = new Set([
+  'PLACING_ORDER',
+  'LIMIT_CHASING',
+  'POSITION_OPEN',
+  'CLOSING',
+]);
 
 function clampPct(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -89,7 +98,12 @@ function getVerdictMeta(verdict: PropFirmQuestionVerdict): {
 
 export const PropFirmChallengeHUD: React.FC = () => {
   const status = useMarketStore((s) => s.propFirmStatus);
+  const activePosition = useMarketStore((s) => s.activePosition);
+  const autoPilotState = useMarketStore((s) => s.autoPilot.state);
+  const startNewPropFirmCycle = useMarketStore((s) => s.startNewPropFirmCycle);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isStartingCycle, setIsStartingCycle] = useState(false);
+  const [cycleError, setCycleError] = useState<string | null>(null);
 
   const cycle = status?.cycle ?? null;
   const verdict: PropFirmQuestionVerdict = status?.verdict ?? 'WAITING';
@@ -130,105 +144,172 @@ export const PropFirmChallengeHUD: React.FC = () => {
   const historyRows: PropFirmChallengeCycle[] =
     status?.cycles && status.cycles.length > 0 ? status.cycles : cycle ? [cycle] : [];
 
+  const canShowNewCycleBtn = Boolean(
+    cycle &&
+      (cycle.status === 'PASSED' ||
+        cycle.status === 'FAILED_DAILY' ||
+        cycle.status === 'FAILED_TRAILING' ||
+        cycle.status === 'HALTED_TRAILING_BUFFER')
+  );
+
+  const isNewCycleDisabled =
+    (activePosition !== null && activePosition.status !== 'CLOSED') ||
+    isStartingCycle ||
+    ACTIVE_AUTOPILOT_STATES.has(autoPilotState);
+
+  const handleStartNewCycle = async () => {
+    if (isNewCycleDisabled) return;
+    setIsStartingCycle(true);
+    setCycleError(null);
+    try {
+      await startNewPropFirmCycle();
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Yeni dövrə başladılarkən xəta baş verdi.';
+      setCycleError(msg);
+    } finally {
+      setIsStartingCycle(false);
+    }
+  };
+
   return (
     <div
       data-testid="propfirm-challenge-hud"
-      className="flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg px-2.5 py-2 space-y-1.5 font-mono text-xs select-none"
+      className="flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg px-2.5 py-1 space-y-1 font-mono text-xs select-none"
     >
       {/* Testnet Top-Up Reminder Banner */}
       {status?.needsTopUp && (
         <div
           data-testid="propfirm-topup-banner"
-          className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1 bg-[#f0b90b]/15 border border-[#f0b90b]/50 rounded text-[#f0b90b] text-[11px] font-bold"
+          className="flex items-center justify-between gap-2 px-2 py-0.5 bg-[#f0b90b]/15 border border-[#f0b90b]/50 rounded text-[#f0b90b] text-[10px] font-bold leading-tight"
         >
-          <div className="flex items-center space-x-1.5">
-            <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 text-[#f0b90b]" />
+          <div className="flex items-center space-x-1.5 min-w-0">
+            <AlertTriangle className="w-3 h-3 flex-shrink-0 text-[#f0b90b]" />
             <span className="tabular-nums">
-              TESTNET TOP-UP TƏLƏB OLUNUR: Faktiki balans {formatUsd(status.liveWalletBalanceUsd)} / $50,000.00 —{' '}
-              {status.topUpMessage
-                ? status.topUpMessage
-                : 'Binance Demo Faucet vasitəsilə USDT balansını $50,000.00-ə tamamlayın.'}
-              {status.topUpMessage && !/faucet/i.test(status.topUpMessage) ? ' (Binance Demo Faucet)' : ''}
+              Balans {formatUsd(status.liveWalletBalanceUsd)} / $50,000.00 — Simulyasiya $50,000.00 kapitala sabitlənib; real test üçün tamamlayın:
             </span>
           </div>
+          <a
+            data-testid="propfirm-faucet-link"
+            href="https://testnet.binancefuture.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 px-1.5 py-0 rounded bg-[#f0b90b]/20 hover:bg-[#f0b90b]/30 border border-[#f0b90b]/60 text-[#f0b90b] text-[10px] font-bold whitespace-nowrap flex-shrink-0 transition-colors"
+          >
+            <span>Binance Demo Faucet ↗</span>
+          </a>
         </div>
       )}
 
       {/* Header Bar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 pb-1.5 border-b border-[#151d2c]">
-        <div className="flex items-center space-x-2">
+      <div className="flex flex-wrap items-center justify-between gap-1.5 pb-0.5 border-b border-[#151d2c]">
+        <div className="flex items-center space-x-1.5">
           <Trophy className="w-3.5 h-3.5 text-[#f0b90b] flex-shrink-0" />
-          <span className="font-bold text-[#e6edf3] tracking-wide">
+          <span className="font-bold text-[11px] text-[#e6edf3] tracking-wide whitespace-nowrap">
             Upcomers $50K Challenge (Sadə Dildə)
           </span>
           {cycle && (
-            <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#151d2c] text-[#7d8590] border border-[#151d2c] tabular-nums">
+            <span className="px-1.5 py-0 rounded text-[10px] bg-[#151d2c] text-[#7d8590] border border-[#151d2c] tabular-nums whitespace-nowrap">
               Dövrə #{cycle.cycleNumber}
             </span>
           )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1">
           {isFloorLocked && (
             <span
               data-testid="propfirm-floor-locked-badge"
-              className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-bold bg-[#0ecb81]/15 text-[#0ecb81] border border-[#0ecb81]/40 tabular-nums"
+              className="inline-flex items-center space-x-1 px-1.5 py-0 rounded text-[10px] font-bold bg-[#0ecb81]/15 text-[#0ecb81] border border-[#0ecb81]/40 tabular-nums whitespace-nowrap"
             >
-              <Lock className="w-3 h-3" />
+              <Lock className="w-2.5 h-2.5" />
               <span>FLOOR LOCKED: $50,000</span>
             </span>
           )}
 
           <span
             data-testid="propfirm-certificate-badge"
-            className={`inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-bold border tabular-nums ${
+            className={`inline-flex items-center space-x-1 px-1.5 py-0 rounded text-[10px] font-bold border tabular-nums whitespace-nowrap ${
               isCertified
                 ? 'bg-[#0ecb81]/20 text-[#0ecb81] border-[#0ecb81]/50'
                 : 'bg-[#151d2c] text-[#e6edf3] border-[#263248]'
             }`}
           >
-            <Award className="w-3 h-3 text-[#f0b90b]" />
+            <Award className="w-2.5 h-2.5 text-[#f0b90b]" />
             <span>
               Sertifikat: {consecutivePassed} / {requiredPassed} Uğurlu Dövrə
             </span>
           </span>
 
+          {canShowNewCycleBtn && (
+            <button
+              type="button"
+              data-testid="propfirm-new-cycle-btn"
+              disabled={isNewCycleDisabled}
+              onClick={handleStartNewCycle}
+              className="inline-flex items-center space-x-1 px-1.5 py-0 rounded text-[10px] font-bold bg-[#2962ff]/20 hover:bg-[#2962ff]/30 disabled:opacity-45 disabled:cursor-not-allowed text-[#e6edf3] border border-[#2962ff]/60 transition-colors whitespace-nowrap"
+            >
+              <RotateCcw className="w-2.5 h-2.5 text-[#2962ff]" />
+              <span>{isStartingCycle ? 'Başladılır...' : 'Yeni Dövrə Başlat'}</span>
+            </button>
+          )}
+
           <button
             type="button"
             data-testid="propfirm-history-toggle"
             onClick={() => setIsHistoryOpen((prev) => !prev)}
-            className="inline-flex items-center space-x-1 px-2 py-0.5 rounded text-[10px] font-bold bg-[#020305] hover:bg-[#151d2c] text-[#e6edf3] border border-[#151d2c] transition-colors"
+            className="inline-flex items-center space-x-1 px-1.5 py-0 rounded text-[10px] font-bold bg-[#020305] hover:bg-[#151d2c] text-[#e6edf3] border border-[#151d2c] transition-colors whitespace-nowrap"
           >
             <span>Açılan Tarixçə Cədvəli</span>
             {isHistoryOpen ? (
-              <ChevronUp className="w-3 h-3 text-[#7d8590]" />
+              <ChevronUp className="w-2.5 h-2.5 text-[#7d8590]" />
             ) : (
-              <ChevronDown className="w-3 h-3 text-[#7d8590]" />
+              <ChevronDown className="w-2.5 h-2.5 text-[#7d8590]" />
             )}
           </button>
         </div>
       </div>
 
+      {/* Dismissible Cycle Rollover Error Alert */}
+      {cycleError && (
+        <div
+          data-testid="propfirm-new-cycle-error"
+          role="alert"
+          className="flex items-center justify-between gap-2 px-2 py-0.5 bg-[#f6465d]/15 border border-[#f6465d]/50 rounded text-[#f6465d] text-[10px] font-bold leading-tight"
+        >
+          <span>{cycleError}</span>
+          <button
+            type="button"
+            aria-label="Xətanı bağla"
+            onClick={() => setCycleError(null)}
+            className="p-0.5 text-[#f6465d] hover:text-[#e6edf3] transition-colors flex-shrink-0"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
+
       {/* Main Compact 3-Column Metrics Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 items-stretch">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-1.5 items-stretch">
         {/* 1. "Doğurdan Qazanırammı?" Verdict Box */}
         <div
           data-testid="propfirm-verdict-box"
-          className={`lg:col-span-4 flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border ${verdictMeta.boxClass}`}
+          className={`lg:col-span-3 flex items-center justify-between gap-1.5 px-2 py-1 rounded border ${verdictMeta.boxClass}`}
         >
-          <div className="flex flex-col min-w-0">
-            <span className="text-[10px] text-[#7d8590] uppercase tracking-wide">
+          <div className="flex flex-col min-w-0 leading-tight">
+            <span className="text-[9px] text-[#7d8590] uppercase tracking-wide whitespace-nowrap">
               Doğurdan Qazanırammı?
             </span>
-            <span className="font-bold text-xs tracking-wide truncate">
+            <span className="font-bold text-[10px] tracking-wide whitespace-nowrap">
               {verdictMeta.label}
             </span>
           </div>
-          <div className="flex flex-col items-end tabular-nums flex-shrink-0">
-            <span className={`font-bold text-sm leading-tight ${verdictMeta.valueClass}`}>
+          <div className="flex flex-col items-end tabular-nums flex-shrink-0 leading-tight">
+            <span className={`font-bold text-xs leading-tight ${verdictMeta.valueClass}`}>
               {formatUsd(netPnlUsd, true)}
             </span>
-            <span className={`text-[10px] font-semibold ${verdictMeta.valueClass}`}>
+            <span className={`text-[9px] font-semibold ${verdictMeta.valueClass}`}>
               ({formatSignedPercent(netPnlPct)})
             </span>
           </div>
@@ -237,15 +318,24 @@ export const PropFirmChallengeHUD: React.FC = () => {
         {/* 2. Upcomers $2,500 Target Progress Bar */}
         <div
           data-testid="propfirm-target-progress"
-          className="lg:col-span-4 flex flex-col justify-center px-2.5 py-1.5 rounded bg-[#020305] border border-[#151d2c] space-y-1"
+          className="lg:col-span-4 flex flex-col justify-center px-2 py-1 rounded bg-[#020305] border border-[#151d2c] space-y-0.5"
         >
-          <div className="flex items-center space-x-1 text-[10px] text-[#e6edf3] tabular-nums leading-tight">
-            <Target className="w-3 h-3 text-[#0ecb81] flex-shrink-0" />
-            <span className="truncate">
-              Hədəf: +$2,500.00 | Cari: {formatUsd(netPnlUsd, true)} ({targetProgressPct.toFixed(1)}% Tamamlandı) | Qalan: {formatUsd(targetRemainingUsd)}
+          <div className="flex items-center justify-between gap-2 text-[10px] text-[#e6edf3] whitespace-nowrap tabular-nums leading-tight">
+            <span className="inline-flex items-center gap-1">
+              <Target className="w-3 h-3 text-[#0ecb81] flex-shrink-0" />
+              <span>Hədəf: +$2,500.00</span>
+            </span>
+            <span className="font-semibold text-[#e6edf3]">
+              Qalan: {formatUsd(targetRemainingUsd)}
             </span>
           </div>
-          <div className="w-full h-1.5 bg-[#080c14] border border-[#151d2c] rounded-full overflow-hidden">
+          <div className="flex items-center justify-between gap-2 text-[10px] text-[#7d8590] whitespace-nowrap tabular-nums leading-tight">
+            <span>
+              Cari: <span className="font-bold text-[#e6edf3]">{formatUsd(netPnlUsd, true)}</span>
+            </span>
+            <span>{targetProgressPct.toFixed(1)}% Tamamlandı</span>
+          </div>
+          <div className="w-full h-1 bg-[#080c14] border border-[#151d2c] rounded-full overflow-hidden">
             <div
               style={{ width: `${targetProgressPct}%` }}
               className={`h-full transition-all duration-300 ${
@@ -260,13 +350,11 @@ export const PropFirmChallengeHUD: React.FC = () => {
         </div>
 
         {/* 3. Daily & Trailing Safety Buffers */}
-        <div className="lg:col-span-4 flex flex-col justify-center px-2.5 py-1.5 rounded bg-[#020305] border border-[#151d2c] space-y-1 tabular-nums">
+        <div className="lg:col-span-5 flex flex-col justify-center px-2 py-1 rounded bg-[#020305] border border-[#151d2c] space-y-1 tabular-nums">
           {/* Daily Buffer */}
           <div data-testid="propfirm-daily-buffer" className="space-y-0.5">
-            <div className="flex items-center justify-between text-[10px] gap-1">
-              <span className="text-[#e6edf3] truncate">
-                Gündəlik Zərər Həddi: $1,250.00 | Qalan Haqq: {formatUsd(dailyBufferRemainingUsd)}
-              </span>
+            <div className="flex items-center justify-between gap-2 text-[10px] whitespace-nowrap tabular-nums leading-tight">
+              <span className="text-[#e6edf3]">Gündəlik Zərər Həddi: $1,250.00</span>
               <span
                 className={`font-bold flex-shrink-0 ${
                   isDailyHalt
@@ -279,28 +367,31 @@ export const PropFirmChallengeHUD: React.FC = () => {
                 {isDailyHalt ? 'HALT' : `${dailyBufferPct.toFixed(1)}% Safe`}
               </span>
             </div>
-            <div className="w-full h-1 bg-[#080c14] rounded-full overflow-hidden">
-              <div
-                style={{ width: `${dailyBufferPct}%` }}
-                className={`h-full transition-all duration-300 ${
-                  isDailyHalt
-                    ? 'bg-[#f6465d]'
-                    : dailyBufferPct >= 50
-                      ? 'bg-[#0ecb81]'
-                      : 'bg-[#f0b90b]'
-                }`}
-              />
+            <div className="flex items-center justify-between gap-2 text-[10px] whitespace-nowrap tabular-nums leading-tight">
+              <span className="text-[#e6edf3] flex-shrink-0">
+                Qalan Haqq: {formatUsd(dailyBufferRemainingUsd)}
+              </span>
+              <div className="flex-1 h-1 bg-[#080c14] rounded-full overflow-hidden">
+                <div
+                  style={{ width: `${dailyBufferPct}%` }}
+                  className={`h-full transition-all duration-300 ${
+                    isDailyHalt
+                      ? 'bg-[#f6465d]'
+                      : dailyBufferPct >= 50
+                        ? 'bg-[#0ecb81]'
+                        : 'bg-[#f0b90b]'
+                  }`}
+                />
+              </div>
             </div>
           </div>
 
           {/* Trailing Buffer */}
           <div data-testid="propfirm-trailing-buffer" className="space-y-0.5">
-            <div className="flex items-center justify-between text-[10px] gap-1">
-              <span className="text-[#e6edf3] truncate inline-flex items-center space-x-1">
+            <div className="flex items-center justify-between gap-2 text-[10px] whitespace-nowrap tabular-nums leading-tight">
+              <span className="inline-flex items-center gap-1 text-[#e6edf3]">
                 <ShieldCheck className="w-3 h-3 text-[#0ecb81] flex-shrink-0" />
-                <span>
-                  Maksimum Geriləmə Həddi: $2,500.00 | Qalan Haqq: {formatUsd(trailingBufferRemainingUsd)}
-                </span>
+                <span>Maksimum Geriləmə Həddi: $2,500.00</span>
               </span>
               <span
                 className={`font-bold flex-shrink-0 ${
@@ -314,17 +405,22 @@ export const PropFirmChallengeHUD: React.FC = () => {
                 {trailingStatusLabel}
               </span>
             </div>
-            <div className="w-full h-1 bg-[#080c14] rounded-full overflow-hidden">
-              <div
-                style={{ width: `${trailingBufferPct}%` }}
-                className={`h-full transition-all duration-300 ${
-                  isTrailingHalt
-                    ? 'bg-[#f6465d]'
-                    : trailingBufferPct >= 50
-                      ? 'bg-[#0ecb81]'
-                      : 'bg-[#f0b90b]'
-                }`}
-              />
+            <div className="flex items-center justify-between gap-2 text-[10px] whitespace-nowrap tabular-nums leading-tight">
+              <span className="text-[#e6edf3] flex-shrink-0">
+                Qalan Haqq: {formatUsd(trailingBufferRemainingUsd)}
+              </span>
+              <div className="flex-1 h-1 bg-[#080c14] rounded-full overflow-hidden">
+                <div
+                  style={{ width: `${trailingBufferPct}%` }}
+                  className={`h-full transition-all duration-300 ${
+                    isTrailingHalt
+                      ? 'bg-[#f6465d]'
+                      : trailingBufferPct >= 50
+                        ? 'bg-[#0ecb81]'
+                        : 'bg-[#f0b90b]'
+                  }`}
+                />
+              </div>
             </div>
           </div>
         </div>

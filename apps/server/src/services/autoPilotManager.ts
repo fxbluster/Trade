@@ -140,6 +140,8 @@ export class AutoPilotManager {
   private oppositeConsensusTickCount: number = 0;
   private peakPriceByTrade: Map<string, number> = new Map();
   private recordedClosedTradeIds: Set<string> = new Set();
+  private isManagingPosition: boolean = false;
+  private cycleStartedAtMs: number = 0;
 
   constructor(options: AutoPilotManagerOptions) {
     this.db = options.db;
@@ -312,6 +314,26 @@ export class AutoPilotManager {
       this.state = 'IDLE';
       this.blockReason = null;
       this.statusMessage = null;
+    }
+    this.broadcastStatus();
+    if (prevState !== this.state) {
+      this.emitStateTransition(this.state);
+    }
+  }
+
+  public clearPropFirmBlock(): void {
+    const prevState = this.state;
+    this.blockReason = null;
+    this.statusMessage = null;
+    this.cooldownUntil = 0;
+    try {
+      this.settingsRepo.set('autopilot_cooldown_until', { until: 0 });
+    } catch {}
+    this.consecutiveLosses = 0;
+    this.lastExitTime = 0;
+    this.cycleStartedAtMs = Date.now();
+    if (this.state === 'COOLDOWN_ACTIVE' || this.state === 'BLOCKED_SESSION_TRADE_CAP') {
+      this.state = 'IDLE';
     }
     this.broadcastStatus();
     if (prevState !== this.state) {
@@ -542,8 +564,14 @@ export class AutoPilotManager {
 
     // Position Management Branch: when position is open or while in LIMIT_CHASING
     if (this.openTradeId) {
-      await this.manageOpenPosition(sym, markPrice);
-      if (this.state === 'POSITION_OPEN') {
+      if (this.isManagingPosition) return;
+      this.isManagingPosition = true;
+      try {
+        await this.manageOpenPosition(sym, markPrice);
+      } finally {
+        this.isManagingPosition = false;
+      }
+      if (this.state === 'POSITION_OPEN' || (this.state as AutoPilotState) === 'CLOSING') {
         return;
       }
     }
@@ -555,7 +583,13 @@ export class AutoPilotManager {
       if (this.state !== 'LIMIT_CHASING') {
         this.state = 'POSITION_OPEN';
       }
-      await this.manageOpenPosition(sym, markPrice);
+      if (this.isManagingPosition) return;
+      this.isManagingPosition = true;
+      try {
+        await this.manageOpenPosition(sym, markPrice);
+      } finally {
+        this.isManagingPosition = false;
+      }
       return;
     }
 
@@ -575,7 +609,8 @@ export class AutoPilotManager {
       if (!guardCheck.allowed) {
         const nextBlockReason: BlockReason =
           guardCheck.reason === 'UPCOMERS_DAILY_HALT' ||
-          guardCheck.reason === 'UPCOMERS_TRAILING_HALT'
+          guardCheck.reason === 'UPCOMERS_TRAILING_HALT' ||
+          guardCheck.reason === 'CYCLE_TERMINAL'
             ? guardCheck.reason
             : 'BLOCKED_DAILY_MAX_LOSS';
         const nextMsg =
@@ -589,20 +624,22 @@ export class AutoPilotManager {
         return;
       } else if (
         this.blockReason === 'UPCOMERS_DAILY_HALT' ||
-        this.blockReason === 'UPCOMERS_TRAILING_HALT'
+        this.blockReason === 'UPCOMERS_TRAILING_HALT' ||
+        this.blockReason === 'CYCLE_TERMINAL'
       ) {
-        this.blockReason = null;
-        this.statusMessage = null;
-        this.broadcastStatus();
+        this.clearPropFirmBlock();
       }
     }
 
     const nowUtc = new Date();
     const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
+    const tradeCountStartMs = this.propFirmRiskGuard
+      ? Math.max(startOfUtcDay, this.cycleStartedAtMs)
+      : startOfUtcDay;
 
     // 1. Session Trade Cap: Max N filled round-trip trades per calendar day (UTC) [CUJ 4 / DEF-12]
     const maxTrades = this.config.maxDailyTrades ?? 5;
-    this.filledToday = this.tradesRepo.getFilledTradeCountToday(this.broker.mode, sym, startOfUtcDay);
+    this.filledToday = this.tradesRepo.getFilledTradeCountToday(this.broker.mode, sym, tradeCountStartMs);
     if (this.filledToday >= maxTrades) {
       if (this.state !== 'BLOCKED_SESSION_TRADE_CAP') {
         this.state = 'BLOCKED_SESSION_TRADE_CAP';
@@ -619,22 +656,25 @@ export class AutoPilotManager {
     }
 
     // 2. Proactive Daily Mark-to-Market Drawdown Ceiling (Synchronous Pre-Check) [CUJ 5 / DEF-13]
-    const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
-    const balance = this.cachedBalance > 0 ? this.cachedBalance : 1000;
-    const drawdownLimitPct = (this.config.dailyDrawdownLimitPct ?? 2.0) / 100;
-    const maxDrawdownUsd = balance * drawdownLimitPct;
+    // Skipped when PropFirmRiskGuard is active (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
+    if (!this.propFirmRiskGuard) {
+      const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
+      const balance = this.cachedBalance > 0 ? this.cachedBalance : 1000;
+      const drawdownLimitPct = (this.config.dailyDrawdownLimitPct ?? 2.0) / 100;
+      const maxDrawdownUsd = balance * drawdownLimitPct;
 
-    if (balance > 0 && maxDrawdownUsd > 0 && dailyStats.netPnl <= -maxDrawdownUsd) {
-      const tomorrowUtc = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1);
-      if (this.cooldownUntil < tomorrowUtc) {
-        this.cooldownUntil = tomorrowUtc;
-        this.settingsRepo.set('autopilot_cooldown_until', { until: this.cooldownUntil });
+      if (balance > 0 && maxDrawdownUsd > 0 && dailyStats.netPnl <= -maxDrawdownUsd) {
+        const tomorrowUtc = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1);
+        if (this.cooldownUntil < tomorrowUtc) {
+          this.cooldownUntil = tomorrowUtc;
+          this.settingsRepo.set('autopilot_cooldown_until', { until: this.cooldownUntil });
+        }
+        this.state = 'COOLDOWN_ACTIVE';
+        this.blockReason = 'BLOCKED_DAILY_MAX_LOSS';
+        this.statusMessage = `Daily Drawdown Limit (-${(drawdownLimitPct * 100).toFixed(1)}%) Reached ($${Math.abs(dailyStats.netPnl).toFixed(2)} loss >= $${maxDrawdownUsd.toFixed(2)} limit) - Cooldown Active`;
+        this.broadcastStatus();
+        return;
       }
-      this.state = 'COOLDOWN_ACTIVE';
-      this.blockReason = 'BLOCKED_DAILY_MAX_LOSS';
-      this.statusMessage = `Daily Drawdown Limit (-${(drawdownLimitPct * 100).toFixed(1)}%) Reached ($${Math.abs(dailyStats.netPnl).toFixed(2)} loss >= $${maxDrawdownUsd.toFixed(2)} limit) - Cooldown Active`;
-      this.broadcastStatus();
-      return;
     }
 
     // Evaluate Confluence Consensus
@@ -698,30 +738,33 @@ export class AutoPilotManager {
       }
 
       // Daily Mark-to-Market Drawdown Ceiling: Hard halt if session net loss >= dailyDrawdownLimitPct of wallet equity [CUJ 5 / DEF-13]
-      const nowUtc = new Date();
-      const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
-      const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
-      const drawdownLimitPct = (this.config.dailyDrawdownLimitPct ?? 2.0) / 100;
-      const maxDrawdownUsd = balance * drawdownLimitPct;
-      if (dailyStats.netPnl <= -maxDrawdownUsd && maxDrawdownUsd > 0) {
-        const tomorrowUtc = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1);
-        this.cooldownUntil = tomorrowUtc;
-        this.settingsRepo.set('autopilot_cooldown_until', { until: this.cooldownUntil });
-        this.state = 'COOLDOWN_ACTIVE';
-        this.blockReason = 'BLOCKED_DAILY_MAX_LOSS';
-        this.statusMessage = `Daily Drawdown Limit (-${(drawdownLimitPct * 100).toFixed(1)}%) Reached ($${Math.abs(dailyStats.netPnl).toFixed(2)} loss >= $${maxDrawdownUsd.toFixed(2)} limit) - Cooldown Active`;
-        this.broadcastStatus();
-        this.onOrderDispatched?.({
-          symbol,
-          side,
-          action: 'FAILED',
-          price: limitPrice,
-          marginUsd: 0,
-          leverage,
-          atr,
-          errorMessage: 'BLOCKED_DAILY_MAX_LOSS: Daily drawdown ceiling of 2% equity reached',
-        });
-        return;
+      // Skipped when PropFirmRiskGuard is active (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
+      if (!this.propFirmRiskGuard) {
+        const nowUtc = new Date();
+        const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
+        const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
+        const drawdownLimitPct = (this.config.dailyDrawdownLimitPct ?? 2.0) / 100;
+        const maxDrawdownUsd = balance * drawdownLimitPct;
+        if (dailyStats.netPnl <= -maxDrawdownUsd && maxDrawdownUsd > 0) {
+          const tomorrowUtc = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate() + 1);
+          this.cooldownUntil = tomorrowUtc;
+          this.settingsRepo.set('autopilot_cooldown_until', { until: this.cooldownUntil });
+          this.state = 'COOLDOWN_ACTIVE';
+          this.blockReason = 'BLOCKED_DAILY_MAX_LOSS';
+          this.statusMessage = `Daily Drawdown Limit (-${(drawdownLimitPct * 100).toFixed(1)}%) Reached ($${Math.abs(dailyStats.netPnl).toFixed(2)} loss >= $${maxDrawdownUsd.toFixed(2)} limit) - Cooldown Active`;
+          this.broadcastStatus();
+          this.onOrderDispatched?.({
+            symbol,
+            side,
+            action: 'FAILED',
+            price: limitPrice,
+            marginUsd: 0,
+            leverage,
+            atr,
+            errorMessage: 'BLOCKED_DAILY_MAX_LOSS: Daily drawdown ceiling of 2% equity reached',
+          });
+          return;
+        }
       }
 
       const snapshot = this.confluenceEngine.getSnapshot(symbol);
@@ -1307,6 +1350,7 @@ export class AutoPilotManager {
    * Monitors open position: evaluates dynamic breakeven and 2-tick opposite exit.
    */
   private async manageOpenPosition(symbol: string, markPrice: number): Promise<void> {
+    if (this.state === 'CLOSING') return;
     if (!this.openTradeId) return;
 
     const trade = this.tradesRepo.getById(this.openTradeId);
@@ -1317,7 +1361,7 @@ export class AutoPilotManager {
       return;
     }
 
-    // Case 1b: Upcomers Intra-Tick Floating Drawdown Watchdog ($1,250 Daily / $2,500 Trailing)
+    // Case 1b: Upcomers Intra-Tick Floating Drawdown & Target Watchdog ($1,250 Daily / $2,500 Trailing / +$2,500 Target)
     if (this.propFirmRiskGuard) {
       const qty = trade.remaining_qty > 0 ? trade.remaining_qty : trade.quantity;
       const rawUnrealizedPnl =
@@ -1327,25 +1371,44 @@ export class AutoPilotManager {
       const unrealizedPnlUsd = Number(
         (rawUnrealizedPnl + (trade.realized_pnl ?? 0) - (trade.fees_usd ?? 0)).toFixed(2)
       );
+      const estimatedCloseFeeUsd = Number((markPrice * qty * 0.0005).toFixed(2));
       const evalResult = this.propFirmRiskGuard.evaluateLiveEquity({
         realizedCyclePnlUsd: this.propFirmRiskGuard.getCurrentRealizedCyclePnl(),
         unrealizedPnlUsd,
         liveWalletBalanceUsd: this.cachedBalance,
+        hasOpenPosition: true,
+        estimatedCloseFeeUsd,
       });
 
       if (evalResult.emergencyExitReason) {
+        const exitReason = evalResult.emergencyExitReason;
         console.warn(
-          `[AutoPilot PropFirm Guard] ${evalResult.emergencyExitReason} triggered on ${symbol} (floating=${unrealizedPnlUsd.toFixed(2)}). Emergency closing.`
+          `[AutoPilot PropFirm Guard] ${exitReason} triggered on ${symbol} (floating=${unrealizedPnlUsd.toFixed(2)}). Closing position.`
         );
+        const prevStatus = trade.status;
         this.state = 'CLOSING';
-        this.blockReason = evalResult.emergencyExitReason;
-        this.statusMessage = `Upcomers Risk Guard Halt (${evalResult.emergencyExitReason}) — emergency closing position`;
+        this.blockReason = exitReason === 'PROPFIRM_TARGET_REACHED' ? null : exitReason;
+        this.statusMessage =
+          exitReason === 'PROPFIRM_TARGET_REACHED'
+            ? 'Upcomers $50K hədəfinə çatıldı — mənfəəti sabitləmək üçün mövqe bağlanır'
+            : `Upcomers Risk Guard Halt (${exitReason}) — emergency closing position`;
         this.tradesRepo.update(trade.id, { status: 'CLOSING_IN_PROGRESS' });
         this.broadcastStatus();
         try {
-          await this.tradeManager.closePosition(symbol, evalResult.emergencyExitReason);
-        } finally {
-          const updated = this.tradesRepo.getById(this.openTradeId);
+          await this.tradeManager.closePosition(symbol, exitReason);
+        } catch {
+          const current = this.tradesRepo.getById(trade.id);
+          if (current && current.status !== 'CLOSED') {
+            this.tradesRepo.update(trade.id, { status: prevStatus });
+            this.state = 'POSITION_OPEN';
+            this.blockReason = null;
+            this.statusMessage = null;
+            this.broadcastStatus();
+            return;
+          }
+        }
+        const updated = this.tradesRepo.getById(this.openTradeId);
+        if (!updated || updated.status === 'CLOSED') {
           this.handlePositionClosed(updated);
         }
         return;
@@ -1574,11 +1637,13 @@ export class AutoPilotManager {
         ((trade.realized_pnl ?? 0) - (trade.fees_usd ?? 0)).toFixed(2)
       );
       this.propFirmRiskGuard.recordTradeClosed({
+        tradeId: trade.id,
         realizedNetPnlUsd,
         liveWalletBalanceUsd: this.cachedBalance,
       });
     }
 
+    this.statusMessage = null;
     const isLoss = trade ? trade.realized_pnl < 0 : false;
 
     if (isLoss) {

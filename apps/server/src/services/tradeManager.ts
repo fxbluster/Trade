@@ -48,6 +48,7 @@ export interface TradeManagerOptions {
   brokerMode?: BrokerMode;
   getMarkPrice?: (symbol: string) => number;
   broadcastWs?: (msg: WsServerMessage) => void;
+  onTradeClosed?: (trade: TradeRecord) => void;
 }
 
 /**
@@ -68,6 +69,7 @@ export class TradeManager {
   private brokerMode: BrokerMode;
   private getMarkPriceFn?: (symbol: string) => number;
   private broadcastWsFn?: (msg: WsServerMessage) => void;
+  private onTradeClosedFn?: (trade: TradeRecord) => void;
 
   // Per-symbol async mutex queue to serialize actions per symbol
   private mutexQueues = new Map<string, Promise<unknown>>();
@@ -85,6 +87,7 @@ export class TradeManager {
     this.brokerMode = options.brokerMode || options.broker.mode || 'BINANCE_DEMO';
     this.getMarkPriceFn = options.getMarkPrice;
     this.broadcastWsFn = options.broadcastWs;
+    this.onTradeClosedFn = options.onTradeClosed;
   }
 
   public setBroker(broker: BrokerAdapter): void {
@@ -102,6 +105,19 @@ export class TradeManager {
 
   public setBroadcastWs(fn: (msg: WsServerMessage) => void): void {
     this.broadcastWsFn = fn;
+  }
+
+  public setOnTradeClosed(fn: (trade: TradeRecord) => void): void {
+    this.onTradeClosedFn = fn;
+  }
+
+  private notifyTradeClosed(trade: TradeRecord): void {
+    if (!this.onTradeClosedFn) return;
+    try {
+      this.onTradeClosedFn(trade);
+    } catch {
+      // Tolerate listener errors so trade cleanup never breaks
+    }
   }
 
   /**
@@ -272,6 +288,11 @@ export class TradeManager {
         closed_at: now,
       };
       this.tradesRepo.insert(dummyRecord);
+    }
+
+    const closedTrade = this.tradesRepo.getById(tradeId);
+    if (closedTrade) {
+      this.notifyTradeClosed(closedTrade);
     }
 
     // 4. Record critical audit log
@@ -626,6 +647,7 @@ export class TradeManager {
       }
 
       this.broadcastPositionEvent('CLOSED', closedTrade, reason);
+      this.notifyTradeClosed(closedTrade);
       return closedTrade;
     });
   }
@@ -1066,6 +1088,7 @@ export class TradeManager {
         });
         const closed = this.tradesRepo.getById(trade.id)!;
         this.broadcastPositionEvent('CLOSED', closed, 'TAKE_PROFIT_1');
+        this.notifyTradeClosed(closed);
       }
     } else if (leg === 'tp2') {
       // TP2 closed remaining position -> cancel opposite SL algo
@@ -1085,6 +1108,7 @@ export class TradeManager {
       });
       const closed = this.tradesRepo.getById(trade.id)!;
       this.broadcastPositionEvent('CLOSED', closed, 'TAKE_PROFIT_2');
+      this.notifyTradeClosed(closed);
     } else if (leg === 'sl' || leg === 'be') {
       // Stopped out -> cancel opposite TP algos
       if (trade.tp1_algo_id) {
@@ -1109,6 +1133,7 @@ export class TradeManager {
       });
       const closed = this.tradesRepo.getById(trade.id)!;
       this.broadcastPositionEvent('CLOSED', closed, exitReason);
+      this.notifyTradeClosed(closed);
     }
   }
 
@@ -1282,6 +1307,7 @@ export class TradeManager {
         });
         const closed = this.tradesRepo.getById(activeTrade.id)!;
         this.broadcastPositionEvent('CLOSED', closed, 'EXCHANGE_SYNC_CLOSED');
+        this.notifyTradeClosed(closed);
       }
     });
   }

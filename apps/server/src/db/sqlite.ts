@@ -191,6 +191,7 @@ const PROPFIRM_SCHEMA_DDL = `
     is_floor_locked INTEGER NOT NULL DEFAULT 0,
     profit_target_usd REAL NOT NULL,
     net_pnl_usd REAL NOT NULL DEFAULT 0,
+    realized_pnl_usd REAL NOT NULL DEFAULT 0,
     net_pnl_pct REAL NOT NULL DEFAULT 0,
     max_drawdown_usd REAL NOT NULL DEFAULT 0,
     trades_count INTEGER NOT NULL DEFAULT 0,
@@ -223,6 +224,9 @@ const PROPFIRM_SCHEMA_DDL = `
  */
 export function ensurePropFirmSchema(db: DatabaseSync): void {
   db.exec(PROPFIRM_SCHEMA_DDL);
+  try {
+    db.exec('ALTER TABLE propfirm_challenge_cycles ADD COLUMN realized_pnl_usd REAL NOT NULL DEFAULT 0;');
+  } catch {}
 }
 
 /**
@@ -1815,6 +1819,7 @@ interface PropFirmChallengeCycleRow {
   is_floor_locked: number;
   profit_target_usd: number;
   net_pnl_usd: number;
+  realized_pnl_usd?: number;
   net_pnl_pct: number;
   max_drawdown_usd: number;
   trades_count: number;
@@ -1848,6 +1853,7 @@ function mapPropFirmCycleRow(row: PropFirmChallengeCycleRow): PropFirmChallengeC
     isFloorLocked: Boolean(row.is_floor_locked),
     profitTargetUsd: Number(row.profit_target_usd),
     netPnlUsd: Number(row.net_pnl_usd),
+    realizedPnlUsd: Number(row.realized_pnl_usd ?? 0),
     netPnlPct: Number(row.net_pnl_pct),
     maxDrawdownUsd: Number(row.max_drawdown_usd),
     tradesCount: Number(row.trades_count),
@@ -1886,6 +1892,7 @@ const PROPFIRM_CYCLE_PATCH_COLUMNS: ReadonlyArray<{
   { key: 'isFloorLocked', column: 'is_floor_locked', isBoolean: true },
   { key: 'profitTargetUsd', column: 'profit_target_usd' },
   { key: 'netPnlUsd', column: 'net_pnl_usd' },
+  { key: 'realizedPnlUsd', column: 'realized_pnl_usd' },
   { key: 'netPnlPct', column: 'net_pnl_pct' },
   { key: 'maxDrawdownUsd', column: 'max_drawdown_usd' },
   { key: 'tradesCount', column: 'trades_count' },
@@ -1894,6 +1901,18 @@ const PROPFIRM_CYCLE_PATCH_COLUMNS: ReadonlyArray<{
   { key: 'startedAt', column: 'started_at' },
   { key: 'closedAt', column: 'closed_at' },
 ];
+
+export type PropFirmConflictCode = 'OPEN_POSITION_EXISTS' | 'CYCLE_STILL_ACTIVE';
+
+export class PropFirmConflictError extends Error {
+  public readonly code: PropFirmConflictCode;
+
+  constructor(code: PropFirmConflictCode, message: string) {
+    super(message);
+    this.name = 'PropFirmConflictError';
+    this.code = code;
+  }
+}
 
 /**
  * Repository for Upcomers $50K Prop Firm challenge cycles and UTC daily snapshots.
@@ -1905,6 +1924,7 @@ export class PropFirmRepo {
     const normalized: PropFirmChallengeCycle = {
       ...cycle,
       isFloorLocked: Boolean(cycle.isFloorLocked),
+      realizedPnlUsd: cycle.realizedPnlUsd ?? 0,
       closedAt: cycle.closedAt ?? null,
     };
 
@@ -1912,13 +1932,13 @@ export class PropFirmRepo {
       INSERT INTO propfirm_challenge_cycles (
         id, cycle_number, status, starting_balance_usd, current_equity_usd,
         high_water_mark_usd, contractual_trailing_floor_usd, internal_trailing_floor_usd,
-        is_floor_locked, profit_target_usd, net_pnl_usd, net_pnl_pct,
+        is_floor_locked, profit_target_usd, net_pnl_usd, realized_pnl_usd, net_pnl_pct,
         max_drawdown_usd, trades_count, win_count, loss_count,
         started_at, closed_at
       ) VALUES (
         ?, ?, ?, ?, ?,
         ?, ?, ?,
-        ?, ?, ?, ?,
+        ?, ?, ?, ?, ?,
         ?, ?, ?, ?,
         ?, ?
       )
@@ -1936,6 +1956,7 @@ export class PropFirmRepo {
       normalized.isFloorLocked ? 1 : 0,
       normalized.profitTargetUsd,
       normalized.netPnlUsd,
+      normalized.realizedPnlUsd ?? 0,
       normalized.netPnlPct,
       normalized.maxDrawdownUsd,
       normalized.tradesCount,
@@ -1946,6 +1967,46 @@ export class PropFirmRepo {
     );
 
     return normalized;
+  }
+
+  /**
+   * Atomically validates no active trades across any symbol, enforces terminal/halted-trailing
+   * cycle status, finalizes HALTED_TRAILING_BUFFER -> FAILED_TRAILING, and inserts Cycle N+1.
+   */
+  public rolloverCycle(nextCycle: PropFirmChallengeCycle): PropFirmChallengeCycle {
+    return runTransaction(this.db, () => {
+      const openTrade = this.db
+        .prepare(
+          `SELECT 1 FROM trades WHERE status IN ('OPEN', 'PARTIALLY_CLOSED', 'CLOSING', 'CLOSING_IN_PROGRESS') LIMIT 1`
+        )
+        .get();
+      if (openTrade) {
+        throw new PropFirmConflictError(
+          'OPEN_POSITION_EXISTS',
+          'Açıq mövqe və ya icra edilən əmr olduğu halda yeni dövrə başladılmır.'
+        );
+      }
+
+      const latest = this.getLatestCycle();
+      if (latest && (latest.status === 'ACTIVE' || latest.status === 'HALTED_DAILY_BUFFER')) {
+        throw new PropFirmConflictError(
+          'CYCLE_STILL_ACTIVE',
+          'Yeni dövrə yalnız cari dövrə PASSED, FAILED və ya HALTED_TRAILING_BUFFER olduqda başlana bilər.'
+        );
+      }
+
+      if (latest && latest.status === 'HALTED_TRAILING_BUFFER') {
+        this.updateCycle(latest.id, {
+          status: 'FAILED_TRAILING',
+          closedAt: nextCycle.startedAt,
+        });
+      }
+
+      return this.createCycle({
+        ...nextCycle,
+        realizedPnlUsd: nextCycle.realizedPnlUsd ?? 0,
+      });
+    });
   }
 
   public getActiveCycle(): PropFirmChallengeCycle | null {

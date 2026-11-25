@@ -91,16 +91,21 @@ async function request<T>(path: string, options: RequestInit = {}, isRetry = fal
 
   if (!res.ok) {
     let errMsg = `Request failed: ${res.status} ${res.statusText}`;
+    let errCode: string | undefined;
     try {
       const errJson = await res.json();
-      if (errJson && errJson.error) {
-        errMsg = errJson.error;
+      if (errJson) {
+        errMsg = errJson.message || errJson.error || errMsg;
+        errCode = errJson.code ?? errJson.error;
       }
     } catch {
       // Use status text if body not json
     }
     const error: any = new Error(errMsg);
     error.status = res.status;
+    if (errCode !== undefined) {
+      error.code = errCode;
+    }
     throw error;
   }
 
@@ -262,6 +267,13 @@ export const apiClient = {
 
   async getPropFirmStatus(): Promise<PropFirmStatusResponse> {
     return request<PropFirmStatusResponse>('/api/propfirm/status');
+  },
+
+  async startNewPropFirmCycle(): Promise<{ ok: boolean; status: PropFirmStatusResponse; autoPilotState?: string }> {
+    return request<{ ok: boolean; status: PropFirmStatusResponse; autoPilotState?: string }>('/api/propfirm/new-cycle', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
   },
 
   async getPropFirmCertificate(): Promise<PropFirmCertificateResponse> {

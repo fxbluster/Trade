@@ -4,6 +4,8 @@ import { initializeDatabase, PropFirmRepo, TradesRepo } from '../../db/sqlite.js
 import {
   calculateUpcomersMaxQty,
   calculateUpcomersTrailingFloors,
+  formatPropFirmCertificateMarkdown,
+  PropFirmConflictError,
   PropFirmRiskGuard,
 } from '../propFirmRiskGuard.js';
 import { TradeManager } from '../../services/tradeManager.js';
@@ -640,6 +642,262 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       (autoPilot as any).handlePositionClosed(closedTrade);
       expect(guard.getStatus().cycle.tradesCount).toBe(1);
       expect(guard.getStatus().cycle.winCount).toBe(1);
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // Task 2 TDD: Two-Phase Target Close, Fee Cushion, Crash-Safe Realized PnL,
+  // Rollover Delegation, Azerbaijani Top-Up Copy & Markdown Certificate Export
+  // --------------------------------------------------------------------------
+  describe('Task 2: Two-phase target close, fee cushion, crash-safe ledger, rollover & Markdown export', () => {
+    it('evaluateLiveEquity_defersPassedWhenOpenAndAppliesFeeCushion', () => {
+      const guard = new PropFirmRiskGuard(repo);
+      const t0 = Date.UTC(2026, 10, 25, 14, 0, 0);
+
+      // +$2,505 floating with $12 estimated close fee -> $52,493 < $52,500 -> stays ACTIVE, no exit signal
+      const belowCushion = guard.evaluateLiveEquity({
+        realizedCyclePnlUsd: 0,
+        unrealizedPnlUsd: 2_505,
+        liveWalletBalanceUsd: 50_000,
+        hasOpenPosition: true,
+        estimatedCloseFeeUsd: 12,
+        nowMs: t0,
+      });
+      expect(belowCushion.status.cycle.status).toBe('ACTIVE');
+      expect(belowCushion.status.cycle.closedAt).toBeNull();
+      expect(belowCushion.cycleJustPassed).toBe(false);
+      expect(belowCushion.emergencyExitReason).toBeNull();
+
+      // +$2,515 floating with $12 close fee -> $52,503 >= $52,500 -> emits PROPFIRM_TARGET_REACHED, stays ACTIVE
+      const targetHit = guard.evaluateLiveEquity({
+        realizedCyclePnlUsd: 0,
+        unrealizedPnlUsd: 2_515,
+        liveWalletBalanceUsd: 50_000,
+        hasOpenPosition: true,
+        estimatedCloseFeeUsd: 12,
+        nowMs: t0 + 1_000,
+      });
+      expect(targetHit.status.cycle.status).toBe('ACTIVE');
+      expect(targetHit.status.cycle.closedAt).toBeNull();
+      expect(targetHit.cycleJustPassed).toBe(false);
+      expect(targetHit.emergencyExitReason).toBe('PROPFIRM_TARGET_REACHED');
+
+      // Watchdogs remain armed if price reverses before fill settles:
+      // HWM climbed to $52,515 -> internal trailing floor is $50,015 -> pullback to +$15 triggers HALTED_TRAILING_BUFFER
+      const reversed = guard.evaluateLiveEquity({
+        realizedCyclePnlUsd: 0,
+        unrealizedPnlUsd: 15,
+        liveWalletBalanceUsd: 50_000,
+        hasOpenPosition: true,
+        estimatedCloseFeeUsd: 12,
+        nowMs: t0 + 2_000,
+      });
+      expect(reversed.status.cycle.status).toBe('HALTED_TRAILING_BUFFER');
+      expect(reversed.emergencyExitReason).toBe('UPCOMERS_TRAILING_HALT');
+    });
+
+    it('recordTradeClosed_idempotentAndStaysActiveIfPostFeeBelowTarget', () => {
+      const guard = new PropFirmRiskGuard(repo);
+      const t0 = Date.UTC(2026, 10, 25, 14, 10, 0);
+
+      // Post-fee realized < $52,500 -> stays ACTIVE and persists realizedPnlUsd
+      const partialStep = guard.recordTradeClosed({
+        tradeId: 'trade_fee_short_1',
+        realizedNetPnlUsd: 2_490,
+        liveWalletBalanceUsd: 50_000,
+        nowMs: t0,
+      });
+      expect(partialStep.cycle.status).toBe('ACTIVE');
+      expect(partialStep.cycle.realizedPnlUsd).toBe(2_490);
+      expect(partialStep.cycle.tradesCount).toBe(1);
+
+      // Duplicate tradeId is an idempotent no-op
+      const duplicate = guard.recordTradeClosed({
+        tradeId: 'trade_fee_short_1',
+        realizedNetPnlUsd: 2_490,
+        liveWalletBalanceUsd: 50_000,
+        nowMs: t0 + 500,
+      });
+      expect(duplicate.cycle.tradesCount).toBe(1);
+      expect(duplicate.cycle.realizedPnlUsd).toBe(2_490);
+      expect(duplicate.cycle.status).toBe('ACTIVE');
+
+      // Second trade pushes realized >= $52,500 -> transitions to PASSED with hasOpenPosition: false
+      const passed = guard.recordTradeClosed({
+        tradeId: 'trade_finish_2',
+        realizedNetPnlUsd: 15,
+        liveWalletBalanceUsd: 50_000,
+        nowMs: t0 + 1_000,
+      });
+      expect(passed.cycle.status).toBe('PASSED');
+      expect(passed.cycle.realizedPnlUsd).toBe(2_505);
+      expect(passed.cycle.tradesCount).toBe(2);
+      expect(passed.cycle.closedAt).toBe(t0 + 1_000);
+    });
+
+    it('crashRestartRecovery_doesNotDoubleCountUnrealizedPnlAndAnchorsFundedWallet', () => {
+      const guard1 = new PropFirmRiskGuard(repo);
+      const t0 = Date.UTC(2026, 10, 25, 14, 20, 0);
+
+      // Open trade has +$500 floating profit, 0 realized profit
+      const beforeCrash = guard1.evaluateLiveEquity({
+        realizedCyclePnlUsd: 0,
+        unrealizedPnlUsd: 500,
+        liveWalletBalanceUsd: 50_000,
+        hasOpenPosition: true,
+        nowMs: t0,
+      });
+      expect(beforeCrash.status.cycle.netPnlUsd).toBe(500);
+      expect(beforeCrash.status.cycle.realizedPnlUsd).toBe(0);
+
+      // Simulate server crash & restart with a fresh PropFirmRiskGuard instance
+      const guard2 = new PropFirmRiskGuard(repo);
+      expect(guard2.getCurrentRealizedCyclePnl()).toBe(0);
+
+      const afterRestart = guard2.evaluateLiveEquity({
+        realizedCyclePnlUsd: guard2.getCurrentRealizedCyclePnl(),
+        unrealizedPnlUsd: 500,
+        liveWalletBalanceUsd: 50_000,
+        hasOpenPosition: true,
+        nowMs: t0 + 5_000,
+      });
+      expect(afterRestart.status.cycle.netPnlUsd).toBe(500);
+
+      // Funded wallet ($55,000) still anchors challenge equity to 50_000 + realized + unrealized
+      const fundedEval = guard2.evaluateLiveEquity({
+        realizedCyclePnlUsd: 400,
+        unrealizedPnlUsd: 300,
+        liveWalletBalanceUsd: 55_000,
+        hasOpenPosition: true,
+        nowMs: t0 + 10_000,
+      });
+      expect(fundedEval.status.cycle.currentEquityUsd).toBe(50_700);
+      expect(fundedEval.status.cycle.netPnlUsd).toBe(700);
+      expect(fundedEval.status.needsTopUp).toBe(false);
+    });
+
+    it('startNewCycle_delegatesToRolloverCycleAndPropagatesPropFirmConflictError', () => {
+      const guard = new PropFirmRiskGuard(repo);
+      const t0 = Date.UTC(2026, 10, 25, 14, 30, 0);
+
+      // Cannot rollover while Cycle #1 is ACTIVE
+      expect(() => guard.startNewCycle(50_000, t0)).toThrow(PropFirmConflictError);
+      try {
+        guard.startNewCycle(50_000, t0);
+      } catch (err) {
+        expect(err).toBeInstanceOf(PropFirmConflictError);
+        expect((err as PropFirmConflictError).code).toBe('CYCLE_STILL_ACTIVE');
+      }
+
+      // Pass Cycle #1, then insert an OPEN trade -> must reject with OPEN_POSITION_EXISTS
+      guard.recordTradeClosed({
+        tradeId: 't_pass_1',
+        realizedNetPnlUsd: 2_550,
+        liveWalletBalanceUsd: 50_000,
+        nowMs: t0 + 1_000,
+      });
+      const tradesRepo = new TradesRepo(db);
+      tradesRepo.insert({
+        id: 'open_conflict_1',
+        symbol: 'BTCUSDT',
+        broker_mode: 'BINANCE_DEMO',
+        side: 'BUY',
+        status: 'OPEN',
+        entry_price: 90_000,
+        exit_price: null,
+        quantity: 0.01,
+        remaining_qty: 0.01,
+        leverage: 10,
+        margin_usd: 90,
+        stop_loss: 89_000,
+        tp1: 91_000,
+        tp2: 92_000,
+        be_price: null,
+        is_breakeven: 0,
+        client_order_id: 'c_open_conflict',
+        client_sl_id: null,
+        client_tp1_id: null,
+        client_tp2_id: null,
+        entry_order_id: null,
+        sl_algo_id: null,
+        tp1_algo_id: null,
+        tp2_algo_id: null,
+        realized_pnl: 0,
+        fees_usd: 0,
+        exit_reason: null,
+        opened_at: t0 + 2_000,
+        closed_at: null,
+      });
+
+      try {
+        guard.startNewCycle(50_000, t0 + 3_000);
+        expect.fail('Expected PropFirmConflictError');
+      } catch (err) {
+        expect(err).toBeInstanceOf(PropFirmConflictError);
+        expect((err as PropFirmConflictError).code).toBe('OPEN_POSITION_EXISTS');
+      }
+
+      // Close open trade -> rollover succeeds cleanly to Cycle #2
+      tradesRepo.update('open_conflict_1', { status: 'CLOSED', closed_at: t0 + 4_000 });
+      const cycle2Status = guard.startNewCycle(50_000, t0 + 5_000);
+      expect(cycle2Status.cycle.cycleNumber).toBe(2);
+      expect(cycle2Status.cycle.status).toBe('ACTIVE');
+      expect(cycle2Status.cycle.realizedPnlUsd).toBe(0);
+    });
+
+    it('topUpMessage_isPureAzerbaijaniAndFormatCertificateMarkdownHandlesNegativeUsd', () => {
+      const guard = new PropFirmRiskGuard(repo);
+      const t0 = Date.UTC(2026, 10, 25, 14, 40, 0);
+
+      const status = guard.getStatus(4_606.01, t0);
+      expect(status.needsTopUp).toBe(true);
+      expect(status.topUpMessage).toContain('Binance Demo Faucet');
+      expect(status.topUpMessage).toContain('$50,000.00');
+      expect(status.topUpMessage).not.toMatch(/top-up required|simulated PnL remains/i);
+
+      // Record a failed cycle (-$1,250.00) and then a passed cycle (+$2,510.00)
+      guard.evaluateLiveEquity({
+        realizedCyclePnlUsd: -1_520,
+        unrealizedPnlUsd: 0,
+        liveWalletBalanceUsd: 4_606.01,
+        nowMs: t0 + 1_000,
+      });
+      guard.startNewCycle(4_606.01, t0 + 2_000);
+      guard.recordTradeClosed({
+        tradeId: 't_win_md',
+        realizedNetPnlUsd: 2_510,
+        liveWalletBalanceUsd: 4_606.01,
+        nowMs: t0 + 3_000,
+      });
+
+      const cert = guard.getCertificateStatus(t0 + 4_000);
+      // Force a -$1,250.00 row check as well
+      const md = formatPropFirmCertificateMarkdown({
+        ...cert,
+        cycles: [
+          ...cert.cycles,
+          {
+            ...cert.cycles[0],
+            id: 'synthetic_neg_cycle',
+            cycleNumber: 99,
+            status: 'FAILED_DAILY',
+            currentEquityUsd: 48_750,
+            netPnlUsd: -1_250,
+            realizedPnlUsd: -1_250,
+            netPnlPct: -2.5,
+            maxDrawdownUsd: 1_250,
+            closedAt: t0 + 5_000,
+          },
+        ],
+      });
+
+      expect(md).not.toContain('$-');
+      expect(md).toContain('-$1,250.00');
+      expect(md).toContain('-$1,520.00');
+      expect(md).toContain('+$2,510.00');
+      expect(md).toContain('1 / 5');
+      expect(md).toContain('| # |');
+      expect(md).toContain('DAVAM EDİR');
     });
   });
 });

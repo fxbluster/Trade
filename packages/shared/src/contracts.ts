@@ -929,6 +929,7 @@ export interface PropFirmChallengeCycle {
   isFloorLocked: boolean;
   profitTargetUsd: number;
   netPnlUsd: number;
+  realizedPnlUsd?: number;
   netPnlPct: number;
   maxDrawdownUsd: number;
   tradesCount: number;

@@ -19,7 +19,8 @@ export type ExitReason =
   | 'WATCHDOG_STOP_LOSS'
   | 'BREAKEVEN_STOP'
   | 'UPCOMERS_DAILY_HALT'
-  | 'UPCOMERS_TRAILING_HALT';
+  | 'UPCOMERS_TRAILING_HALT'
+  | 'PROPFIRM_TARGET_REACHED';
 
 export type BlockReason =
   | 'BLOCKED_NOISE_BAND'
@@ -30,7 +31,8 @@ export type BlockReason =
   | 'BLOCKED_CHASING_TIMEOUT'
   | 'BLOCKED_AIRBAG_VIOLATION'
   | 'UPCOMERS_DAILY_HALT'
-  | 'UPCOMERS_TRAILING_HALT';
+  | 'UPCOMERS_TRAILING_HALT'
+  | 'CYCLE_TERMINAL';
 
 export type AutoPilotState =
   | 'IDLE'

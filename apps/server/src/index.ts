@@ -368,6 +368,16 @@ export async function bootstrapServer(): Promise<{
     brokerMode: activeBroker.mode,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
     broadcastWs: (msg) => wsHub?.broadcast(msg),
+    onTradeClosed: (trade) => {
+      const realizedNetPnlUsd = Number(
+        ((trade.realized_pnl ?? 0) - (trade.fees_usd ?? 0)).toFixed(2)
+      );
+      propFirmRiskGuard.recordTradeClosed({
+        tradeId: trade.id,
+        realizedNetPnlUsd,
+        liveWalletBalanceUsd: lastWalletBalanceUsd,
+      });
+    },
   });
 
   // Next-Gen Execution & Sizing Engines
@@ -552,6 +562,7 @@ export async function bootstrapServer(): Promise<{
             realizedCyclePnlUsd: propFirmRiskGuard.getCurrentRealizedCyclePnl(),
             unrealizedPnlUsd: liveUnrealizedPnl,
             liveWalletBalanceUsd: lastWalletBalanceUsd,
+            hasOpenPosition: Boolean(openPos),
             nowMs: nowPropFirmTs,
           });
         }

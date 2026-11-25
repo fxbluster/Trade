@@ -113,6 +113,7 @@ export interface MarketStoreState {
   addTelemetryEvent: (event: FactorTelemetryEvent) => void;
   setPropFirmStatus: (status: PropFirmStatusResponse | null) => void;
   refreshPropFirmStatus: () => Promise<void>;
+  startNewPropFirmCycle: () => Promise<PropFirmStatusResponse>;
 }
 
 const defaultAccount: AccountInfo = {
@@ -438,5 +439,11 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     } catch {
       // Prop Firm endpoint may not be online yet in test/offline dev
     }
+  },
+
+  startNewPropFirmCycle: async () => {
+    const res = await apiClient.startNewPropFirmCycle();
+    set({ propFirmStatus: res.status });
+    return res.status;
   },
 }));

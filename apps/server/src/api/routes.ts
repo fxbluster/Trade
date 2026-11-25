@@ -51,7 +51,11 @@ import type { AutoPilotManager } from '../services/autoPilotManager.js';
 import type { DecisionAuditService } from '../services/decisionAuditService.js';
 import type { PillarAttributionService } from '../services/pillarAttributionService.js';
 import type { PnlService } from '../services/pnlService.js';
-import type { PropFirmRiskGuard } from '../quant/propFirmRiskGuard.js';
+import {
+  PropFirmConflictError,
+  formatPropFirmCertificateMarkdown,
+  type PropFirmRiskGuard,
+} from '../quant/propFirmRiskGuard.js';
 
 export interface AppContext {
   tradeManager: TradeManager;
@@ -81,6 +85,38 @@ function sendJson(res: Response, statusCode: number, data: unknown): void {
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(data));
+}
+
+const IN_FLIGHT_AUTOPILOT_STATES = new Set([
+  'PLACING_ORDER',
+  'LIMIT_CHASING',
+  'POSITION_OPEN',
+  'CLOSING',
+]);
+
+async function resolvePropFirmWalletBalance(ctx: AppContext): Promise<number> {
+  let walletBalance = 0;
+  try {
+    const cached = ctx.getPropFirmWalletBalance?.();
+    if (typeof cached === 'number' && Number.isFinite(cached) && cached > 0) {
+      walletBalance = cached;
+    }
+  } catch {
+    walletBalance = 0;
+  }
+
+  if (walletBalance <= 0 && typeof ctx.broker?.getAccount === 'function') {
+    try {
+      const account = await ctx.broker.getAccount();
+      if (account && Number.isFinite(account.walletBalance) && account.walletBalance > 0) {
+        walletBalance = account.walletBalance;
+      }
+    } catch {
+      // Tolerate transient exchange errors without returning 500
+    }
+  }
+
+  return walletBalance;
 }
 
 /**
@@ -229,6 +265,21 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     const { symbol } = (req.body || {}) as { symbol?: string };
     if (!symbol || typeof symbol !== 'string') {
       return sendJson(res, 400, { error: 'Missing or invalid symbol string' });
+    }
+
+    // Guard: conflict if active open position exists
+    const active = tradesRepo.getActivePosition(ctx.broker.mode);
+    if (
+      active &&
+      (active.status === 'OPEN' ||
+        active.status === 'PARTIALLY_CLOSED' ||
+        active.status === 'CLOSING' ||
+        active.status === 'CLOSING_IN_PROGRESS')
+    ) {
+      return sendJson(res, 409, {
+        error: 'Cannot switch symbol while an active position is open',
+        code: 'OPEN_POSITION_EXISTS',
+      });
     }
 
     const cleanSymbol = symbol.trim().toUpperCase();
@@ -683,27 +734,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       return sendJson(res, 503, { error: 'PropFirmRiskGuard not initialized' });
     }
     try {
-      let walletBalance = 0;
-      try {
-        const cached = ctx.getPropFirmWalletBalance?.();
-        if (typeof cached === 'number' && Number.isFinite(cached) && cached > 0) {
-          walletBalance = cached;
-        }
-      } catch {
-        walletBalance = 0;
-      }
-
-      if (walletBalance <= 0 && typeof ctx.broker?.getAccount === 'function') {
-        try {
-          const account = await ctx.broker.getAccount();
-          if (account && Number.isFinite(account.walletBalance) && account.walletBalance > 0) {
-            walletBalance = account.walletBalance;
-          }
-        } catch {
-          // Tolerate transient exchange errors without returning 500
-        }
-      }
-
+      const walletBalance = await resolvePropFirmWalletBalance(ctx);
       const status = ctx.propFirmRiskGuard.getStatus(walletBalance);
       sendJson(res, 200, status);
     } catch (err: unknown) {
@@ -713,16 +744,66 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   });
 
   // 25. GET /api/propfirm/certificate — 5-cycle consistency certification status
-  app.get('/api/propfirm/certificate', (_req: Request, res: Response) => {
+  app.get('/api/propfirm/certificate', (req: Request, res: Response) => {
     if (!ctx.propFirmRiskGuard) {
       return sendJson(res, 503, { error: 'PropFirmRiskGuard not initialized' });
     }
+    const query = (req.query || {}) as Record<string, string>;
+    const format = String(query.format || 'json').trim().toLowerCase();
+    if (format !== 'json' && format !== 'markdown') {
+      return sendJson(res, 400, {
+        error: `Invalid format '${format}'. Must be 'json' or 'markdown'.`,
+      });
+    }
+
     try {
       const certificate = ctx.propFirmRiskGuard.getCertificateStatus();
+      if (format === 'markdown') {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="upcomers-50k-certificate-${new Date().toISOString().slice(0, 10)}.md"`
+        );
+        res.end(formatPropFirmCertificateMarkdown(certificate));
+        return;
+      }
       sendJson(res, 200, certificate);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { error: `Failed to retrieve prop firm certificate: ${msg}` });
+    }
+  });
+
+  // 26. POST /api/propfirm/new-cycle — Start a new Upcomers $50K cycle when flat & eligible
+  app.post('/api/propfirm/new-cycle', async (_req: Request, res: Response) => {
+    if (!ctx.propFirmRiskGuard) {
+      return sendJson(res, 503, { error: 'PropFirmRiskGuard not initialized' });
+    }
+
+    const apState = ctx.autoPilotManager?.getState();
+    if (apState && IN_FLIGHT_AUTOPILOT_STATES.has(apState)) {
+      return sendJson(res, 409, {
+        error: 'Açıq mövqe və ya icra edilən əmr olduğu halda yeni dövrə başladılmır.',
+        code: 'OPEN_POSITION_EXISTS',
+      });
+    }
+
+    try {
+      const walletBalance = await resolvePropFirmWalletBalance(ctx);
+      const status = ctx.propFirmRiskGuard.startNewCycle(walletBalance);
+      (ctx.autoPilotManager as { clearPropFirmBlock?: () => void } | undefined)?.clearPropFirmBlock?.();
+      sendJson(res, 200, {
+        ok: true,
+        status,
+        autoPilotState: ctx.autoPilotManager?.getState(),
+      });
+    } catch (err: unknown) {
+      if (err instanceof PropFirmConflictError) {
+        return sendJson(res, 409, { error: err.message, code: err.code });
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: `Failed to start new prop firm cycle: ${msg}` });
     }
   });
 

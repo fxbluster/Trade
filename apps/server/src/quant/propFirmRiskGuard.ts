@@ -10,13 +10,19 @@ import {
   type PropFirmCertificateResponse,
   type BlockReason,
 } from '@tradeos/shared';
-import type { PropFirmRepo } from '../db/sqlite.js';
+import {
+  PropFirmConflictError,
+  type PropFirmConflictCode,
+  type PropFirmRepo,
+} from '../db/sqlite.js';
+
+export { PropFirmConflictError, type PropFirmConflictCode };
 
 const ZERO_DISTANCE_EPSILON = 1e-8;
 const TOP_UP_THRESHOLD_USD = 49_000;
 const REQUIRED_PASSED_CYCLES = 5;
 const TOP_UP_MESSAGE =
-  'Binance Testnet top-up required: open Binance Futures Demo Faucet and top up USDT to $50,000.00 to match the Upcomers $50K challenge capital (simulated PnL remains anchored to $50,000.00).';
+  'Binance Testnet balansı $50,000.00 həddindən aşağıdır. Simulyasiya $50,000.00 kapitala sabitlənib; real ölçülü test üçün Binance Demo Faucet vasitəsilə USDT balansını $50,000.00-ə tamamlayın.';
 
 function round2(value: number): number {
   if (!Number.isFinite(value)) return 0;
@@ -118,16 +124,23 @@ export interface EvaluateLiveEquityParams {
   realizedCyclePnlUsd: number;
   unrealizedPnlUsd: number;
   liveWalletBalanceUsd: number;
+  hasOpenPosition?: boolean;
+  estimatedCloseFeeUsd?: number;
   nowMs?: number;
 }
 
 export interface EvaluateLiveEquityResult {
   status: PropFirmStatusResponse;
-  emergencyExitReason: 'UPCOMERS_DAILY_HALT' | 'UPCOMERS_TRAILING_HALT' | null;
+  emergencyExitReason:
+    | 'UPCOMERS_DAILY_HALT'
+    | 'UPCOMERS_TRAILING_HALT'
+    | 'PROPFIRM_TARGET_REACHED'
+    | null;
   cycleJustPassed: boolean;
 }
 
 export interface RecordTradeClosedParams {
+  tradeId?: string;
   realizedNetPnlUsd: number;
   liveWalletBalanceUsd: number;
   nowMs?: number;
@@ -150,6 +163,7 @@ export class PropFirmRiskGuard {
   private readonly config: UpcomersChallengeConfig;
   private readonly onStatusUpdate?: (status: PropFirmStatusResponse) => void;
   private readonly realizedCyclePnlByCycleId = new Map<string, number>();
+  private readonly recordedTradeIds = new Set<string>();
   private lastLiveWalletBalanceUsd: number = 0;
 
   constructor(
@@ -168,7 +182,7 @@ export class PropFirmRiskGuard {
     if (!existing) {
       this.createFreshCycle(Date.now());
     } else {
-      this.realizedCyclePnlByCycleId.set(existing.id, existing.netPnlUsd);
+      this.realizedCyclePnlByCycleId.set(existing.id, existing.realizedPnlUsd ?? 0);
     }
   }
 
@@ -270,13 +284,19 @@ export class PropFirmRiskGuard {
     // 1. Perform automatic 00:00 UTC rollover BEFORE evaluating current tick's PnL
     const snapshot = this.ensureDailyRollover(cycle, nowMs);
 
-    // 2. Compute challenge equity (sub-$50k Testnet balance anchors cleanly to $50k + cycle PnL)
+    // 2. Compute challenge equity (always anchored to $50k + realized + unrealized cycle PnL)
     const currentEquityUsd = this.computeChallengeEquityUsd(
       cycle,
       safeRealized,
-      safeUnrealized,
-      safeWallet
+      safeUnrealized
     );
+    const positionOpen = params.hasOpenPosition ?? Math.abs(safeUnrealized) > 0;
+    const safeCloseFee =
+      positionOpen &&
+      typeof params.estimatedCloseFeeUsd === 'number' &&
+      Number.isFinite(params.estimatedCloseFeeUsd)
+        ? Math.max(0, params.estimatedCloseFeeUsd)
+        : 0;
 
     // 3. Monotonic High-Water Mark & Trailing Floors ($53k -> $50k permanent lock)
     const highWaterMarkUsd = round2(Math.max(cycle.highWaterMarkUsd, currentEquityUsd));
@@ -304,7 +324,7 @@ export class PropFirmRiskGuard {
 
     // 5. Evaluate Trailing, Daily, and Profit Target transitions
     let nextStatus: PropFirmCycleStatus = cycle.status;
-    let emergencyExitReason: 'UPCOMERS_DAILY_HALT' | 'UPCOMERS_TRAILING_HALT' | null = null;
+    let emergencyExitReason: EvaluateLiveEquityResult['emergencyExitReason'] = null;
     let cycleJustPassed = false;
     let closedAt: number | null = cycle.closedAt;
     let dailyHalted = snapshot.dailyHalted;
@@ -327,11 +347,15 @@ export class PropFirmRiskGuard {
       dailyHalted = true;
     } else if (
       nextStatus === 'ACTIVE' &&
-      currentEquityUsd >= cycle.startingBalanceUsd + cycle.profitTargetUsd
+      currentEquityUsd - safeCloseFee >= cycle.startingBalanceUsd + cycle.profitTargetUsd
     ) {
-      nextStatus = 'PASSED';
-      cycleJustPassed = true;
-      closedAt = closedAt ?? nowMs;
+      if (positionOpen) {
+        emergencyExitReason = 'PROPFIRM_TARGET_REACHED';
+      } else {
+        nextStatus = 'PASSED';
+        cycleJustPassed = true;
+        closedAt = closedAt ?? nowMs;
+      }
     }
 
     // 6. Persist updated cycle and daily snapshot to SQLite
@@ -383,6 +407,13 @@ export class PropFirmRiskGuard {
 
   public recordTradeClosed(params: RecordTradeClosedParams): PropFirmStatusResponse {
     const nowMs = params.nowMs ?? Date.now();
+    if (params.tradeId) {
+      if (this.recordedTradeIds.has(params.tradeId)) {
+        return this.getStatus(params.liveWalletBalanceUsd, nowMs);
+      }
+      this.recordedTradeIds.add(params.tradeId);
+    }
+
     const safePnl = Number.isFinite(params.realizedNetPnlUsd) ? params.realizedNetPnlUsd : 0;
     const cycle = this.getOrInitCycle(nowMs);
 
@@ -394,11 +425,13 @@ export class PropFirmRiskGuard {
     const winCount = safePnl > 0 ? cycle.winCount + 1 : cycle.winCount;
     const lossCount = safePnl < 0 ? cycle.lossCount + 1 : cycle.lossCount;
 
+    cycle.realizedPnlUsd = nextRealized;
     cycle.tradesCount = tradesCount;
     cycle.winCount = winCount;
     cycle.lossCount = lossCount;
 
     this.repo.updateCycle(cycle.id, {
+      realizedPnlUsd: nextRealized,
       tradesCount,
       winCount,
       lossCount,
@@ -408,6 +441,7 @@ export class PropFirmRiskGuard {
       realizedCyclePnlUsd: nextRealized,
       unrealizedPnlUsd: 0,
       liveWalletBalanceUsd: params.liveWalletBalanceUsd,
+      hasOpenPosition: false,
       nowMs,
     });
 
@@ -418,11 +452,14 @@ export class PropFirmRiskGuard {
     liveWalletBalanceUsd?: number,
     nowMs: number = Date.now()
   ): PropFirmStatusResponse {
+    const nextCycle = this.buildFreshCycleRecord(nowMs);
+    const cycle = this.repo.rolloverCycle(nextCycle);
+
     if (liveWalletBalanceUsd !== undefined && Number.isFinite(liveWalletBalanceUsd)) {
       this.lastLiveWalletBalanceUsd = liveWalletBalanceUsd;
     }
+    this.realizedCyclePnlByCycleId.set(cycle.id, 0);
 
-    const cycle = this.createFreshCycle(nowMs);
     const snapshot = this.ensureDailyRollover(cycle, nowMs);
     const wallet =
       liveWalletBalanceUsd !== undefined && Number.isFinite(liveWalletBalanceUsd)
@@ -475,19 +512,19 @@ export class PropFirmRiskGuard {
     const existing = this.repo.getActiveCycle() ?? this.repo.getLatestCycle();
     if (existing) {
       if (!this.realizedCyclePnlByCycleId.has(existing.id)) {
-        this.realizedCyclePnlByCycleId.set(existing.id, existing.netPnlUsd);
+        this.realizedCyclePnlByCycleId.set(existing.id, existing.realizedPnlUsd ?? 0);
       }
       return existing;
     }
     return this.createFreshCycle(nowMs);
   }
 
-  private createFreshCycle(nowMs: number): PropFirmChallengeCycle {
+  private buildFreshCycleRecord(nowMs: number): PropFirmChallengeCycle {
     const cycleNumber = this.repo.getNextCycleNumber();
     const startingBalanceUsd = round2(this.config.accountSizeUsd);
     const floors = calculateUpcomersTrailingFloors(startingBalanceUsd, this.config);
 
-    const cycle: PropFirmChallengeCycle = {
+    return {
       id: crypto.randomUUID(),
       cycleNumber,
       status: 'ACTIVE',
@@ -499,6 +536,7 @@ export class PropFirmRiskGuard {
       isFloorLocked: floors.isFloorLocked,
       profitTargetUsd: round2(this.config.profitTargetUsd),
       netPnlUsd: 0,
+      realizedPnlUsd: 0,
       netPnlPct: 0,
       maxDrawdownUsd: 0,
       tradesCount: 0,
@@ -507,7 +545,10 @@ export class PropFirmRiskGuard {
       startedAt: nowMs,
       closedAt: null,
     };
+  }
 
+  private createFreshCycle(nowMs: number): PropFirmChallengeCycle {
+    const cycle = this.buildFreshCycleRecord(nowMs);
     this.repo.createCycle(cycle);
     this.realizedCyclePnlByCycleId.set(cycle.id, 0);
     return cycle;
@@ -518,8 +559,9 @@ export class PropFirmRiskGuard {
     if (cached !== undefined && Number.isFinite(cached)) {
       return cached;
     }
-    this.realizedCyclePnlByCycleId.set(cycle.id, cycle.netPnlUsd);
-    return cycle.netPnlUsd;
+    const fallback = cycle.realizedPnlUsd ?? 0;
+    this.realizedCyclePnlByCycleId.set(cycle.id, fallback);
+    return fallback;
   }
 
   private ensureDailyRollover(
@@ -578,24 +620,9 @@ export class PropFirmRiskGuard {
   private computeChallengeEquityUsd(
     cycle: PropFirmChallengeCycle,
     realizedCyclePnlUsd: number,
-    unrealizedPnlUsd: number,
-    liveWalletBalanceUsd: number
+    unrealizedPnlUsd: number
   ): number {
-    // Review Focus #5: When Testnet wallet is below $49,000, anchor challenge equity cleanly to $50,000 + cycle PnL
-    if (!Number.isFinite(liveWalletBalanceUsd) || liveWalletBalanceUsd < TOP_UP_THRESHOLD_USD) {
-      return round2(cycle.startingBalanceUsd + realizedCyclePnlUsd + unrealizedPnlUsd);
-    }
-
-    // If wallet is funded near $50k but still equals exact starting balance while realized cycle PnL is non-zero
-    // (e.g. stale broker balance cache or static mock broker), honor cumulative realized cycle PnL cleanly.
-    if (
-      Math.abs(liveWalletBalanceUsd - cycle.startingBalanceUsd) < 1e-6 &&
-      Math.abs(realizedCyclePnlUsd) > 1e-6
-    ) {
-      return round2(cycle.startingBalanceUsd + realizedCyclePnlUsd + unrealizedPnlUsd);
-    }
-
-    return round2(liveWalletBalanceUsd + unrealizedPnlUsd);
+    return round2(cycle.startingBalanceUsd + realizedCyclePnlUsd + unrealizedPnlUsd);
   }
 
   private buildStatusResponse(
@@ -685,4 +712,67 @@ export class PropFirmRiskGuard {
       // Tolerated listener failure
     }
   }
+}
+
+function formatUsdMd(value: number): string {
+  const safe = Number.isFinite(value) ? round2(value) : 0;
+  const normalized = Math.abs(safe) < 0.005 ? 0 : safe;
+  const absFormatted = Math.abs(normalized).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return normalized < 0 ? `-$${absFormatted}` : `$${absFormatted}`;
+}
+
+function formatSignedUsdMd(value: number): string {
+  const safe = Number.isFinite(value) ? round2(value) : 0;
+  if (Math.abs(safe) < 0.005) return '$0.00';
+  const absFormatted = Math.abs(safe).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return safe < 0 ? `-$${absFormatted}` : `+$${absFormatted}`;
+}
+
+/**
+ * Formats an Upcomers $50K 5-cycle consistency certificate report into Markdown.
+ */
+export function formatPropFirmCertificateMarkdown(cert: PropFirmCertificateResponse): string {
+  const generatedIso = new Date(
+    Number.isFinite(cert.generatedAt) ? cert.generatedAt : Date.now()
+  ).toISOString();
+  const badge = cert.certified ? 'TƏSDİQLƏNDİ' : 'DAVAM EDİR';
+
+  const lines: string[] = [
+    '# Upcomers $50K "1-Step Thunderbolt" Ardıcıllıq Sertifikatı',
+    '',
+    `- **Sertifikat Statusu:** ${badge}`,
+    `- **Ardıcıl Keçilmiş Dövrələr:** ${cert.consecutivePassedCycles} / ${cert.requiredPassedCycles}`,
+    `- **Qalan Dövrə Sayı:** ${cert.remainingCycles}`,
+    `- **Ümumi Tamamlanmış Dövrə:** ${cert.totalCompletedCycles}`,
+    `- **Yaradılma Tarixi (UTC):** ${generatedIso}`,
+    '',
+    '## Dövrələr Tarixçəsi',
+    '',
+  ];
+
+  if (cert.cycles.length === 0) {
+    lines.push('_Hələ heç bir dövrə qeydə alınmayıb._');
+    return lines.join('\n');
+  }
+
+  lines.push(
+    '| # | Status | Başlanğıc | Yekun Kapital | Xalis PnL | Maks. Geriləmə | Əməliyyat (Q/M) | Başlama (UTC) | Bağlanma (UTC) |',
+    '| ---: | :--- | ---: | ---: | ---: | ---: | :---: | :--- | :--- |'
+  );
+
+  for (const cycle of cert.cycles) {
+    const startedIso = new Date(cycle.startedAt).toISOString();
+    const closedIso = cycle.closedAt ? new Date(cycle.closedAt).toISOString() : '-';
+    lines.push(
+      `| #${cycle.cycleNumber} | ${cycle.status} | ${formatUsdMd(cycle.startingBalanceUsd)} | ${formatUsdMd(cycle.currentEquityUsd)} | ${formatSignedUsdMd(cycle.netPnlUsd)} | ${formatUsdMd(cycle.maxDrawdownUsd)} | ${cycle.tradesCount} (${cycle.winCount}/${cycle.lossCount}) | ${startedIso} | ${closedIso} |`
+    );
+  }
+
+  return lines.join('\n');
 }

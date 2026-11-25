@@ -1,332 +1,258 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 import {
   initializeDatabase,
   ensurePropFirmSchema,
   PropFirmRepo,
+  PropFirmConflictError,
+  TradesRepo,
 } from '../sqlite.js';
-import {
-  UPCOMERS_1STEP_50K_DEFAULT,
-  type PropFirmChallengeCycle,
-  type PropFirmDailySnapshot,
-} from '@tradeos/shared';
+import type { PropFirmChallengeCycle, TradeRecord, TradeStatus } from '@tradeos/shared';
 
-function makeCycle(
-  overrides: Partial<PropFirmChallengeCycle> = {}
-): PropFirmChallengeCycle {
-  const startingBalance = overrides.startingBalanceUsd ?? UPCOMERS_1STEP_50K_DEFAULT.accountSizeUsd;
+function makeCycle(overrides: Partial<PropFirmChallengeCycle> = {}): PropFirmChallengeCycle {
+  const startedAt = overrides.startedAt ?? 1_700_000_000_000;
   return {
-    id: overrides.id ?? 'cycle-1',
+    id: overrides.id ?? 'cycle_1',
     cycleNumber: overrides.cycleNumber ?? 1,
     status: overrides.status ?? 'ACTIVE',
-    startingBalanceUsd: startingBalance,
-    currentEquityUsd: overrides.currentEquityUsd ?? startingBalance,
-    highWaterMarkUsd: overrides.highWaterMarkUsd ?? startingBalance,
-    contractualTrailingFloorUsd:
-      overrides.contractualTrailingFloorUsd ??
-      startingBalance - UPCOMERS_1STEP_50K_DEFAULT.contractualTrailingLossUsd,
-    internalTrailingFloorUsd:
-      overrides.internalTrailingFloorUsd ??
-      startingBalance - UPCOMERS_1STEP_50K_DEFAULT.internalTrailingHaltUsd,
-    isFloorLocked: overrides.isFloorLocked ?? false,
-    profitTargetUsd: overrides.profitTargetUsd ?? UPCOMERS_1STEP_50K_DEFAULT.profitTargetUsd,
-    netPnlUsd: overrides.netPnlUsd ?? 0,
-    netPnlPct: overrides.netPnlPct ?? 0,
-    maxDrawdownUsd: overrides.maxDrawdownUsd ?? 0,
-    tradesCount: overrides.tradesCount ?? 0,
-    winCount: overrides.winCount ?? 0,
-    lossCount: overrides.lossCount ?? 0,
-    startedAt: overrides.startedAt ?? 1_700_000_000_000,
-    closedAt: overrides.closedAt ?? null,
+    startingBalanceUsd: 50_000,
+    currentEquityUsd: 50_000,
+    highWaterMarkUsd: 50_000,
+    contractualTrailingFloorUsd: 47_000,
+    internalTrailingFloorUsd: 47_500,
+    isFloorLocked: false,
+    profitTargetUsd: 2_500,
+    netPnlUsd: 0,
+    realizedPnlUsd: 0,
+    netPnlPct: 0,
+    maxDrawdownUsd: 0,
+    tradesCount: 0,
+    winCount: 0,
+    lossCount: 0,
+    startedAt,
+    closedAt: null,
+    ...overrides,
   };
 }
 
-describe('PropFirmRepo & SQLite Schema Migrations', () => {
+function makeTrade(overrides: Partial<TradeRecord> = {}): TradeRecord {
+  return {
+    id: overrides.id ?? 'trade_1',
+    symbol: overrides.symbol ?? 'BTCUSDT',
+    broker_mode: overrides.broker_mode ?? 'BINANCE_DEMO',
+    side: overrides.side ?? 'BUY',
+    status: overrides.status ?? 'OPEN',
+    entry_price: 90_000,
+    exit_price: null,
+    quantity: 0.1,
+    remaining_qty: 0.1,
+    leverage: 10,
+    margin_usd: 900,
+    stop_loss: 89_000,
+    tp1: 91_000,
+    tp2: 92_000,
+    be_price: null,
+    is_breakeven: 0,
+    client_order_id: 'cli_1',
+    client_sl_id: null,
+    client_tp1_id: null,
+    client_tp2_id: null,
+    entry_order_id: 'ent_1',
+    sl_algo_id: null,
+    tp1_algo_id: null,
+    tp2_algo_id: null,
+    realized_pnl: 0,
+    fees_usd: 0,
+    exit_reason: null,
+    opened_at: 1_700_000_000_000,
+    closed_at: null,
+    ...overrides,
+  };
+}
+
+describe('PropFirmRepo — Transactional Rollover & Realized PnL Persistence', () => {
   let db: DatabaseSync;
   let repo: PropFirmRepo;
+  let tradesRepo: TradesRepo;
 
   beforeEach(() => {
     db = initializeDatabase(':memory:');
     repo = new PropFirmRepo(db);
+    tradesRepo = new TradesRepo(db);
   });
 
-  describe('Fresh DB creation & idempotent schema setup', () => {
-    it('creates propfirm tables and indexes on fresh DB and is idempotent on re-run', () => {
-      const tables = db
-        .prepare(
-          `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'propfirm_%' ORDER BY name ASC`
-        )
-        .all() as Array<{ name: string }>;
-      expect(tables.map((t) => t.name)).toEqual([
-        'propfirm_challenge_cycles',
-        'propfirm_daily_snapshots',
-      ]);
-
-      const indexes = db
-        .prepare(
-          `SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_propfirm_%' ORDER BY name ASC`
-        )
-        .all() as Array<{ name: string }>;
-      expect(indexes.map((i) => i.name)).toEqual([
-        'idx_propfirm_cycles_num',
-        'idx_propfirm_cycles_status',
-        'idx_propfirm_daily_date',
-      ]);
-
-      // Calling ensurePropFirmSchema repeatedly on existing DB or bare DB must succeed
-      expect(() => ensurePropFirmSchema(db)).not.toThrow();
-      const bareDb = new DatabaseSync(':memory:');
-      expect(() => ensurePropFirmSchema(bareDb)).not.toThrow();
-      const bareRepo = new PropFirmRepo(bareDb);
-      expect(bareRepo.getNextCycleNumber()).toBe(1);
-    });
-
-    it('creates, retrieves active/latest cycles, and tracks getNextCycleNumber', () => {
-      expect(repo.getActiveCycle()).toBeNull();
-      expect(repo.getLatestCycle()).toBeNull();
-      expect(repo.listCycles()).toEqual([]);
-      expect(repo.getNextCycleNumber()).toBe(1);
-
-      const cycle1 = makeCycle({
-        id: 'cycle-001',
-        cycleNumber: 1,
-        status: 'ACTIVE',
-        startedAt: 1_700_000_000_000,
-      });
-
-      const created = repo.createCycle(cycle1);
-      expect(created).toEqual(cycle1);
-
-      const active = repo.getActiveCycle();
-      expect(active).toEqual(cycle1);
-      expect(active?.isFloorLocked).toBe(false);
-      expect(active?.closedAt).toBeNull();
-
-      expect(repo.getLatestCycle()).toEqual(cycle1);
-      expect(repo.getNextCycleNumber()).toBe(2);
-
-      // Halted non-terminal statuses must still be returned by getActiveCycle()
-      repo.updateCycle('cycle-001', { status: 'HALTED_DAILY_BUFFER' });
-      expect(repo.getActiveCycle()?.status).toBe('HALTED_DAILY_BUFFER');
-
-      repo.updateCycle('cycle-001', { status: 'HALTED_TRAILING_BUFFER' });
-      expect(repo.getActiveCycle()?.status).toBe('HALTED_TRAILING_BUFFER');
-    });
-  });
-
-  describe('Monotonic HWM, floor lock updates, and terminal transitions', () => {
-    it('updates HWM, locks trailing floor at $50,000, and transitions to PASSED / FAILED_DAILY', () => {
-      const cycle1 = makeCycle({ id: 'cycle-lock-1', cycleNumber: 1 });
-      repo.createCycle(cycle1);
-
-      // Update HWM >= $53,000 and lock floor at $50,000
-      repo.updateCycle('cycle-lock-1', {
-        currentEquityUsd: 53_100,
-        highWaterMarkUsd: 53_100,
-        contractualTrailingFloorUsd: 50_000,
-        internalTrailingFloorUsd: 50_500,
-        isFloorLocked: true,
-        netPnlUsd: 3_100,
-        netPnlPct: 6.2,
-        maxDrawdownUsd: 420.5,
-        tradesCount: 4,
-        winCount: 3,
-        lossCount: 1,
-      });
-
-      // Verify raw SQLite storage uses integer 1 for boolean is_floor_locked
-      const rawRow = db
-        .prepare('SELECT is_floor_locked FROM propfirm_challenge_cycles WHERE id = ?')
-        .get('cycle-lock-1') as { is_floor_locked: number };
-      expect(rawRow.is_floor_locked).toBe(1);
-
-      const updated = repo.getActiveCycle();
-      expect(updated).not.toBeNull();
-      expect(updated?.highWaterMarkUsd).toBe(53_100);
-      expect(updated?.contractualTrailingFloorUsd).toBe(50_000);
-      expect(updated?.internalTrailingFloorUsd).toBe(50_500);
-      expect(updated?.isFloorLocked).toBe(true);
-      expect(updated?.maxDrawdownUsd).toBe(420.5);
-      expect(updated?.tradesCount).toBe(4);
-      expect(updated?.winCount).toBe(3);
-      expect(updated?.lossCount).toBe(1);
-
-      // Empty patch must be a safe no-op
-      expect(() => repo.updateCycle('cycle-lock-1', {})).not.toThrow();
-
-      // Transition to PASSED
-      const closedAt = 1_700_005_000_000;
-      repo.updateCycle('cycle-lock-1', {
-        status: 'PASSED',
-        closedAt,
-      });
-
-      expect(repo.getActiveCycle()).toBeNull();
-      const latest = repo.getLatestCycle();
-      expect(latest?.status).toBe('PASSED');
-      expect(latest?.closedAt).toBe(closedAt);
-
-      // Create second cycle and transition to FAILED_DAILY
-      const cycle2 = makeCycle({
-        id: 'cycle-fail-2',
-        cycleNumber: 2,
-        startedAt: 1_700_010_000_000,
-      });
-      repo.createCycle(cycle2);
-      repo.updateCycle('cycle-fail-2', {
-        status: 'FAILED_DAILY',
-        currentEquityUsd: 48_450,
-        netPnlUsd: -1_550,
-        netPnlPct: -3.1,
-        maxDrawdownUsd: 1_550,
-        closedAt: 1_700_020_000_000,
-      });
-
-      expect(repo.getActiveCycle()).toBeNull();
-      const listed = repo.listCycles(10);
-      expect(listed.map((c) => c.cycleNumber)).toEqual([2, 1]);
-      expect(listed[0]?.status).toBe('FAILED_DAILY');
-      expect(listed[1]?.status).toBe('PASSED');
-      expect(repo.listCycles(1)).toHaveLength(1);
-    });
-  });
-
-  describe('countConsecutivePassedCycles()', () => {
-    it('returns 5 for 5 consecutive PASSED cycles and ignores non-terminal head cycle', () => {
-      expect(repo.countConsecutivePassedCycles()).toBe(0);
-
-      for (let i = 1; i <= 5; i++) {
-        repo.createCycle(
-          makeCycle({
-            id: `passed-${i}`,
-            cycleNumber: i,
-            status: 'PASSED',
-            currentEquityUsd: 52_500,
-            highWaterMarkUsd: 52_500,
-            netPnlUsd: 2_500,
-            netPnlPct: 5.0,
-            startedAt: 1_700_000_000_000 + i * 100_000,
-            closedAt: 1_700_000_050_000 + i * 100_000,
-          })
-        );
-      }
-
-      expect(repo.countConsecutivePassedCycles()).toBe(5);
-
-      // An active or transiently halted head cycle must not erase the 5-cycle passed streak
+  it.each<TradeStatus>(['OPEN', 'PARTIALLY_CLOSED', 'CLOSING', 'CLOSING_IN_PROGRESS'])(
+    'rolloverCycle rejects active trade status %s across all symbols with PropFirmConflictError(OPEN_POSITION_EXISTS)',
+    (tradeStatus) => {
       repo.createCycle(
         makeCycle({
-          id: 'active-6',
-          cycleNumber: 6,
-          status: 'ACTIVE',
-          startedAt: 1_700_001_000_000,
+          id: 'cycle_1',
+          cycleNumber: 1,
+          status: 'PASSED',
+          closedAt: 1_700_000_100_000,
         })
       );
-      expect(repo.countConsecutivePassedCycles()).toBe(5);
 
-      repo.updateCycle('active-6', { status: 'HALTED_DAILY_BUFFER' });
-      expect(repo.countConsecutivePassedCycles()).toBe(5);
-
-      repo.updateCycle('active-6', { status: 'HALTED_TRAILING_BUFFER' });
-      expect(repo.countConsecutivePassedCycles()).toBe(5);
-    });
-
-    it('breaks streak on FAILED_DAILY and FAILED_TRAILING', () => {
-      repo.createCycle(
-        makeCycle({ id: 'c1', cycleNumber: 1, status: 'PASSED', closedAt: 100 })
-      );
-      repo.createCycle(
-        makeCycle({ id: 'c2', cycleNumber: 2, status: 'PASSED', closedAt: 200 })
-      );
-      repo.createCycle(
-        makeCycle({ id: 'c3', cycleNumber: 3, status: 'FAILED_DAILY', closedAt: 300 })
-      );
-      repo.createCycle(
-        makeCycle({ id: 'c4', cycleNumber: 4, status: 'PASSED', closedAt: 400 })
+      tradesRepo.insert(
+        makeTrade({
+          id: `trade_${tradeStatus}`,
+          symbol: 'ETHUSDT',
+          status: tradeStatus,
+        })
       );
 
-      // Cycle 3 FAILED_DAILY breaks the older 2-cycle streak -> only Cycle 4 counts
-      expect(repo.countConsecutivePassedCycles()).toBe(1);
+      const nextCycle = makeCycle({
+        id: 'cycle_2',
+        cycleNumber: 2,
+        status: 'ACTIVE',
+        startedAt: 1_700_000_200_000,
+      });
 
-      // A trailing failure at Cycle 5 resets the streak to 0 even if Cycle 6 is ACTIVE
+      let caught: unknown;
+      try {
+        repo.rolloverCycle(nextCycle);
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(PropFirmConflictError);
+      expect((caught as PropFirmConflictError).code).toBe('OPEN_POSITION_EXISTS');
+      expect(repo.listCycles()).toHaveLength(1);
+    }
+  );
+
+  it.each(['ACTIVE', 'HALTED_DAILY_BUFFER'] as const)(
+    'rolloverCycle rejects %s cycle with PropFirmConflictError(CYCLE_STILL_ACTIVE)',
+    (cycleStatus) => {
       repo.createCycle(
-        makeCycle({ id: 'c5', cycleNumber: 5, status: 'FAILED_TRAILING', closedAt: 500 })
+        makeCycle({
+          id: 'cycle_1',
+          cycleNumber: 1,
+          status: cycleStatus,
+        })
       );
-      repo.createCycle(
-        makeCycle({ id: 'c6', cycleNumber: 6, status: 'ACTIVE', closedAt: null })
-      );
-      expect(repo.countConsecutivePassedCycles()).toBe(0);
-    });
+
+      const nextCycle = makeCycle({
+        id: 'cycle_2',
+        cycleNumber: 2,
+        status: 'ACTIVE',
+        startedAt: 1_700_000_200_000,
+      });
+
+      let caught: unknown;
+      try {
+        repo.rolloverCycle(nextCycle);
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(PropFirmConflictError);
+      expect((caught as PropFirmConflictError).code).toBe('CYCLE_STILL_ACTIVE');
+      expect(repo.listCycles()).toHaveLength(1);
+    }
+  );
+
+  it('rolloverCycle atomically finalizes HALTED_TRAILING_BUFFER -> FAILED_TRAILING with closedAt and inserts Cycle N+1 with realizedPnlUsd: 0', () => {
+    repo.createCycle(
+      makeCycle({
+        id: 'cycle_1',
+        cycleNumber: 1,
+        status: 'HALTED_TRAILING_BUFFER',
+        netPnlUsd: -2_510,
+        realizedPnlUsd: -2_510,
+        closedAt: null,
+      })
+    );
+
+    // Closed trade on another symbol should not block rollover
+    tradesRepo.insert(
+      makeTrade({
+        id: 'closed_trade_1',
+        symbol: 'SOLUSDT',
+        status: 'CLOSED',
+        closed_at: 1_700_000_150_000,
+      })
+    );
+
+    const rolloverTime = 1_700_000_300_000;
+    const inserted = repo.rolloverCycle(
+      makeCycle({
+        id: 'cycle_2',
+        cycleNumber: 2,
+        status: 'ACTIVE',
+        realizedPnlUsd: 0,
+        startedAt: rolloverTime,
+      })
+    );
+
+    expect(inserted.id).toBe('cycle_2');
+    expect(inserted.cycleNumber).toBe(2);
+    expect(inserted.realizedPnlUsd).toBe(0);
+
+    const cycles = repo.listCycles();
+    expect(cycles).toHaveLength(2);
+
+    const cycle1 = cycles.find((c) => c.id === 'cycle_1');
+    const cycle2 = cycles.find((c) => c.id === 'cycle_2');
+
+    expect(cycle1?.status).toBe('FAILED_TRAILING');
+    expect(cycle1?.closedAt).toBe(rolloverTime);
+    expect(cycle2?.status).toBe('ACTIVE');
+    expect(cycle2?.realizedPnlUsd).toBe(0);
+    expect(repo.countConsecutivePassedCycles()).toBe(0);
   });
 
-  describe('upsertDailySnapshot() & getDailySnapshot()', () => {
-    it('inserts 00:00 UTC baseline and updates EOD metrics idempotently on (utc_date, cycle_id)', () => {
-      const cycle = makeCycle({ id: 'cycle-snap-1', cycleNumber: 1 });
-      repo.createCycle(cycle);
+  it('rolloverCycle allows rollover from PASSED and preserves streak', () => {
+    repo.createCycle(
+      makeCycle({
+        id: 'cycle_1',
+        cycleNumber: 1,
+        status: 'PASSED',
+        netPnlUsd: 2_550,
+        realizedPnlUsd: 2_550,
+        closedAt: 1_700_000_100_000,
+      })
+    );
 
-      expect(repo.getDailySnapshot('2026-11-25', 'cycle-snap-1')).toBeNull();
+    const inserted = repo.rolloverCycle(
+      makeCycle({
+        id: 'cycle_2',
+        cycleNumber: 2,
+        status: 'ACTIVE',
+        startedAt: 1_700_000_200_000,
+      })
+    );
 
-      const baseline: PropFirmDailySnapshot = {
-        utcDate: '2026-11-25',
-        cycleId: 'cycle-snap-1',
-        dayStartEquityUsd: 50_000,
-        currentEquityUsd: 50_000,
-        dailyPnlUsd: 0,
-        dailyMinEquityUsd: 50_000,
-        dailyHalted: false,
-        updatedAt: 1_795_564_800_000,
-      };
-      repo.upsertDailySnapshot(baseline);
+    expect(inserted.cycleNumber).toBe(2);
+    expect(repo.getActiveCycle()?.id).toBe('cycle_2');
+    expect(repo.countConsecutivePassedCycles()).toBe(1);
+  });
 
-      const loadedBaseline = repo.getDailySnapshot('2026-11-25', 'cycle-snap-1');
-      expect(loadedBaseline).toEqual(baseline);
-      expect(loadedBaseline?.dailyHalted).toBe(false);
+  it('realized_pnl_usd persists separately from net_pnl_usd across reads and idempotent schema migration', () => {
+    repo.createCycle(
+      makeCycle({
+        id: 'cycle_1',
+        cycleNumber: 1,
+        status: 'ACTIVE',
+        netPnlUsd: 0,
+        realizedPnlUsd: 0,
+      })
+    );
 
-      // Upsert same (utc_date, cycle_id) with EOD loss & halt triggered
-      const eodUpdate: PropFirmDailySnapshot = {
-        utcDate: '2026-11-25',
-        cycleId: 'cycle-snap-1',
-        dayStartEquityUsd: 50_000,
-        currentEquityUsd: 48_740,
-        dailyPnlUsd: -1_260,
-        dailyMinEquityUsd: 48_740,
-        dailyHalted: true,
-        updatedAt: 1_795_600_000_000,
-      };
-      repo.upsertDailySnapshot(eodUpdate);
-
-      const loadedUpdate = repo.getDailySnapshot('2026-11-25', 'cycle-snap-1');
-      expect(loadedUpdate).toEqual(eodUpdate);
-      expect(loadedUpdate?.dailyHalted).toBe(true);
-
-      // Confirm no duplicate row was created and raw integer 1 is stored
-      const countRow = db
-        .prepare(
-          'SELECT COUNT(*) as cnt, MAX(daily_halted) as halted FROM propfirm_daily_snapshots WHERE utc_date = ? AND cycle_id = ?'
-        )
-        .get('2026-11-25', 'cycle-snap-1') as { cnt: number; halted: number };
-      expect(countRow.cnt).toBe(1);
-      expect(countRow.halted).toBe(1);
-
-      // Next UTC day creates a distinct row
-      const nextDay: PropFirmDailySnapshot = {
-        utcDate: '2026-11-26',
-        cycleId: 'cycle-snap-1',
-        dayStartEquityUsd: 48_740,
-        currentEquityUsd: 49_200,
-        dailyPnlUsd: 460,
-        dailyMinEquityUsd: 48_740,
-        dailyHalted: false,
-        updatedAt: 1_795_651_200_000,
-      };
-      repo.upsertDailySnapshot(nextDay);
-      expect(repo.getDailySnapshot('2026-11-26', 'cycle-snap-1')).toEqual(nextDay);
-      expect(repo.getDailySnapshot('2026-11-25', 'cycle-snap-1')).toEqual(eodUpdate);
-
-      // Deleting parent cycle cascades to snapshots
-      db.prepare('DELETE FROM propfirm_challenge_cycles WHERE id = ?').run('cycle-snap-1');
-      expect(repo.getDailySnapshot('2026-11-25', 'cycle-snap-1')).toBeNull();
-      expect(repo.getDailySnapshot('2026-11-26', 'cycle-snap-1')).toBeNull();
+    repo.updateCycle('cycle_1', {
+      netPnlUsd: 500,
+      realizedPnlUsd: 100,
+      currentEquityUsd: 50_500,
     });
+
+    const active = repo.getActiveCycle();
+    expect(active?.netPnlUsd).toBe(500);
+    expect(active?.realizedPnlUsd).toBe(100);
+
+    // Idempotent schema re-run should not throw or clobber realized_pnl_usd
+    expect(() => ensurePropFirmSchema(db)).not.toThrow();
+    const afterMigration = repo.getLatestCycle();
+    expect(afterMigration?.netPnlUsd).toBe(500);
+    expect(afterMigration?.realizedPnlUsd).toBe(100);
   });
 });

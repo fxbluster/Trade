@@ -4,6 +4,8 @@ export interface SizingCalculationParams {
   confluenceScore: number; // 0 to 100
   walletBalance: number;
   availableBalance: number;
+  /** Optional simulated PropFirm capital benchmark (e.g. $50,000) used to size target margin while reserving 20% of real walletBalance */
+  sizingBasisBalance?: number;
   leverage?: number; // default 10
   winRate?: number; // e.g. 0.60
   rewardRiskRatio?: number; // e.g. 1.5
@@ -175,12 +177,16 @@ export class AdaptiveSizingEngine {
     const unadjusted = rawMarginPct * kellyDampener * volatilityParity * circuitMultiplier;
     let finalMarginPct = Math.min(0.30, Math.max(0.05, unadjusted));
 
-    // Calculate USD margin, ensuring solvency airbag buffer is preserved
-    let marginUsd = walletBalance * finalMarginPct;
+    // Calculate USD margin from benchmark equity (e.g. $50K PropFirm) while clamping strictly to real available balance minus 20% wallet reserve
+    const basisBalance =
+      params.sizingBasisBalance && Number.isFinite(params.sizingBasisBalance) && params.sizingBasisBalance > 0
+        ? params.sizingBasisBalance
+        : walletBalance;
+    let marginUsd = basisBalance * finalMarginPct;
     const maxAllowedMargin = Math.max(0, availableBalance - minReserve);
     if (marginUsd > maxAllowedMargin) {
       marginUsd = maxAllowedMargin;
-      finalMarginPct = walletBalance > 0 ? marginUsd / walletBalance : 0;
+      finalMarginPct = basisBalance > 0 ? marginUsd / basisBalance : 0;
     }
 
     const notionalUsd = marginUsd * leverage;

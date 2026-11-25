@@ -621,4 +621,24 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
     expect(afterDup.cycle.tradesCount).toBe(1);
     expect(afterDup.cycle.realizedPnlUsd).toBe(290);
   });
+
+  it('autoPilot_sizesFrom50kPropFirmBenchmarkOn5kTestnetWalletWithinRealReserve', async () => {
+    const wallet5k = 5_000;
+    mockBroker.account.walletBalance = wallet5k;
+    mockBroker.account.equity = wallet5k;
+    mockBroker.account.availableBalance = wallet5k;
+
+    setBuySnapshot(confluenceEngine);
+    markPrice = 100;
+    // With getAtr() = 2.0 -> 1.5*ATR = 3.0 stop distance:
+    // Legacy 10% of $5,000 capped margin at $500 (50 qty). With $50,000 benchmark (10% = $5,000 capped to $4,000 reserve),
+    // $250 PropFirm risk limit allows 83.3333 qty = $8,333.33 notional = $833.33 margin (> $500 legacy cap!).
+    await autoPilot.onTick('SOLUSDT', 100);
+
+    expect(mockBroker.openOrderCalls).toHaveLength(1);
+    const placed = mockBroker.openOrderCalls[0];
+    expect(placed.marginUsd).toBeGreaterThan(500);
+    expect(placed.marginUsd).toBeLessThanOrEqual(4_000); // Respects 20% real wallet reserve ($1,000)
+    expect(placed.quantity).toBeCloseTo(83.3333, 2); // Exact $250 risk at $3.00 stop distance
+  });
 });

@@ -495,7 +495,16 @@ export class TradeManager {
         };
 
         // Gate 3: Risk Engine Gatekeeper (Cooldown, Margin Cap, Drawdown, Dead-SL Armor)
-        const riskValidation = validateOrderRisk(effectiveReq, account, currentRisk, markPrice);
+        const riskValidation = validateOrderRisk(
+          effectiveReq,
+          account,
+          currentRisk,
+          markPrice,
+          Date.now(),
+          isPropFirmDemoActive && this.propFirmRiskGuard
+            ? { propFirmBenchmarkUsd: this.propFirmRiskGuard.getConfig().accountSizeUsd }
+            : undefined
+        );
         if (!riskValidation.allowed) {
           if (riskValidation.code === 'ERR_COOLDOWN_ACTIVE') {
             throw new TradeManagerError(
@@ -804,10 +813,15 @@ export class TradeManager {
           updated_at: now,
         };
 
+        const riskBenchmarkBalance =
+          this.propFirmRiskGuard && this.brokerMode === 'BINANCE_DEMO'
+            ? Math.max(account.walletBalance, this.propFirmRiskGuard.getConfig().accountSizeUsd)
+            : account.walletBalance;
+
         const updatedRisk = updateRiskStateOnTradeClose(
           closedTrade,
           currentRisk,
-          account.walletBalance,
+          riskBenchmarkBalance,
           now
         );
         this.riskStateRepo.update(updatedRisk);

@@ -817,6 +817,13 @@ export class AutoPilotManager {
         }
       }
 
+      const isPropFirmDemoActive =
+        Boolean(this.propFirmRiskGuard) && this.broker.mode === 'BINANCE_DEMO';
+      const sizingBasisUsd =
+        isPropFirmDemoActive && this.propFirmRiskGuard
+          ? Math.max(balance, this.propFirmRiskGuard.getConfig().accountSizeUsd)
+          : balance;
+
       const snapshot = this.confluenceEngine.getSnapshot(symbol);
       const score = snapshot?.compositeScore ?? 75;
 
@@ -825,6 +832,7 @@ export class AutoPilotManager {
           confluenceScore: score,
           walletBalance: balance,
           availableBalance: account.availableBalance,
+          sizingBasisBalance: isPropFirmDemoActive ? sizingBasisUsd : undefined,
           leverage,
           atr14: atr,
           consecutiveLosses: this.consecutiveLosses,
@@ -867,10 +875,13 @@ export class AutoPilotManager {
         marginUsd = sizing.marginUsd;
         marginAllocationPct = Number((sizing.finalMarginPct * 100).toFixed(2));
       } else {
-        // Strictly enforce 10% maximum margin allocation
+        // Strictly enforce 10% maximum margin allocation (anchored to $50K PropFirm benchmark in BINANCE_DEMO while respecting 20% real wallet reserve)
         const maxMarginPct = Math.min(10.0, this.config.marginAllocationPct);
-        const targetMarginUsd = Number(((balance * maxMarginPct) / 100).toFixed(2));
-        marginUsd = Math.min(targetMarginUsd, account.availableBalance);
+        const targetMarginUsd = Number(((sizingBasisUsd * maxMarginPct) / 100).toFixed(2));
+        const realWalletSpendable = isPropFirmDemoActive
+          ? Math.max(0, Number((account.availableBalance - balance * 0.20).toFixed(2)))
+          : account.availableBalance;
+        marginUsd = Math.min(targetMarginUsd, realWalletSpendable);
         marginAllocationPct = maxMarginPct;
 
         if (marginUsd < 5.0) {
@@ -933,8 +944,8 @@ export class AutoPilotManager {
           targetQty = clamped.qty;
           notionalUsd = Number((targetQty * refPrice).toFixed(2));
           marginUsd = Number((notionalUsd / leverage).toFixed(2));
-          if (balance > 0) {
-            marginAllocationPct = Number(((marginUsd / balance) * 100).toFixed(2));
+          if (sizingBasisUsd > 0) {
+            marginAllocationPct = Number(((marginUsd / sizingBasisUsd) * 100).toFixed(2));
           }
         }
       }
@@ -1384,7 +1395,8 @@ export class AutoPilotManager {
           tp1,
           tp2,
           marginAllocationPct,
-        });
+          isAutoPilot: true,
+        } as any);
 
         const fillEntryPrice = trade.entry_price || markPrice;
         this.tradesRepo.update(trade.id, {

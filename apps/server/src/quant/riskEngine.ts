@@ -28,7 +28,8 @@ export function validateOrderRisk(
   account: AccountInfo,
   riskState: RiskStateRecord,
   markPrice: number,
-  now: number = Date.now()
+  now: number = Date.now(),
+  options?: { propFirmBenchmarkUsd?: number }
 ): RiskValidationResult {
   // Gate 1: 15-minute Anti-Gambling / Anti-Revenge Cooldown Lock
   if (riskState.cooldown_until && now < riskState.cooldown_until) {
@@ -61,8 +62,13 @@ export function validateOrderRisk(
       (req as any).isManual === true ||
       (req as any).executionMode === 'MANUAL');
 
+  const effectiveCapBalance =
+    options?.propFirmBenchmarkUsd && options.propFirmBenchmarkUsd > account.walletBalance
+      ? options.propFirmBenchmarkUsd
+      : account.walletBalance;
+
   const maxMarginPct = isAutoPilot ? 0.10 : isExplicitManualExpanded ? 0.50 : 0.10;
-  const maxMarginAllowed = Number((account.walletBalance * maxMarginPct).toFixed(2));
+  const maxMarginAllowed = Number((effectiveCapBalance * maxMarginPct).toFixed(2));
   if (req.marginUsd > maxMarginAllowed + 0.01) {
     return {
       allowed: false,
@@ -73,8 +79,20 @@ export function validateOrderRisk(
     };
   }
 
-  // Gate 4: Dynamic Session Drawdown Limit: max($5, 3% of balance)
-  const maxSessionDrawdown = Math.max(5.0, Number((account.walletBalance * 0.03).toFixed(2)));
+  // Ensure real exchange wallet holds sufficient free margin (with 15% liquidation reserve) when sizing from PropFirm benchmark
+  if (options?.propFirmBenchmarkUsd && options.propFirmBenchmarkUsd > account.walletBalance) {
+    const maxExchangeMarginAllowed = Number((Math.max(0, account.availableBalance) * 0.85).toFixed(2));
+    if (req.marginUsd > maxExchangeMarginAllowed + 0.01) {
+      return {
+        allowed: false,
+        code: 'ERR_MARGIN_CAP_EXCEEDED',
+        reason: `Tələb olunan marja ($${req.marginUsd.toFixed(2)}) Testnet mövcud cüzdan limitindən ($${maxExchangeMarginAllowed.toFixed(2)}) çoxdur`,
+      };
+    }
+  }
+
+  // Gate 4: Dynamic Session Drawdown Limit: max($5, 3% of benchmark/wallet balance)
+  const maxSessionDrawdown = Math.max(5.0, Number((effectiveCapBalance * 0.03).toFixed(2)));
   if (riskState.session_net_pnl <= -maxSessionDrawdown) {
     return {
       allowed: false,

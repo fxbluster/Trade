@@ -7,8 +7,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import type { PropFirmStatusResponse, PropFirmChallengeCycle, TradeRecord } from '@tradeos/shared';
 import { useMarketStore } from '../../store/useMarketStore';
-import { invalidateSessionToken } from '../../lib/apiClient';
-import { PropFirmChallengeHUD } from '../PropFirmChallengeHUD';
+import { apiClient, invalidateSessionToken } from '../../lib/apiClient';
+import { PropFirmChallengeHUD, type PropFirmChallengeHUDProps } from '../PropFirmChallengeHUD';
 
 async function flushAsyncUi(): Promise<void> {
   await Promise.resolve();
@@ -139,10 +139,10 @@ describe('PropFirmChallengeHUD', () => {
     container.remove();
   });
 
-  function renderHud() {
+  function renderHud(props?: PropFirmChallengeHUDProps) {
     root = createRoot(container);
     flushSync(() => {
-      root!.render(React.createElement(PropFirmChallengeHUD));
+      root!.render(React.createElement(PropFirmChallengeHUD, props));
     });
   }
 
@@ -601,6 +601,200 @@ describe('PropFirmChallengeHUD', () => {
       expect(caughtErr.code).toBe('OPEN_POSITION_EXISTS');
       expect(caughtErr.message).toContain('Açıq mövqe');
     } finally {
+      invalidateSessionToken();
+    }
+  });
+
+  it('renders cycle history table immediately when defaultHistoryOpen is true', () => {
+    const cycles: PropFirmChallengeCycle[] = [
+      makeCycle({ id: 'c1', cycleNumber: 1, status: 'PASSED', netPnlUsd: 2_510 }),
+    ];
+    useMarketStore.setState({
+      propFirmStatus: makeStatus({ cycle: cycles[0], cycles }),
+    });
+
+    renderHud({ defaultHistoryOpen: true });
+
+    const table = container.querySelector('[data-testid="propfirm-history-table"]');
+    expect(table).not.toBeNull();
+    expect(table?.textContent).toContain('#1');
+    expect(table?.textContent).toContain('✓ UĞURLU');
+
+    // Toggle can still collapse it
+    const toggleBtn = container.querySelector(
+      '[data-testid="propfirm-history-toggle"]'
+    ) as HTMLButtonElement | null;
+    expect(toggleBtn).not.toBeNull();
+    flushSync(() => {
+      toggleBtn!.click();
+    });
+    expect(container.querySelector('[data-testid="propfirm-history-table"]')).toBeNull();
+  });
+
+  it('apiClient.getPropFirmCertificate("markdown") returns raw Markdown text with Bearer auth header and retries once on 401', async () => {
+    sessionStorage.setItem('tradeos_session_token', 'stale-token');
+    try {
+      const markdownBody = '# Upcomers $50K Certificate\n\n- Cycle #1: PASSED';
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response('Unauthorized', { status: 401 }))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ token: 'fresh-token' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+        .mockResolvedValueOnce(
+          new Response(markdownBody, {
+            status: 200,
+            headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
+          })
+        );
+
+      const text: string = await apiClient.getPropFirmCertificate('markdown');
+      expect(text).toBe(markdownBody);
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      const firstHeaders = fetchMock.mock.calls[0][1]?.headers as Headers;
+      expect(fetchMock.mock.calls[0][0]).toBe('/api/propfirm/certificate?format=markdown');
+      expect(firstHeaders.get('Authorization')).toBe('Bearer stale-token');
+
+      expect(fetchMock.mock.calls[1][0]).toBe('/api/auth/session');
+
+      const retryHeaders = fetchMock.mock.calls[2][1]?.headers as Headers;
+      expect(fetchMock.mock.calls[2][0]).toBe('/api/propfirm/certificate?format=markdown');
+      expect(retryHeaders.get('Authorization')).toBe('Bearer fresh-token');
+    } finally {
+      invalidateSessionToken();
+    }
+  });
+
+  it('propfirm-download-cert-btn shows loading state, triggers .md Blob download, and surfaces dismissible errors cleanly', async () => {
+    sessionStorage.setItem('tradeos_session_token', 'cert-token');
+    const origCreateObjectURL = URL.createObjectURL;
+    const origRevokeObjectURL = URL.revokeObjectURL;
+
+    let deferredResolve!: (res: Response) => void;
+    const pendingPromise = new Promise<Response>((resolve) => {
+      deferredResolve = resolve;
+    });
+
+    const createObjectURLMock = vi.fn().mockReturnValue('blob:mock-cert-url');
+    const revokeObjectURLMock = vi.fn();
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      writable: true,
+      value: createObjectURLMock,
+    });
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      writable: true,
+      value: revokeObjectURLMock,
+    });
+
+    try {
+      useMarketStore.setState({ propFirmStatus: makeStatus() });
+      renderHud();
+
+      const btn = container.querySelector(
+        '[data-testid="propfirm-download-cert-btn"]'
+      ) as HTMLButtonElement | null;
+      expect(btn).not.toBeNull();
+      expect(btn?.textContent).toContain('Sertifikatı Yüklə (.md)');
+
+      const clickedDownloads: Array<{ href: string; download: string }> = [];
+      const origCreateElement = document.createElement.bind(document);
+      vi.spyOn(document, 'createElement').mockImplementation(((tagName: string) => {
+        const el = origCreateElement(tagName);
+        if (tagName.toLowerCase() === 'a') {
+          const anchor = el as HTMLAnchorElement;
+          anchor.click = () => {
+            clickedDownloads.push({ href: anchor.href, download: anchor.download });
+          };
+        }
+        return el;
+      }) as typeof document.createElement);
+
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockReturnValueOnce(pendingPromise)
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ error: 'Sertifikat tapılmadı' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+
+      // Click starts download and sets loading state
+      flushSync(() => {
+        btn!.click();
+      });
+      expect(btn?.disabled).toBe(true);
+      expect(btn?.textContent).toContain('Yüklənir...');
+
+      // Resolve markdown response with Content-Disposition filename
+      deferredResolve(
+        new Response('# Upcomers Report', {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/markdown; charset=utf-8',
+            'Content-Disposition': 'attachment; filename="upcomers-50k-certificate-2026-11-25.md"',
+          },
+        })
+      );
+      await flushAsyncUi();
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/propfirm/certificate?format=markdown',
+        expect.objectContaining({
+          headers: expect.any(Headers),
+        })
+      );
+      const sentHeaders = fetchMock.mock.calls[0][1]?.headers as Headers;
+      expect(sentHeaders.get('Authorization')).toBe('Bearer cert-token');
+
+      expect(createObjectURLMock).toHaveBeenCalledTimes(1);
+      expect(createObjectURLMock.mock.calls[0][0]).toBeInstanceOf(Blob);
+      expect(clickedDownloads).toEqual([
+        {
+          href: 'blob:mock-cert-url',
+          download: 'upcomers-50k-certificate-2026-11-25.md',
+        },
+      ]);
+      expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:mock-cert-url');
+      expect(btn?.disabled).toBe(false);
+      expect(btn?.textContent).toContain('Sertifikatı Yüklə (.md)');
+      expect(container.querySelector('[data-testid="propfirm-download-cert-error"]')).toBeNull();
+
+      // Second click fails -> surfaces inline dismissible error
+      flushSync(() => {
+        btn!.click();
+      });
+      await flushAsyncUi();
+
+      expect(btn?.disabled).toBe(false);
+      expect(btn?.textContent).toContain('Sertifikatı Yüklə (.md)');
+      const errBanner = container.querySelector('[data-testid="propfirm-download-cert-error"]');
+      expect(errBanner).not.toBeNull();
+      expect(errBanner?.textContent).toContain('Sertifikat tapılmadı');
+
+      const dismissBtn = errBanner?.querySelector('button') as HTMLButtonElement | null;
+      expect(dismissBtn).not.toBeNull();
+      flushSync(() => {
+        dismissBtn!.click();
+      });
+      expect(container.querySelector('[data-testid="propfirm-download-cert-error"]')).toBeNull();
+    } finally {
+      Object.defineProperty(URL, 'createObjectURL', {
+        configurable: true,
+        writable: true,
+        value: origCreateObjectURL,
+      });
+      Object.defineProperty(URL, 'revokeObjectURL', {
+        configurable: true,
+        writable: true,
+        value: origRevokeObjectURL,
+      });
       invalidateSessionToken();
     }
   });

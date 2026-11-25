@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { TopBar } from './components/TopBar';
+import { WorkspaceNavBar } from './components/WorkspaceNavBar';
 import { PropFirmChallengeHUD } from './components/PropFirmChallengeHUD';
 import { ConfluenceHUD } from './components/ConfluenceHUD';
 import { AutoPilotControls } from './components/AutoPilotControls';
@@ -30,6 +31,7 @@ export const App: React.FC = () => {
   const isBottomExpanded = useUiStore((s) => s.isBottomExpanded);
   const rightRailTab = useUiStore((s) => s.rightRailTab);
   const setRightRailTab = useUiStore((s) => s.setRightRailTab);
+  const activeWorkspaceView = useUiStore((s) => s.activeWorkspaceView);
 
   // Initialize REST and WebSocket Connections
   useEffect(() => {
@@ -109,94 +111,130 @@ export const App: React.FC = () => {
       {/* 1. Global Navigation TopBar */}
       <TopBar />
 
+      {/* 1b. Slim 3-View Workspace Navigation Bar */}
+      <WorkspaceNavBar />
+
       {/* 2. Main 70 / 30 Two-Column Cockpit Layout */}
-      <main className="flex-1 flex overflow-hidden p-2 gap-2">
-        {/* Left / Center Zone (70%): Confluence HUD, Chart & Cockpit Bottom Tabs */}
-        <section className="flex-[7] flex flex-col min-w-0 h-full gap-2 overflow-hidden">
-          {/* Upcomers $50K Prop Firm Challenge Monitor (Sadə Dildə) */}
-          <div className="flex-shrink-0">
-            <PropFirmChallengeHUD />
-          </div>
-
-          {/* 6+1 Confluence Decision Engine HUD */}
-          <div className="flex-shrink-0">
-            <ConfluenceHUD />
-          </div>
-
-          {/* Chart Canvas Area */}
-          <div className={`${isBottomExpanded ? 'flex-[3] min-h-[220px]' : 'flex-[6] min-h-[280px]'} relative transition-all duration-200`}>
-            <ChartCanvas className="h-full" />
-          </div>
-
-          {/* Bottom Cockpit Panel with Tab Switcher */}
-          <div className={`${isBottomExpanded ? 'flex-[7] min-h-[300px] max-h-[45vh]' : 'flex-[4] min-h-[200px]'} flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden transition-all duration-200`}>
-            {/* Tab Header */}
-            <div className="flex items-center space-x-1 px-3 py-1.5 border-b border-[#151d2c] bg-[#020305] font-mono text-xs">
-              <button
-                onClick={() => setActiveBottomTab('POSITION')}
-                className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
-                  activeBottomTab === 'POSITION'
-                    ? 'bg-[#151d2c] text-[#0ecb81] font-bold'
-                    : 'text-[#7d8590] hover:text-[#e6edf3]'
-                }`}
+      <main className="flex-1 flex min-h-0 overflow-hidden p-2 gap-2">
+        {/* Left / Center Zone (70%): Active Workspace View */}
+        <section
+          data-testid="workspace-main-canvas"
+          className="flex-[7] flex flex-col min-w-0 h-full gap-2 overflow-hidden"
+        >
+          {activeWorkspaceView === 'TRADING' && (
+            <div
+              data-testid="workspace-view-TRADING"
+              className="flex-1 flex flex-col min-h-0 gap-2 overflow-hidden"
+            >
+              {/* Chart Canvas Area */}
+              <div
+                className={`${
+                  isBottomExpanded ? 'flex-[3] min-h-[220px]' : 'flex-[6] min-h-[280px]'
+                } relative overflow-hidden transition-all duration-200`}
               >
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>Active Position</span>
-                {activePosition && activePosition.status !== 'CLOSED' && (
-                  <span className="w-2 h-2 rounded-full bg-[#0ecb81] animate-pulse" />
-                )}
-              </button>
+                <ChartCanvas className="h-full" />
+              </div>
 
-              <button
-                onClick={() => setActiveBottomTab('ORDERS')}
-                className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
-                  activeBottomTab === 'ORDERS'
-                    ? 'bg-[#151d2c] text-[#2962ff] font-bold'
-                    : 'text-[#7d8590] hover:text-[#e6edf3]'
-                }`}
+              {/* Bottom Cockpit Panel with Tab Switcher */}
+              <div
+                data-testid="cockpit-bottom-panel"
+                className={`${
+                  isBottomExpanded ? 'flex-[7] min-h-[300px] max-h-[55vh]' : 'flex-[4] min-h-[240px]'
+                } flex flex-col bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden transition-all duration-200`}
               >
-                <ListOrdered className="w-3.5 h-3.5" />
-                <span>Open Orders</span>
-                {openOrders.length > 0 && (
-                  <span className="px-1.5 py-0.2 rounded text-[10px] bg-[#2962ff]/20 text-[#2962ff] font-bold">
-                    {openOrders.length}
-                  </span>
-                )}
-              </button>
+                {/* Tab Header */}
+                <div className="flex items-center space-x-1 px-3 py-1.5 border-b border-[#151d2c] bg-[#020305] font-mono text-xs">
+                  <button
+                    onClick={() => setActiveBottomTab('POSITION')}
+                    className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
+                      activeBottomTab === 'POSITION'
+                        ? 'bg-[#151d2c] text-[#0ecb81] font-bold'
+                        : 'text-[#7d8590] hover:text-[#e6edf3]'
+                    }`}
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    <span>Active Position</span>
+                    {activePosition && activePosition.status !== 'CLOSED' && (
+                      <span className="w-2 h-2 rounded-full bg-[#0ecb81] animate-pulse" />
+                    )}
+                  </button>
 
-              <button
-                onClick={() => setActiveBottomTab('JOURNAL')}
-                className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
-                  activeBottomTab === 'JOURNAL'
-                    ? 'bg-[#151d2c] text-[#e6edf3] font-bold'
-                    : 'text-[#7d8590] hover:text-[#e6edf3]'
-                }`}
-              >
-                <BookOpen className="w-3.5 h-3.5" />
-                <span>Trade Journal</span>
-              </button>
+                  <button
+                    onClick={() => setActiveBottomTab('ORDERS')}
+                    className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
+                      activeBottomTab === 'ORDERS'
+                        ? 'bg-[#151d2c] text-[#2962ff] font-bold'
+                        : 'text-[#7d8590] hover:text-[#e6edf3]'
+                    }`}
+                  >
+                    <ListOrdered className="w-3.5 h-3.5" />
+                    <span>Open Orders</span>
+                    {openOrders.length > 0 && (
+                      <span className="px-1.5 py-0.2 rounded text-[10px] bg-[#2962ff]/20 text-[#2962ff] font-bold">
+                        {openOrders.length}
+                      </span>
+                    )}
+                  </button>
 
-              <button
-                onClick={() => setActiveBottomTab('TELEMETRY')}
-                className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
-                  activeBottomTab === 'TELEMETRY'
-                    ? 'bg-[#151d2c] text-[#00bcd4] font-bold'
-                    : 'text-[#7d8590] hover:text-[#e6edf3]'
-                }`}
-              >
-                <Activity className="w-3.5 h-3.5" />
-                <span>Agent Loqları</span>
-              </button>
+                  <button
+                    onClick={() => setActiveBottomTab('JOURNAL')}
+                    className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
+                      activeBottomTab === 'JOURNAL'
+                        ? 'bg-[#151d2c] text-[#e6edf3] font-bold'
+                        : 'text-[#7d8590] hover:text-[#e6edf3]'
+                    }`}
+                  >
+                    <BookOpen className="w-3.5 h-3.5" />
+                    <span>Trade Journal</span>
+                  </button>
+
+                  <button
+                    onClick={() => setActiveBottomTab('TELEMETRY')}
+                    className={`flex items-center space-x-1.5 px-3 py-1 rounded transition-colors ${
+                      activeBottomTab === 'TELEMETRY'
+                        ? 'bg-[#151d2c] text-[#00bcd4] font-bold'
+                        : 'text-[#7d8590] hover:text-[#e6edf3]'
+                    }`}
+                  >
+                    <Activity className="w-3.5 h-3.5" />
+                    <span>Agent Loqları</span>
+                  </button>
+                </div>
+
+                {/* Tab Body */}
+                <div className="flex-1 overflow-y-auto p-2">
+                  {activeBottomTab === 'POSITION' && <ActivePositionPanel />}
+                  {activeBottomTab === 'ORDERS' && <OpenOrdersPanel />}
+                  {activeBottomTab === 'JOURNAL' && <TradeJournalPanel />}
+                  {activeBottomTab === 'TELEMETRY' && <AgentTelemetryPanel />}
+                </div>
+              </div>
             </div>
+          )}
 
-            {/* Tab Body */}
-            <div className="flex-1 overflow-y-auto p-2">
-              {activeBottomTab === 'POSITION' && <ActivePositionPanel />}
-              {activeBottomTab === 'ORDERS' && <OpenOrdersPanel />}
-              {activeBottomTab === 'JOURNAL' && <TradeJournalPanel />}
-              {activeBottomTab === 'TELEMETRY' && <AgentTelemetryPanel />}
+          {activeWorkspaceView === 'PROPFIRM' && (
+            <div
+              data-testid="workspace-view-PROPFIRM"
+              className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar"
+            >
+              <PropFirmChallengeHUD defaultHistoryOpen={true} />
+              <div className="bg-[#080c14] border border-[#151d2c] rounded-lg p-2">
+                <TradeJournalPanel />
+              </div>
             </div>
-          </div>
+          )}
+
+          {activeWorkspaceView === 'QUANT' && (
+            <div
+              data-testid="workspace-view-QUANT"
+              className="flex-1 overflow-y-auto space-y-2 pr-1 custom-scrollbar"
+            >
+              <ConfluenceHUD />
+              <div className="min-h-[380px] bg-[#080c14] border border-[#151d2c] rounded-lg p-2">
+                <AgentTelemetryPanel />
+              </div>
+            </div>
+          )}
         </section>
 
         {/* Right Rail: Pinned Flight Deck Header, Switcher between Order Form and Telemetry */}

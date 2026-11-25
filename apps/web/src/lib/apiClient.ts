@@ -69,7 +69,11 @@ export function invalidateSessionToken(): void {
   }
 }
 
-async function request<T>(path: string, options: RequestInit = {}, isRetry = false): Promise<T> {
+async function fetchAuthenticatedResponse(
+  path: string,
+  options: RequestInit = {},
+  isRetry = false
+): Promise<Response> {
   const token = await getSessionToken();
   const headers = new Headers(options.headers || {});
   if (!headers.has('Authorization') && token) {
@@ -86,7 +90,7 @@ async function request<T>(path: string, options: RequestInit = {}, isRetry = fal
 
   if (res.status === 401 && !isRetry) {
     invalidateSessionToken();
-    return request<T>(path, options, true);
+    return fetchAuthenticatedResponse(path, options, true);
   }
 
   if (!res.ok) {
@@ -109,7 +113,47 @@ async function request<T>(path: string, options: RequestInit = {}, isRetry = fal
     throw error;
   }
 
+  return res;
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const res = await fetchAuthenticatedResponse(path, options);
   return res.json() as Promise<T>;
+}
+
+function getPropFirmCertificate(format?: 'json'): Promise<PropFirmCertificateResponse>;
+function getPropFirmCertificate(format: 'markdown'): Promise<string>;
+async function getPropFirmCertificate(
+  format: 'json' | 'markdown' = 'json'
+): Promise<PropFirmCertificateResponse | string> {
+  if (format === 'markdown') {
+    const res = await fetchAuthenticatedResponse('/api/propfirm/certificate?format=markdown');
+    return res.text();
+  }
+  return request<PropFirmCertificateResponse>('/api/propfirm/certificate');
+}
+
+function extractFilenameFromDisposition(disposition: string | null, fallback: string): string {
+  if (!disposition) return fallback;
+  const match = disposition.match(/filename=["']?([^"';]+)["']?/i);
+  if (match && match[1]) {
+    return match[1].trim();
+  }
+  return fallback;
+}
+
+function triggerBlobDownload(blob: Blob, filename: string): void {
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objectUrl;
+  a.download = filename;
+  try {
+    document.body.appendChild(a);
+    a.click();
+  } finally {
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 export const apiClient = {
@@ -276,8 +320,17 @@ export const apiClient = {
     });
   },
 
-  async getPropFirmCertificate(): Promise<PropFirmCertificateResponse> {
-    return request<PropFirmCertificateResponse>('/api/propfirm/certificate');
+  getPropFirmCertificate,
+
+  async downloadPropFirmCertificateMarkdown(): Promise<void> {
+    const res = await fetchAuthenticatedResponse('/api/propfirm/certificate?format=markdown');
+    const fallback = `upcomers-50k-certificate-${new Date().toISOString().slice(0, 10)}.md`;
+    const filename = extractFilenameFromDisposition(
+      res.headers.get('content-disposition'),
+      fallback
+    );
+    const blob = await res.blob();
+    triggerBlobDownload(blob, filename);
   },
 };
 

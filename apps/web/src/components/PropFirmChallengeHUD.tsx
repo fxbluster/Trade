@@ -5,6 +5,7 @@ import {
   Award,
   ChevronDown,
   ChevronUp,
+  Download,
   Lock,
   RotateCcw,
   ShieldCheck,
@@ -13,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { useMarketStore } from '../store/useMarketStore';
+import { apiClient } from '../lib/apiClient';
 import { formatUsd } from '../lib/formatters';
 
 const ACTIVE_AUTOPILOT_STATES = new Set([
@@ -96,14 +98,46 @@ function getVerdictMeta(verdict: PropFirmQuestionVerdict): {
   }
 }
 
-export const PropFirmChallengeHUD: React.FC = () => {
+export interface PropFirmChallengeHUDProps {
+  defaultHistoryOpen?: boolean;
+}
+
+interface InlineErrorBannerProps {
+  testId: string;
+  message: string;
+  onDismiss: () => void;
+}
+
+const InlineErrorBanner: React.FC<InlineErrorBannerProps> = ({ testId, message, onDismiss }) => (
+  <div
+    data-testid={testId}
+    role="alert"
+    className="flex items-center justify-between gap-2 px-2 py-0.5 bg-[#f6465d]/15 border border-[#f6465d]/50 rounded text-[#f6465d] text-[10px] font-bold leading-tight"
+  >
+    <span>{message}</span>
+    <button
+      type="button"
+      aria-label="Xətanı bağla"
+      onClick={onDismiss}
+      className="p-0.5 text-[#f6465d] hover:text-[#e6edf3] transition-colors flex-shrink-0"
+    >
+      <X className="w-3 h-3" />
+    </button>
+  </div>
+);
+
+export const PropFirmChallengeHUD: React.FC<PropFirmChallengeHUDProps> = ({
+  defaultHistoryOpen = false,
+}) => {
   const status = useMarketStore((s) => s.propFirmStatus);
   const activePosition = useMarketStore((s) => s.activePosition);
   const autoPilotState = useMarketStore((s) => s.autoPilot.state);
   const startNewPropFirmCycle = useMarketStore((s) => s.startNewPropFirmCycle);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(defaultHistoryOpen);
   const [isStartingCycle, setIsStartingCycle] = useState(false);
   const [cycleError, setCycleError] = useState<string | null>(null);
+  const [isDownloadingCert, setIsDownloadingCert] = useState(false);
+  const [certError, setCertError] = useState<string | null>(null);
 
   const cycle = status?.cycle ?? null;
   const verdict: PropFirmQuestionVerdict = status?.verdict ?? 'WAITING';
@@ -171,6 +205,23 @@ export const PropFirmChallengeHUD: React.FC = () => {
       setCycleError(msg);
     } finally {
       setIsStartingCycle(false);
+    }
+  };
+
+  const handleDownloadCertificate = async () => {
+    if (isDownloadingCert) return;
+    setIsDownloadingCert(true);
+    setCertError(null);
+    try {
+      await apiClient.downloadPropFirmCertificateMarkdown();
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Sertifikat yüklənərkən xəta baş verdi.';
+      setCertError(msg);
+    } finally {
+      setIsDownloadingCert(false);
     }
   };
 
@@ -257,6 +308,17 @@ export const PropFirmChallengeHUD: React.FC = () => {
 
           <button
             type="button"
+            data-testid="propfirm-download-cert-btn"
+            disabled={isDownloadingCert}
+            onClick={handleDownloadCertificate}
+            className="inline-flex items-center space-x-1 px-1.5 py-0 rounded text-[10px] font-bold bg-[#020305] hover:bg-[#151d2c] disabled:opacity-45 disabled:cursor-not-allowed text-[#e6edf3] border border-[#151d2c] transition-colors whitespace-nowrap"
+          >
+            <Download className="w-2.5 h-2.5 text-[#0ecb81]" />
+            <span>{isDownloadingCert ? 'Yüklənir...' : 'Sertifikatı Yüklə (.md)'}</span>
+          </button>
+
+          <button
+            type="button"
             data-testid="propfirm-history-toggle"
             onClick={() => setIsHistoryOpen((prev) => !prev)}
             className="inline-flex items-center space-x-1 px-1.5 py-0 rounded text-[10px] font-bold bg-[#020305] hover:bg-[#151d2c] text-[#e6edf3] border border-[#151d2c] transition-colors whitespace-nowrap"
@@ -271,23 +333,20 @@ export const PropFirmChallengeHUD: React.FC = () => {
         </div>
       </div>
 
-      {/* Dismissible Cycle Rollover Error Alert */}
+      {/* Dismissible Cycle Rollover & Certificate Error Alerts */}
       {cycleError && (
-        <div
-          data-testid="propfirm-new-cycle-error"
-          role="alert"
-          className="flex items-center justify-between gap-2 px-2 py-0.5 bg-[#f6465d]/15 border border-[#f6465d]/50 rounded text-[#f6465d] text-[10px] font-bold leading-tight"
-        >
-          <span>{cycleError}</span>
-          <button
-            type="button"
-            aria-label="Xətanı bağla"
-            onClick={() => setCycleError(null)}
-            className="p-0.5 text-[#f6465d] hover:text-[#e6edf3] transition-colors flex-shrink-0"
-          >
-            <X className="w-3 h-3" />
-          </button>
-        </div>
+        <InlineErrorBanner
+          testId="propfirm-new-cycle-error"
+          message={cycleError}
+          onDismiss={() => setCycleError(null)}
+        />
+      )}
+      {certError && (
+        <InlineErrorBanner
+          testId="propfirm-download-cert-error"
+          message={certError}
+          onDismiss={() => setCertError(null)}
+        />
       )}
 
       {/* Main Compact 3-Column Metrics Grid */}

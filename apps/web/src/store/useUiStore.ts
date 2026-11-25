@@ -15,6 +15,25 @@ export interface OrderDraft {
 
 export type BottomTabType = 'POSITION' | 'ORDERS' | 'JOURNAL' | 'TELEMETRY';
 export type RightRailTabType = 'ORDER_TICKET' | 'TELEMETRY';
+export type WorkspaceViewType = 'TRADING' | 'PROPFIRM' | 'QUANT';
+
+const WORKSPACE_VIEW_STORAGE_KEY = 'tradeos_workspace_view';
+
+function isValidWorkspaceView(value: unknown): value is WorkspaceViewType {
+  return value === 'TRADING' || value === 'PROPFIRM' || value === 'QUANT';
+}
+
+function readInitialWorkspaceView(): WorkspaceViewType {
+  try {
+    const stored = sessionStorage.getItem(WORKSPACE_VIEW_STORAGE_KEY);
+    if (isValidWorkspaceView(stored)) {
+      return stored;
+    }
+  } catch {
+    // Ignore sessionStorage read failures in restricted environments
+  }
+  return 'TRADING';
+}
 
 export interface UiStoreState {
   orderDraft: OrderDraft;
@@ -27,6 +46,7 @@ export interface UiStoreState {
   activeBottomTab: BottomTabType;
   rightRailTab: RightRailTabType;
   isBottomExpanded: boolean;
+  activeWorkspaceView: WorkspaceViewType;
 
   // Actions
   setOrderDraft: (draft: Partial<OrderDraft>) => void;
@@ -42,6 +62,7 @@ export interface UiStoreState {
   setRightRailTab: (tab: RightRailTabType) => void;
   toggleBottomExpanded: () => void;
   setIsBottomExpanded: (expanded: boolean) => void;
+  setActiveWorkspaceView: (view: WorkspaceViewType) => void;
 }
 
 const defaultOrderDraft: OrderDraft = {
@@ -67,6 +88,7 @@ export const useUiStore = create<UiStoreState>((set) => ({
   activeBottomTab: 'POSITION',
   rightRailTab: 'ORDER_TICKET',
   isBottomExpanded: false,
+  activeWorkspaceView: readInitialWorkspaceView(),
 
   setOrderDraft: (partial) => {
     set((state) => ({
@@ -100,4 +122,13 @@ export const useUiStore = create<UiStoreState>((set) => ({
   setRightRailTab: (tab) => set({ rightRailTab: tab }),
   toggleBottomExpanded: () => set((state) => ({ isBottomExpanded: !state.isBottomExpanded })),
   setIsBottomExpanded: (expanded) => set({ isBottomExpanded: expanded }),
+  setActiveWorkspaceView: (view) => {
+    const validView: WorkspaceViewType = isValidWorkspaceView(view) ? view : 'TRADING';
+    set({ activeWorkspaceView: validView });
+    try {
+      sessionStorage.setItem(WORKSPACE_VIEW_STORAGE_KEY, validView);
+    } catch {
+      // Ignore sessionStorage write failures in restricted environments
+    }
+  },
 }));

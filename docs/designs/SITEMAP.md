@@ -14,3 +14,4 @@
 | [next-gen-modular-quant-architecture.md](./next-gen-modular-quant-architecture.md) | 2026-11-24 | fxbluster | Implemented | Pluggable Alpha Engine, Maker Post-Only Limit Chasing, Dynamic Kelly Sizing (5%-30%), and Continuous Decay Calibration. |
 | [quant-decision-telemetry-and-ai-audit-pipeline.md](./quant-decision-telemetry-and-ai-audit-pipeline.md) | 2026-11-24 | fxbluster | Implemented | Next-Gen Quant Decision Telemetry, Autonomous Audit Trail, and AI Continuous Learning Pipeline. |
 | [prop-firm-50k-challenge-and-risk-guard.md](./prop-firm-50k-challenge-and-risk-guard.md) | 2026-11-25 | fxbluster | Implemented | $50,000 Prop Firm Challenge Engine, Drawdown Watchdogs, and 5-Cycle Certification Pipeline. |
+| [cockpit-multi-view-workspace-layout.md](./cockpit-multi-view-workspace-layout.md) | 2026-11-25 | fxbluster | Proposed | 3-View Multi-Workspace Cockpit architecture (Trading, Prop Firm $50K, Quant & Logs) eliminating viewport squashing. |

@@ -209,11 +209,11 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
       resizeObserver = new ResizeObserver((entries) => {
-        if (!entries || entries.length === 0 || !entries[0]) return;
+        if (!entries || entries.length === 0 || !entries[0] || !chartRef.current) return;
         const { width, height } = entries[0].contentRect;
         if (width > 0 && height > 0) {
-          chart.applyOptions({ width, height });
-          chart.timeScale().fitContent();
+          chartRef.current.applyOptions({ width: Math.floor(width), height: Math.floor(height) });
+          chartRef.current.timeScale().fitContent();
         }
       });
       resizeObserver.observe(containerRef.current);
@@ -221,8 +221,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
     // Double-click to reset / fit content
     const handleDblClick = () => {
-      chart.timeScale().fitContent();
-      chart.priceScale('right').applyOptions({ autoScale: true });
+      if (!chartRef.current) return;
+      chartRef.current.timeScale().fitContent();
+      chartRef.current.priceScale('right').applyOptions({ autoScale: true });
     };
     const containerEl = containerRef.current;
     containerEl?.addEventListener('dblclick', handleDblClick);
@@ -235,6 +236,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
+      priceLinesRef.current = [];
+      isInitializedRef.current = false;
+      lastFitSymbolRef.current = null;
     };
   }, []);
 
@@ -698,7 +702,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       </div>
 
       {/* Lightweight Charts Canvas Root */}
-      <div ref={containerRef} className="flex-1 w-full h-full min-h-[350px]" />
+      <div ref={containerRef} className="flex-1 w-full min-h-0" />
     </div>
   );
 };

@@ -30,12 +30,13 @@ Bütün analizlər **yalnız TradeOS-v2** üzərindən aparılır. Sistem hazır
   * Persistent Volume: `tradeos-data` → `/data` (`DB_PATH=/data/tradeos.db`)
 * **Autentifikasiya Axını (`PinGate`):**
   * `/api/health` açıqdır. Qalan bütün API endpointləri üçün əvvəlcə `GET /api/auth/session` sorğusu `X-Operator-Pin` headeri ilə göndərilir (PIN-i Railway `list-variables` və ya istifadəçidən al — heç vaxt fayla yazma), qayıdan `token` bütün sorğularda `Authorization: Bearer <token>` kimi istifadə olunur.
-* **Canlı API Endpointləri:**
+* **Canlı API Endpointləri (Multi-Symbol: `SOLUSDT`, `BTCUSDT`, `ETHUSDT`, `XRPUSDT`):**
   * Sağlamlıq: `GET /api/health` (`exchangeHealth`, `wsConnected`, `brokerMode`, `uptimeSec`)
-  * Bazar & Hesab: `GET /api/state` (balans, aktiv pozisiya, açıq orderlər, indikatorlar, CVD, risk, sokrat)
-  * Canlı şamlar: `GET /api/klines?symbol=SOLUSDT&interval=1m&limit=500` (`5m`, `15m`, `1h` dəstəklənir)
-  * Kvant Konfluensiya & NoiseBand: `GET /api/confluence` (7 sütun + Orthogonal Alpha Matrix + `noiseBand` telemetriyası + `blockReason`)
-  * Gündəlik Audit & Sütun İcmalı: `GET /api/audit/daily` və `GET /api/audit/pillars`
+  * Auto-Pilot Vəziyyəti: `GET /api/autopilot/status` (`state`, `openTradeId`, `filledToday`, `maxDailyTrades`, `watchlistSymbols`)
+  * Bazar & Hesab: `GET /api/state` (balans, aktiv pozisiya, **bütün cütlüklər üzrə `activePositions`**, **birbaşa birja `exchangePositions` + `tracked` bayrağı**, açıq orderlər, indikatorlar, CVD, risk, sokrat)
+  * Canlı şamlar: `GET /api/klines?symbol=SOLUSDT&interval=1m&limit=500` (`SOLUSDT`, `BTCUSDT`, `ETHUSDT`, `XRPUSDT`; `1m`, `5m`, `15m`, `1h` dəstəklənir)
+  * Kvant Konfluensiya & NoiseBand: `GET /api/confluence?symbol=SOLUSDT` (hər simvol üçün ayrı-ayrılıqda 7 sütun + Orthogonal Alpha Matrix + `noiseBand` telemetriyası + `blockReason`)
+  * Gündəlik Audit & Sütun İcmalı: `GET /api/audit/daily` və `GET /api/audit/pillars` (`?symbol=...` ilə hər coin üzrə)
   * Jurnal & PnL: `GET /api/journal` və `GET /api/pnl/summary`
   * Prop-Firm ($50K Upcomers): `GET /api/propfirm/status`
   * Railway Logları: `railway_mcp:get-logs` (`types: ["deploy", "http"]`) və `list-deployments`
@@ -44,12 +45,13 @@ Bütün analizlər **yalnız TradeOS-v2** üzərindən aparılır. Sistem hazır
 
 ---
 
-## 3. Aktual Sistem Arxitekturası Konteksti
+## 3. Aktual Sistem Arxitekturası Konteksti (Multi-Symbol Auto-Pilot)
 
 Audit zamanı bu canlı qaydaları nəzərə al:
-* **Upcomers $50K 1-Step Thunderbolt:** Hədəf `+$2,500` (+5%), günlük zərər dayanması `-$1,250` (-2.5%), daxili trailing floor `-$2,500` (-5%). Real Binance Testnet cüzdanı `$5,000`-dır; `AutoPilot` $50K benchmark sizing ilə hesablayır, lakin real cüzdanda **20% ehtiyat (reserve)** və **qlobal 1 açıq pozisiya** limitini qoruyur.
-* **NoiseBandEngine:** Saatlıq 20 günlük 15m Mean True Range-in **`0.5×`** həddini (`MTR_h * 0.5`) və son bağlanmış 15m şamın davamlılığını (`max(currentRange, prevClosedRange)`) yoxlayır (`BLOCKED_NOISE_BAND`).
-* **İcra Mühərriki:** Maker Limit-Chasing (`GTX`) + `getOrder` təsdiqi + ATR əsaslı SL/TP + Breakeven + Circuit Breaker.
+* **Multi-Symbol Watchlist (`SOLUSDT`, `BTCUSDT`, `ETHUSDT`, `XRPUSDT`):** `SymbolQuantRegistry` hər coin üçün təcrid olunmuş `CvdEngine`, `OrderFlowEngine`, `AlphaRegistry`, `NoiseBandEngine` və `ConfluenceEngine` saxlayır. `AutoPilotManager` 4 coini paralel izləyir (`AUTOPILOT_AUTO_START=true`, `60%` hədd, `maxDailyTrades=10`), lakin **qlobal 1 açıq pozisiya** limitini qoruyur.
+* **Upcomers $50K 1-Step Thunderbolt:** Hədəf `+$2,500` (+5%), günlük zərər dayanması `-$1,250` (-2.5%), daxili trailing floor `-$2,500` (-5%). Real Binance Testnet cüzdanı `$5,000`-dır; `AutoPilot` $50K benchmark sizing ilə hesablayır, lakin real cüzdanda **20% ehtiyat (reserve)** saxlayır.
+* **NoiseBandEngine & MacroVeto:** Saatlıq 20 günlük 15m Mean True Range-in **`0.5×`** həddini (`MTR_h * 0.5`), son bağlanmış 15m şamın davamlılığını və ATR breakout bypass-ını yoxlayır (`BLOCKED_NOISE_BAND`). `MACRO_BEARISH` yalnız Long-ları bloklayır, Short-lara mane olmur.
+* **İcra Mühərriki & Qalıq Qorunması:** Maker Limit-Chasing (`GTX`) + `getOrder` təsdiqi + yarımçıq icra (partial-fill) qəbul mexanizmi (timeout/cancel sonrası `executedQty > 0` olarsa SL/TP ilə pozisiyanı qəbul edir) + ATR əsaslı SL/TP + Breakeven + Circuit Breaker.
 
 ---
 
@@ -57,14 +59,15 @@ Audit zamanı bu canlı qaydaları nəzərə al:
 
 İstifadəçi ilə danışarkən və loqları yoxlayarkən bu 5 ox üzrə amansız və tərəfsiz ol:
 
-1. **Bazar Həqiqəti vs Model Reaksiyası (Qaçan Dalğalar):**
-   * Son şamlarda (`/api/klines`) bazar hara getdi?
-   * Sistem bu vaxt nə edirdi (`/api/audit/daily`, `/api/confluence`)? Niyə əmr açmadı (`BLOCKED_NOISE_BAND`, `SUB_THRESHOLD_IMPULSE`, `BLOCKED_EVENT_BLACKOUT` və s.)?
+1. **Bazar Həqiqəti vs Model Reaksiyası (4 Coin Üzrə Qaçan Dalğalar):**
+   * Son şamlarda (`/api/klines?symbol=...`) **`SOLUSDT`, `BTCUSDT`, `ETHUSDT`, `XRPUSDT`** hara getdi?
+   * Sistem bu vaxt nə edirdi (`/api/audit/daily`, `/api/confluence?symbol=...`)? Niyə əmr açmadı (`BLOCKED_NOISE_BAND`, `SUB_THRESHOLD_IMPULSE`, `BLOCKED_EVENT_BLACKOUT`, `POSITION_OPEN` və s.)?
 2. **Kvant Faktorları, Sütunlar və MGS Alpha Telemetriyası:**
-   * `/api/audit/pillars` üzrə hansı sütunun hit-rate-i yüksəkdir, hansı gecikdi və ya yalan siqnal verdi?
+   * `/api/audit/pillars` üzrə hansı coində hansı sütunun hit-rate-i yüksəkdir, hansı gecikdi və ya yalan siqnal verdi?
    * `NoiseBand` həddi (`0.5×`) real bazarda çox sıx və ya çox boşdurmu?
-3. **Birja İcrası və Komissiya İtkisi:**
+3. **Birja İcrası, Komissiya İtkisi və Birja Uyğunluğu:**
    * `/api/journal` və `/api/pnl/summary` üzrə Maker (`GTX`) vs Taker sürüşməsi və komissiya yükü nə qədərdir?
+   * `/api/state` içində `exchangePositions` vs `activePositions` müqayisə et: birjada `tracked: false` (panel xarici / yetim) pozisiya qalıbmı?
 4. **Risk, Prop-Firm Limitləri və Qazancın Qorunması:**
    * Upcomers `$50K` günlük/trailing limitlərinə yaxınlaşma oldumu? Breakeven və Trailing Stop pik qazancı qorudumu?
 5. **Raporun Hazırlanması (Mühəndisə / Swarm-a Ötürüləcək Format):**

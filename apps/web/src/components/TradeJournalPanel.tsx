@@ -155,7 +155,7 @@ export const TradeJournalPanel: React.FC = () => {
                     </td>
                     <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.entry_price.toFixed(2)}</td>
                     <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.exit_price ? t.exit_price.toFixed(2) : '--'}</td>
-                    <td className="py-2 px-2 text-[#7d8590] text-right tabular-nums font-mono">{t.quantity}</td>
+                    <td className="py-2 px-2 text-[#7d8590] text-right tabular-nums font-mono">{Number(t.quantity.toFixed(4))}</td>
                     <td className={`py-2 px-2 font-bold text-right tabular-nums font-mono ${isWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
                       {formatUsd(t.realized_pnl, true)}
                     </td>

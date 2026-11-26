@@ -239,7 +239,7 @@ export const PropFirmChallengeHUD: React.FC<PropFirmChallengeHUDProps> = ({
           <div className="flex items-center space-x-1.5 min-w-0">
             <AlertTriangle className="w-3 h-3 flex-shrink-0 text-[#f0b90b]" />
             <span className="tabular-nums">
-              Balans {formatUsd(status.liveWalletBalanceUsd)} / $50,000.00 — Simulyasiya $50,000.00 kapitala sabitlənib; real test üçün tamamlayın:
+              10x Simulyasiya Aktivdir — Cüzdan {formatUsd(status.liveWalletBalanceUsd)} × 10 → $50,000.00 Upcomers:
             </span>
           </div>
           <a

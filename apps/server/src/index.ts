@@ -400,6 +400,7 @@ export async function bootstrapServer(): Promise<{
     path: '/ws',
     sessionToken: SESSION_TOKEN,
     getSnapshot: (sym) => buildCockpitState(sym || activeSymbol),
+    getAutoPilotStatus: () => autoPilotManagerRef?.getStatusPayload() ?? null,
     onSubscribeSymbol: (sym) => switchActiveSymbol(sym),
   });
   wsHub = createdWsHub;
@@ -468,6 +469,15 @@ export async function bootstrapServer(): Promise<{
     },
   });
   autoPilotManagerRef = autoPilotManager;
+
+  if (process.env.AUTOPILOT_AUTO_START === 'true') {
+    const currentCfg = autoPilotManager.getConfig();
+    autoPilotManager.updateConfig({
+      enabled: true,
+      consensusThreshold: currentCfg.consensusThreshold >= 20 ? currentCfg.consensusThreshold : 60,
+      maxDailyTrades: (currentCfg.maxDailyTrades ?? 0) >= 10 ? currentCfg.maxDailyTrades : 10,
+    });
+  }
 
   // 8c. Initialize Multi-Period PnL Performance Service
   const pnlService = new PnlService(

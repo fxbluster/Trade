@@ -136,13 +136,13 @@ const defaultRisk: RiskStateRecord = {
 
 const defaultAutoPilotConfig: AutoPilotConfig = {
   enabled: false,
-  consensusThreshold: 4,
+  consensusThreshold: 60,
   marginAllocationPct: 10,
   leverage: 10,
   oppositeExitEnabled: true,
   circuitBreakerConsecutiveLosses: 2,
   circuitBreakerCooldownMs: 3600000,
-  maxDailyTrades: 5,
+  maxDailyTrades: 10,
   dailyDrawdownLimitPct: 2.0,
 };
 
@@ -176,7 +176,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     message: undefined,
     blockReason: null,
     filledToday: 0,
-    maxDailyTrades: 5,
+    maxDailyTrades: 10,
     cooldownRemainingSec: 0,
   },
   hidePineOverlay: false,

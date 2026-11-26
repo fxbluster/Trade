@@ -693,6 +693,14 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     sendJson(res, 404, { error: 'ConfluenceEngine not initialized' });
   });
 
+  // 18b. GET /api/autopilot/status — Read live Auto-Pilot state & configuration
+  app.get('/api/autopilot/status', (_req: Request, res: Response) => {
+    if (ctx.autoPilotManager) {
+      return sendJson(res, 200, ctx.autoPilotManager.getStatusPayload());
+    }
+    sendJson(res, 404, { error: 'AutoPilotManager not initialized' });
+  });
+
   // 19. POST /api/autopilot/config — Update Auto-Pilot configuration
   app.post('/api/autopilot/config', (req: Request, res: Response) => {
     const rawBody = (req.body || {}) as any;

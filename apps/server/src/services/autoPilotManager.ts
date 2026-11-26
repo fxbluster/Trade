@@ -246,6 +246,23 @@ export class AutoPilotManager {
     return this.openTradeId;
   }
 
+  public getStatusPayload() {
+    const cooldownRemainingSec =
+      this.cooldownUntil > Date.now()
+        ? Math.ceil((this.cooldownUntil - Date.now()) / 1000)
+        : 0;
+    return {
+      state: this.getState(),
+      config: this.getConfig(),
+      openTradeId: this.openTradeId,
+      filledToday: this.filledToday,
+      maxDailyTrades: this.config.maxDailyTrades,
+      cooldownRemainingSec,
+      blockReason: this.blockReason,
+      message: this.statusMessage ?? undefined,
+    };
+  }
+
   public updateConfig(partial: Partial<AutoPilotConfig>): void {
     if (partial.enabled !== undefined) this.config.enabled = partial.enabled;
     if (partial.consensusThreshold !== undefined) {

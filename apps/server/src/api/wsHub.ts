@@ -29,6 +29,16 @@ export interface WsHubOptions {
   path?: string;
   sessionToken?: string;
   getSnapshot?: (symbol?: string) => Promise<CockpitState> | CockpitState;
+  getAutoPilotStatus?: () => {
+    state: string;
+    config: AutoPilotConfig;
+    openTradeId: string | null;
+    filledToday?: number;
+    maxDailyTrades?: number;
+    cooldownRemainingSec?: number;
+    blockReason?: string | null;
+    message?: string;
+  } | null;
   onSubscribeSymbol?: (symbol: string) => void;
 }
 
@@ -43,6 +53,7 @@ export class WsHub {
   private clients = new Set<ClientConnection>();
   private sessionToken: string;
   private getSnapshotFn?: (symbol?: string) => Promise<CockpitState> | CockpitState;
+  private getAutoPilotStatusFn?: WsHubOptions['getAutoPilotStatus'];
   private onSubscribeSymbolFn?: (symbol: string) => void;
 
   // 4Hz (250ms) rate throttling for TICK broadcasts
@@ -69,6 +80,7 @@ export class WsHub {
   constructor(options: WsHubOptions = {}) {
     this.sessionToken = options.sessionToken || SESSION_TOKEN;
     this.getSnapshotFn = options.getSnapshot;
+    this.getAutoPilotStatusFn = options.getAutoPilotStatus;
     this.onSubscribeSymbolFn = options.onSubscribeSymbol;
 
     const wssOptions: any = {
@@ -182,6 +194,12 @@ export class WsHub {
         const snap = await Promise.resolve(this.getSnapshotFn(client.subscribedSymbol));
         if (snap && client.ws.readyState === WebSocket.OPEN) {
           client.ws.send(JSON.stringify({ type: 'SNAPSHOT', data: snap }));
+        }
+        if (this.getAutoPilotStatusFn && client.ws.readyState === WebSocket.OPEN) {
+          const apStatus = this.getAutoPilotStatusFn();
+          if (apStatus) {
+            client.ws.send(JSON.stringify({ type: 'AUTOPILOT_STATUS', data: apStatus }));
+          }
         }
       } catch {
         // Tolerated on initialization race

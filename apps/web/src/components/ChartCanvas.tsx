@@ -158,17 +158,18 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       autoscaleInfoProvider: (original) => {
         const res = original();
         const pos = activePosRef.current;
-        if (!res || !pos || pos.status === 'CLOSED') return res;
+        if (!res || !res.priceRange || !pos || pos.status === 'CLOSED') return res;
         let { minValue, maxValue } = res.priceRange;
-        if (pos.stop_loss && pos.stop_loss > 0) {
+        if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return res;
+        if (pos.stop_loss && Number.isFinite(pos.stop_loss) && pos.stop_loss > 0) {
           minValue = Math.min(minValue, pos.stop_loss);
           maxValue = Math.max(maxValue, pos.stop_loss);
         }
-        if (pos.tp1 && pos.tp1 > 0) {
+        if (pos.tp1 && Number.isFinite(pos.tp1) && pos.tp1 > 0) {
           minValue = Math.min(minValue, pos.tp1);
           maxValue = Math.max(maxValue, pos.tp1);
         }
-        if (pos.tp2 && pos.tp2 > 0) {
+        if (pos.tp2 && Number.isFinite(pos.tp2) && pos.tp2 > 0) {
           minValue = Math.min(minValue, pos.tp2);
           maxValue = Math.max(maxValue, pos.tp2);
         }

@@ -401,7 +401,17 @@ export class BinanceDemoAdapter implements BrokerAdapter {
   async cancelAllOrders(symbol: string): Promise<boolean> {
     const symUpper = symbol.toUpperCase();
     try {
-      await this.client.cancelAllOpenOrders(symUpper);
+      await this.client.cancelAllOpenOrders(symUpper).catch(() => {});
+      const openAlgos = await this.client.getOpenAlgoOrders(symUpper).catch(() => []);
+      if (Array.isArray(openAlgos)) {
+        await Promise.all(
+          openAlgos
+            .filter((a: any) => a?.algoId)
+            .map((a: any) =>
+              this.client.cancelAlgoOrder({ symbol: symUpper, algoId: a.algoId }).catch(() => {})
+            )
+        );
+      }
       return true;
     } catch (err: any) {
       console.warn(`[BINANCE DEMO] Cancel all orders warning for ${symUpper}:`, err.message);

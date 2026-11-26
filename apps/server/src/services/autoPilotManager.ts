@@ -640,6 +640,18 @@ export class AutoPilotManager {
     if (!this.config.enabled) return;
     if (this.isCooldownActive()) return;
     if (this.state === 'CLOSING') return;
+    if (!this.openTradeId && this.state === 'IDLE') {
+      try {
+        const riskCooldown = this.db
+          .prepare('SELECT cooldown_until FROM risk_state WHERE broker_mode = ?')
+          .get(this.broker.mode) as { cooldown_until?: number } | undefined;
+        if (riskCooldown && typeof riskCooldown.cooldown_until === 'number' && riskCooldown.cooldown_until > Date.now()) {
+          return;
+        }
+      } catch {
+        // Ignore if mock DB lacks risk_state table
+      }
+    }
 
     // Cross-symbol guard: ignore ticks for other symbols while a position is open or LIMIT_CHASING
     if (this.openTradeId) {

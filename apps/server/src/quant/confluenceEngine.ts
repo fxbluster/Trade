@@ -319,7 +319,12 @@ export class ConfluenceEngine {
     let isHardLongVeto = false;
 
     if (alphaEval && alphaEval.details && alphaEval.details.length > 0) {
-      compositeScore = alphaEval.compositeScore;
+      // [ARCH-03] AlphaRegistry emits signed conviction (50 = neutral, <50 = bearish).
+      // Convert BEARISH conviction (< 50) to symmetric magnitude [0..100] so SELL/STRONG_SELL fire symmetrically.
+      compositeScore =
+        alphaEval.compositeBias === 'BEARISH' && alphaEval.compositeScore < 50
+          ? 100 - alphaEval.compositeScore
+          : alphaEval.compositeScore;
       mathBias = alphaEval.compositeBias;
 
       // macroVeto only constrains LONG entries:

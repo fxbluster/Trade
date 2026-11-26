@@ -981,11 +981,14 @@ export class AutoPilotManager {
       let targetQty = Number((notionalUsd / markPrice).toFixed(4));
       const refPrice = markPrice;
 
-      // Dead-SL Armor Clamping:
+      // [ARCH-01] Dynamic price precision for sub-$10 pairs (e.g. XRPUSDT)
+      const priceDecimals = markPrice < 10 ? 4 : 2;
+      // [ARCH-02] Dead-SL Armor Clamping with minimum 0.30% SL distance so tiny 1m ATRs don't stop-hunt
       const estLiq = calculateLiquidationPrice(side, refPrice, leverage, 0.005);
-      const rawSl = side === 'BUY' ? markPrice - 1.5 * atr : markPrice + 1.5 * atr;
+      const minSlDist = Math.max(1.5 * atr, markPrice * 0.003);
+      const rawSl = side === 'BUY' ? markPrice - minSlDist : markPrice + minSlDist;
       const stopLoss = Number(
-        (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(2)
+        (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(priceDecimals)
       );
 
       // Upcomers $250/trade max risk quantity clamp (fail-closed if <= 0) in BINANCE_DEMO
@@ -1095,13 +1098,13 @@ export class AutoPilotManager {
 
       let tp1: number;
       if (clusterTp1 !== null) {
-        tp1 = Number(clusterTp1.toFixed(2));
+        tp1 = Number(clusterTp1.toFixed(priceDecimals));
       } else {
         const fallbackReward = snapshot?.macroRegime
           ? Math.max(2.0 * atr, risk * 1.5)
           : markPrice * 0.025;
         tp1 = Number(
-          (side === 'BUY' ? refPrice + fallbackReward : refPrice - fallbackReward).toFixed(2)
+          (side === 'BUY' ? refPrice + fallbackReward : refPrice - fallbackReward).toFixed(priceDecimals)
         );
       }
 
@@ -1110,7 +1113,7 @@ export class AutoPilotManager {
         ? Math.max(4.0 * atr, Math.abs(tp1 - markPrice) * 2)
         : markPrice * 0.050;
       const tp2 = Number(
-        (side === 'BUY' ? markPrice + tp2Reward : markPrice - tp2Reward).toFixed(2)
+        (side === 'BUY' ? markPrice + tp2Reward : markPrice - tp2Reward).toFixed(priceDecimals)
       );
 
       if (this.chasingExecutionEngine) {
@@ -1333,6 +1336,42 @@ export class AutoPilotManager {
           executedQty > 0 && effectivePrice > 0
             ? Number(((executedQty * effectivePrice) / leverage).toFixed(2))
             : marginUsd;
+
+        // [ARCH-04] Micro-fill dust unwind guard: avoid bleeding commissions on tiny partial fills (< $50 margin & < 25% targetQty)
+        if (actualMarginUsd < 50 && executedQty < targetQty * 0.25) {
+          console.warn(
+            `[AutoPilot] Micro-fill dust guard triggered on ${symbol}: actualMarginUsd=$${actualMarginUsd}, executedQty=${executedQty} < 25% of targetQty=${targetQty}. Unwinding cleanly.`
+          );
+          try {
+            await this.broker.closePosition(symbol, executedQty);
+          } catch (unwindErr) {
+            console.warn('[AutoPilot] Micro-fill dust unwind failed:', unwindErr);
+          }
+          this.state = 'IDLE';
+          this.openTradeId = null;
+          this.activeEntryContext = null;
+          this.broadcastStatus();
+          this.emitStateTransition('IDLE');
+          this.onOrderDispatched?.({
+            symbol,
+            side,
+            action: 'FAILED',
+            price: effectivePrice,
+            marginUsd: actualMarginUsd,
+            leverage,
+            atr,
+            errorMessage: `Micro-fill dust unwind: actualMarginUsd=$${actualMarginUsd} (<$50) & executedQty=${executedQty} (<25% target)`,
+            compositeScore: snapshot?.compositeScore,
+            pillarsJson: snapshot?.pillars ? JSON.stringify(snapshot.pillars) : undefined,
+            macroRegime: snapshot?.macroRegime,
+            macroVetoActive: snapshot?.macroVetoActive,
+            factorTelemetryJson: serializedFactorTelemetry,
+            executionChaseJson: serializedChaseTelemetry,
+            sizingBreakdownJson: serializedSizingBreakdown,
+            noiseBandState,
+          });
+          return;
+        }
 
         const tradeRecord: TradeRecord = {
           id: tradeId,

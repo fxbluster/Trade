@@ -15,7 +15,7 @@ describe('Emergency Stop-Loss & Risk Watchdog Hardening', () => {
           orderId: 'chase-ord-1',
           status: 'FILLED',
           fillPrice: 100.0,
-          fillQty: 1.0,
+          fillQty: 10.0,
           amendCount: 1,
           feeSavedUsd: 0.05,
         }),

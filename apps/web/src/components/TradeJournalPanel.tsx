@@ -27,6 +27,8 @@ export const TradeJournalPanel: React.FC = () => {
   }, []);
 
   const trades = journal?.trades || [];
+  const totalFees = trades.reduce((acc, t) => acc + (t.fees_usd || 0), 0);
+  const totalNetPnl = trades.reduce((acc, t) => acc + ((t.realized_pnl || 0) - (t.fees_usd || 0)), 0);
 
   return (
     <div className="flex flex-col h-full bg-[#080c14] border border-[#151d2c] rounded-lg p-3 font-mono text-xs select-none">
@@ -52,8 +54,8 @@ export const TradeJournalPanel: React.FC = () => {
         </div>
       )}
 
-      {/* Top 5 Stat Cards */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
+      {/* Top 7 Stat Cards (including Total Commissions & Net PnL) */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mb-3">
         <div className="bg-[#020305] p-2 rounded border border-[#151d2c]">
           <div className="text-[10px] text-[#7d8590] uppercase flex items-center justify-between">
             <span>Win Rate</span>
@@ -112,6 +114,31 @@ export const TradeJournalPanel: React.FC = () => {
             {journal ? journal.totalTrades : '--'}
           </div>
         </div>
+
+        <div className="bg-[#020305] p-2 rounded border border-[#f0b90b]/30">
+          <div className="text-[10px] text-[#7d8590] uppercase flex items-center justify-between">
+            <span>Ümumi Komissiya</span>
+          </div>
+          <div className="text-base font-bold text-[#f0b90b] mt-0.5" data-testid="journal-total-fees">
+            {journal ? `-$${totalFees.toFixed(2)}` : '--'}
+          </div>
+        </div>
+
+        <div className="bg-[#020305] p-2 rounded border border-[#151d2c]">
+          <div className="text-[10px] text-[#7d8590] uppercase flex items-center justify-between">
+            <span>Xalis PnL (Net)</span>
+          </div>
+          <div
+            className={`text-base font-bold mt-0.5 ${totalNetPnl >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}
+            data-testid="journal-net-pnl"
+          >
+            {journal ? formatUsd(totalNetPnl, true) : '--'}
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-2 text-[11px] text-[#7d8590]">
+        Xalis PnL = Brüt PnL − Komissiya (komissiya həm qazancda, həm zərərdə hesabdan çıxılır).
       </div>
 
       {/* Trades Table */}
@@ -121,7 +148,7 @@ export const TradeJournalPanel: React.FC = () => {
           <span className="text-[10px] text-[#484f58] mt-1">Completed orders will be logged and audited here</span>
         </div>
       ) : (
-        <div className="overflow-x-auto overflow-y-auto max-h-[160px] custom-scrollbar flex-1">
+        <div className="overflow-x-auto overflow-y-auto max-h-[340px] custom-scrollbar flex-1">
           <table className="w-full text-left">
             <thead>
               <tr className="text-[10px] uppercase text-[#7d8590] border-b border-[#151d2c]/60">
@@ -131,8 +158,9 @@ export const TradeJournalPanel: React.FC = () => {
                 <th className="py-1.5 px-2 text-right tabular-nums font-mono">Entry</th>
                 <th className="py-1.5 px-2 text-right tabular-nums font-mono">Exit</th>
                 <th className="py-1.5 px-2 text-right tabular-nums font-mono">Qty</th>
-                <th className="py-1.5 px-2 text-right tabular-nums font-mono">PnL ($)</th>
-                <th className="py-1.5 px-2 text-right tabular-nums font-mono">Fees</th>
+                <th className="py-1.5 px-2 text-right tabular-nums font-mono">Brüt PnL</th>
+                <th className="py-1.5 px-2 text-right tabular-nums font-mono">Komissiya</th>
+                <th className="py-1.5 px-2 text-right tabular-nums font-mono">Xalis (Net)</th>
                 <th className="py-1.5 px-2">Reason</th>
               </tr>
             </thead>
@@ -140,6 +168,10 @@ export const TradeJournalPanel: React.FC = () => {
               {trades.map((t) => {
                 const isLong = t.side === 'BUY';
                 const isWin = t.realized_pnl >= 0;
+                const fee = t.fees_usd || 0;
+                const netPnl = (t.realized_pnl || 0) - fee;
+                const isNetWin = netPnl >= 0;
+                const priceDecimals = t.entry_price < 10 ? 4 : 2;
                 const dateStr = t.closed_at
                   ? new Date(t.closed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
                   : '--';
@@ -153,13 +185,16 @@ export const TradeJournalPanel: React.FC = () => {
                         {t.side}
                       </span>
                     </td>
-                    <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.entry_price.toFixed(2)}</td>
-                    <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.exit_price ? t.exit_price.toFixed(2) : '--'}</td>
+                    <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.entry_price.toFixed(priceDecimals)}</td>
+                    <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.exit_price ? t.exit_price.toFixed(priceDecimals) : '--'}</td>
                     <td className="py-2 px-2 text-[#7d8590] text-right tabular-nums font-mono">{Number(t.quantity.toFixed(4))}</td>
                     <td className={`py-2 px-2 font-bold text-right tabular-nums font-mono ${isWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
                       {formatUsd(t.realized_pnl, true)}
                     </td>
-                    <td className="py-2 px-2 text-[#7d8590] text-right tabular-nums font-mono">${t.fees_usd.toFixed(2)}</td>
+                    <td className="py-2 px-2 text-[#f0b90b] text-right tabular-nums font-mono">{`-$${fee.toFixed(2)}`}</td>
+                    <td className={`py-2 px-2 font-bold text-right tabular-nums font-mono ${isNetWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                      {formatUsd(netPnl, true)}
+                    </td>
                     <td className="py-2 px-2">
                       <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#151d2c] text-[#7d8590]">
                         {t.exit_reason || 'NORMAL'}

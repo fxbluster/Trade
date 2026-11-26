@@ -351,7 +351,14 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     const { symbol, candleInterval } = get();
     try {
       const candles = await apiClient.getKlines(symbol, candleInterval, 500);
-      set({ klines: candles });
+      if (
+        get().symbol === symbol &&
+        get().candleInterval === candleInterval &&
+        Array.isArray(candles) &&
+        candles.length > 0
+      ) {
+        set({ klines: candles });
+      }
     } catch (err) {
       console.error('Failed to fetch klines:', err);
     }
@@ -368,6 +375,12 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
   // Confluence & AutoPilot actions
   setConfluence: (confluence: ConfluenceSnapshot) => {
+    if (
+      confluence.symbol &&
+      confluence.symbol.toUpperCase() !== get().symbol.toUpperCase()
+    ) {
+      return;
+    }
     set({
       confluence,
       activeFvgs: confluence.activeFvgs ?? [],
@@ -403,9 +416,12 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   },
 
   refreshConfluence: async () => {
+    const targetSym = get().symbol;
     try {
-      const data = await apiClient.getConfluence(get().symbol);
-      set({ confluence: data });
+      const data = await apiClient.getConfluence(targetSym);
+      if (get().symbol === targetSym && data) {
+        get().setConfluence(data);
+      }
     } catch {
       // Confluence engine may not be online yet in test/dev
     }

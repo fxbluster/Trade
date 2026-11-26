@@ -57,6 +57,15 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const lastFitSymbolRef = useRef<string | null>(null);
   const isInitializedRef = useRef<boolean>(false);
+  const lastBarRef = useRef<{
+    time: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+  } | null>(null);
+  const lastSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
 
   const [isFreePan, setIsFreePan] = React.useState(false);
 
@@ -220,26 +229,61 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     volumeSeriesRef.current = volumeSeries;
 
     // Direct 60fps tick callback bypassing React component state
+    const INTERVAL_SEC: Record<string, number> = {
+      '1m': 60,
+      '5m': 300,
+      '15m': 900,
+      '1h': 3600,
+    };
     const handleTick = (tick: TickData) => {
       if (!isInitializedRef.current || !candleSeriesRef.current || !volumeSeriesRef.current) return;
-      if (tick.symbol !== useMarketStore.getState().symbol) return;
+      const storeState = useMarketStore.getState();
+      if (tick.symbol !== storeState.symbol) return;
 
       const c = tick.candle;
       if (c && c.time) {
         const liveCandle = tick.markPrice > 0 ? updateCandleWithTick(c, tick.markPrice) : c;
+        const intervalSec = INTERVAL_SEC[storeState.candleInterval] ?? 300;
+        const bucketTime = Math.floor(liveCandle.time / intervalSec) * intervalSec;
+        const prev = lastBarRef.current;
+
+        if (prev && bucketTime < prev.time) {
+          return;
+        }
+
+        const nextBar =
+          prev && bucketTime === prev.time
+            ? {
+                time: bucketTime,
+                open: prev.open,
+                high: Math.max(prev.high, liveCandle.high),
+                low: Math.min(prev.low, liveCandle.low),
+                close: liveCandle.close,
+                volume: Math.max(prev.volume, liveCandle.volume || 0),
+              }
+            : {
+                time: bucketTime,
+                open: liveCandle.open,
+                high: liveCandle.high,
+                low: liveCandle.low,
+                close: liveCandle.close,
+                volume: liveCandle.volume || 0,
+              };
+
+        lastBarRef.current = nextBar;
         try {
           candleSeriesRef.current.update({
-            time: liveCandle.time as UTCTimestamp,
-            open: liveCandle.open,
-            high: liveCandle.high,
-            low: liveCandle.low,
-            close: liveCandle.close,
+            time: nextBar.time as UTCTimestamp,
+            open: nextBar.open,
+            high: nextBar.high,
+            low: nextBar.low,
+            close: nextBar.close,
           });
 
           volumeSeriesRef.current.update({
-            time: liveCandle.time as UTCTimestamp,
-            value: liveCandle.volume || 0,
-            color: liveCandle.close >= liveCandle.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
+            time: nextBar.time as UTCTimestamp,
+            value: nextBar.volume,
+            color: nextBar.close >= nextBar.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
           });
         } catch (err) {
           console.warn('Lightweight charts update tick suppressed error:', err);
@@ -250,15 +294,21 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     // Attach tick listener to wsClient
     const unsubscribeTick = wsClient.subscribeTick(handleTick);
 
-    // Handle container resize & auto-fit
+    // Handle container resize without aggressively resetting viewport on 1px jitter
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
       resizeObserver = new ResizeObserver((entries) => {
         if (!entries || entries.length === 0 || !entries[0] || !chartRef.current) return;
         const { width, height } = entries[0].contentRect;
-        if (width > 0 && height > 0) {
-          chartRef.current.applyOptions({ width: Math.floor(width), height: Math.floor(height) });
-          chartRef.current.timeScale().fitContent();
+        const w = Math.floor(width);
+        const h = Math.floor(height);
+        if (w > 0 && h > 0 && (w !== lastSizeRef.current.w || h !== lastSizeRef.current.h)) {
+          const wasZero = lastSizeRef.current.w === 0 || lastSizeRef.current.h === 0;
+          lastSizeRef.current = { w, h };
+          chartRef.current.applyOptions({ width: w, height: h });
+          if (wasZero) {
+            chartRef.current.timeScale().fitContent();
+          }
         }
       });
       resizeObserver.observe(containerRef.current);
@@ -284,6 +334,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       priceLinesRef.current = [];
       isInitializedRef.current = false;
       lastFitSymbolRef.current = null;
+      lastBarRef.current = null;
+      lastSizeRef.current = { w: 0, h: 0 };
     };
   }, []);
 
@@ -293,6 +345,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     if (prevSymbolRef.current !== symbol) {
       prevSymbolRef.current = symbol;
       isInitializedRef.current = false;
+      lastBarRef.current = null;
       if (candleSeriesRef.current) {
         candleSeriesRef.current.setData([]);
       }
@@ -354,9 +407,20 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     try {
       candleSeriesRef.current.setData(candleData);
       volumeSeriesRef.current.setData(volumeData);
-      chartRef.current?.timeScale().fitContent();
-      chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
-      lastFitSymbolRef.current = symbol;
+      const last = sortedKlines[sortedKlines.length - 1];
+      lastBarRef.current = {
+        time: last.time,
+        open: last.open,
+        high: last.high,
+        low: last.low,
+        close: last.close,
+        volume: last.volume || 0,
+      };
+      if (lastFitSymbolRef.current !== symbol) {
+        chartRef.current?.timeScale().fitContent();
+        chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+        lastFitSymbolRef.current = symbol;
+      }
       isInitializedRef.current = true;
     } catch (err) {
       console.warn('Lightweight charts setData suppressed error:', err);
@@ -548,6 +612,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     }
 
     // 4. Draw Native SMC Overlay (Active FVG Zones & Liquidity Sweeps)
+    const isPriceInRange = (p: number) => !(markPrice > 0 && (p / markPrice > 4 || p / markPrice < 0.25));
     if (showSmcOverlay) {
       // 4.A Active FVG Zones: Twin Price Lines (FVG HIGH & FVG LOW)
       if (Array.isArray(activeFvgs)) {
@@ -555,7 +620,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         for (const fvg of unmitigatedFvgs) {
           const high = fvg.high ?? (fvg as any).top;
           const low = fvg.low ?? (fvg as any).bottom;
-          if (typeof high === 'number' && typeof low === 'number' && high > 0 && low > 0) {
+          if (typeof high === 'number' && typeof low === 'number' && high > 0 && low > 0 && isPriceInRange(high) && isPriceInRange(low)) {
             const upperLine = candleSeries.createPriceLine({
               price: high,
               color: 'rgba(14, 203, 129, 0.6)',
@@ -584,7 +649,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         for (const ob of activeOrderBlocks) {
           const high = ob.high;
           const low = ob.low;
-          if (typeof high === 'number' && typeof low === 'number' && high > 0 && low > 0) {
+          if (typeof high === 'number' && typeof low === 'number' && high > 0 && low > 0 && isPriceInRange(high) && isPriceInRange(low)) {
             const isBull = ob.type === 'BULLISH';
             const color = isBull ? 'rgba(59, 130, 246, 0.7)' : 'rgba(239, 68, 68, 0.7)';
             const obHigh = candleSeries.createPriceLine({
@@ -611,7 +676,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       }
 
       // 4.C Liquidity Sweep Price Line
-      if (latestSweep && latestSweep.sweepPrice && latestSweep.sweepPrice > 0) {
+      if (latestSweep && latestSweep.sweepPrice && latestSweep.sweepPrice > 0 && isPriceInRange(latestSweep.sweepPrice)) {
         const isHigh = latestSweep.direction === 'SWEEP_HIGH' || (latestSweep as any).bias === 'BEARISH';
         const sweepLine = candleSeries.createPriceLine({
           price: latestSweep.sweepPrice,

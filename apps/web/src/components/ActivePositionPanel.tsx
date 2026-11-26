@@ -45,32 +45,49 @@ export const ActivePositionPanel: React.FC = () => {
     if (otherTrackedPositions.length > 0 || untrackedExchangePositions.length > 0) {
       return (
         <div className="flex flex-col space-y-2.5 p-3 bg-[#080c14] rounded-lg border border-[#151d2c] font-mono text-xs select-none">
-          {otherTrackedPositions.map((pos) => (
-            <div
-              key={pos.id}
-              className="flex items-center justify-between p-2.5 rounded bg-[#0d1421] border border-[#0ecb81]/30"
-            >
-              <div className="flex items-center space-x-2">
-                <span className="font-bold text-[#e6edf3]">{pos.symbol}</span>
-                <span
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                    pos.side === 'BUY' ? 'bg-[#0ecb81]/20 text-[#0ecb81]' : 'bg-[#f6465d]/20 text-[#f6465d]'
-                  }`}
-                >
-                  {pos.side === 'BUY' ? 'LONG' : 'SHORT'} {pos.leverage}x
-                </span>
-                <span className="text-[#8b949e]">
-                  Qty: {pos.remaining_qty} @ {pos.entry_price}
-                </span>
-              </div>
-              <button
-                onClick={() => useMarketStore.getState().setSymbol(pos.symbol)}
-                className="px-2.5 py-1 rounded bg-[#0ecb81]/20 hover:bg-[#0ecb81]/30 text-[#0ecb81] font-bold transition-colors"
+          {otherTrackedPositions.map((pos) => {
+            const exPos = exchangePositions.find(
+              (ep) => ep.symbol.toUpperCase() === pos.symbol.toUpperCase()
+            );
+            const livePnl = exPos?.unRealizedProfit;
+            return (
+              <div
+                key={pos.id}
+                className="flex items-center justify-between p-2.5 rounded bg-[#0d1421] border border-[#0ecb81]/30"
               >
-                {pos.symbol}-ə keç
-              </button>
-            </div>
-          ))}
+                <div className="flex items-center space-x-2 flex-wrap">
+                  <span className="font-bold text-[#e6edf3]">{pos.symbol}</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                      pos.side === 'BUY' ? 'bg-[#0ecb81]/20 text-[#0ecb81]' : 'bg-[#f6465d]/20 text-[#f6465d]'
+                    }`}
+                  >
+                    {pos.side === 'BUY' ? 'LONG' : 'SHORT'} {pos.leverage}x
+                  </span>
+                  {typeof livePnl === 'number' && (
+                    <span
+                      className={`font-bold px-1.5 py-0.5 rounded text-[11px] ${
+                        livePnl >= 0
+                          ? 'bg-[#0ecb81]/15 text-[#0ecb81]'
+                          : 'bg-[#f6465d]/15 text-[#f6465d]'
+                      }`}
+                    >
+                      {livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}
+                    </span>
+                  )}
+                  <span className="text-[#8b949e]">
+                    Qty: {pos.remaining_qty} @ {pos.entry_price}
+                  </span>
+                </div>
+                <button
+                  onClick={() => useMarketStore.getState().setSymbol(pos.symbol)}
+                  className="px-2.5 py-1 rounded bg-[#0ecb81]/20 hover:bg-[#0ecb81]/30 text-[#0ecb81] font-bold transition-colors"
+                >
+                  {pos.symbol}-ə keç
+                </button>
+              </div>
+            );
+          })}
 
           {untrackedExchangePositions.map((ep) => {
             const isLong = ep.positionAmt > 0;

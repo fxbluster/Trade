@@ -48,6 +48,27 @@ export const TopBar: React.FC = () => {
   const [isSymbolDropdownOpen, setIsSymbolDropdownOpen] = useState(false);
   const [isSwitchingBroker, setIsSwitchingBroker] = useState(false);
   const [auditExportStatus, setAuditExportStatus] = useState<'idle' | 'exporting' | 'success' | 'error'>('idle');
+  const [todayNetPnl, setTodayNetPnl] = useState<number | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const syncPnl = () => {
+      apiClient
+        .getPnlSummary(symbol)
+        .then((res) => {
+          if (active && typeof res?.today?.netPnl === 'number') {
+            setTodayNetPnl(res.today.netPnl);
+          }
+        })
+        .catch(() => {});
+    };
+    syncPnl();
+    const id = window.setInterval(syncPnl, 15_000);
+    return () => {
+      active = false;
+      window.clearInterval(id);
+    };
+  }, [symbol, account.walletBalance]);
 
   // Price direction color
   const priceColor =
@@ -207,14 +228,18 @@ export const TopBar: React.FC = () => {
           </span>
           <span
             className={`font-semibold tabular-nums text-xs ${
-              (account.unrealizedPnl && account.unrealizedPnl !== 0 ? account.unrealizedPnl > 0 : risk.session_net_pnl >= 0)
+              (account.unrealizedPnl && account.unrealizedPnl !== 0
+                ? account.unrealizedPnl > 0
+                : (todayNetPnl ?? risk.session_net_pnl) >= 0)
                 ? 'text-[#0ecb81]'
                 : 'text-[#f6465d]'
             }`}
           >
             {account.unrealizedPnl && account.unrealizedPnl !== 0
               ? `${formatUsd(account.unrealizedPnl, true)} (Canlı)`
-              : `${formatUsd(risk.session_net_pnl, true)} (Session)`}
+              : todayNetPnl !== null
+                ? `${formatUsd(todayNetPnl, true)} (Bugün)`
+                : `${formatUsd(risk.session_net_pnl, true)} (Session)`}
           </span>
         </button>
       </div>

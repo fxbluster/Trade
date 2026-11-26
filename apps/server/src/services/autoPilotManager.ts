@@ -1152,10 +1152,7 @@ export class AutoPilotManager {
           }
 
           const orderStatus = String(order.status || '').toUpperCase();
-          if (order.executedQty > 0) {
-            if (orderStatus === 'PARTIALLY_FILLED' || orderStatus === 'NEW') {
-              await this.broker.cancelOrder(symbol, orderId, false).catch(() => {});
-            }
+          if (orderStatus === 'FILLED' && order.executedQty > 0) {
             return {
               status: 'FILLED',
               fillPrice: order.avgPrice > 0 ? order.avgPrice : effectivePrice,
@@ -1169,9 +1166,27 @@ export class AutoPilotManager {
             orderStatus === 'EXPIRED' ||
             orderStatus === 'REJECTED'
           ) {
+            if (order.executedQty > 0) {
+              return {
+                status: 'FILLED',
+                fillPrice: order.avgPrice > 0 ? order.avgPrice : effectivePrice,
+                fillQty: order.executedQty,
+              };
+            }
             return { status: 'TERMINAL', reason: orderStatus };
           }
 
+          if (orderStatus === 'PARTIALLY_FILLED' && order.executedQty >= targetQty * 0.1) {
+            await this.broker.cancelOrder(symbol, orderId, false).catch(() => {});
+            return {
+              status: 'FILLED',
+              fillPrice: order.avgPrice > 0 ? order.avgPrice : effectivePrice,
+              fillQty: order.executedQty,
+            };
+          }
+
+          // While PARTIALLY_FILLED (< 10% filled) or NEW, keep chasing so the full targetQty can fill;
+          // if chase() later hits timeout/maxAmendments/deviation, cancelAndCheckPartialFill adopts executedQty.
           return null;
         };
 

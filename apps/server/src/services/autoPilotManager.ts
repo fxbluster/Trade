@@ -1153,6 +1153,17 @@ export class AutoPilotManager {
           }
 
           const orderStatus = String(order.status || '').toUpperCase();
+          if (order.executedQty > 0) {
+            if (orderStatus === 'PARTIALLY_FILLED' || orderStatus === 'NEW') {
+              await this.broker.cancelOrder(symbol, orderId, false).catch(() => {});
+            }
+            return {
+              status: 'FILLED',
+              fillPrice: order.avgPrice > 0 ? order.avgPrice : effectivePrice,
+              fillQty: order.executedQty,
+            };
+          }
+
           if (
             orderStatus === 'CANCELED' ||
             orderStatus === 'CANCELLED' ||
@@ -1160,23 +1171,6 @@ export class AutoPilotManager {
             orderStatus === 'REJECTED'
           ) {
             return { status: 'TERMINAL', reason: orderStatus };
-          }
-
-          if (orderStatus === 'PARTIALLY_FILLED' && order.executedQty > 0) {
-            await this.broker.cancelOrder(symbol, orderId, false).catch(() => {});
-            return {
-              status: 'FILLED',
-              fillPrice: order.avgPrice > 0 ? order.avgPrice : effectivePrice,
-              fillQty: order.executedQty,
-            };
-          }
-
-          if (orderStatus === 'FILLED' && order.executedQty > 0) {
-            return {
-              status: 'FILLED',
-              fillPrice: order.avgPrice > 0 ? order.avgPrice : effectivePrice,
-              fillQty: order.executedQty,
-            };
           }
 
           return null;

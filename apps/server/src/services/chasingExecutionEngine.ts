@@ -237,13 +237,12 @@ export class ChasingExecutionEngine {
 
       // 1. Hard timeout guard (15s)
       if (now - startTime >= this.timeoutMs) {
-        await this.cancelOrder(orderId, symbol);
-        this.setState({ active: false, status: 'TIMEOUT' });
-        return {
+        return this.cancelAndCheckPartialFill(
           orderId,
-          status: 'TIMEOUT',
-          amendCount: this.state!.amendCount,
-        };
+          symbol,
+          'TIMEOUT',
+          params.checkFill
+        );
       }
 
       // 2. Check fill or terminal exchange abort
@@ -285,13 +284,12 @@ export class ChasingExecutionEngine {
 
       // 4. Max amendment cap
       if (this.state!.amendCount >= this.maxAmendments) {
-        await this.cancelOrder(orderId, symbol);
-        this.setState({ active: false, status: 'CANCELLED' });
-        return {
+        return this.cancelAndCheckPartialFill(
           orderId,
-          status: 'CANCELLED',
-          amendCount: this.state!.amendCount,
-        };
+          symbol,
+          'CANCELLED',
+          params.checkFill
+        );
       }
 
       // 5. Token bucket rate limit
@@ -306,13 +304,12 @@ export class ChasingExecutionEngine {
       // 7. Toxic runaway guard: max 0.20% deviation from anchor
       const deviation = Math.abs(newTargetPrice - anchorPrice) / anchorPrice;
       if (deviation > this.maxDeviationPct) {
-        await this.cancelOrder(orderId, symbol);
-        this.setState({ active: false, status: 'CANCELLED' });
-        return {
+        return this.cancelAndCheckPartialFill(
           orderId,
-          status: 'CANCELLED',
-          amendCount: this.state!.amendCount,
-        };
+          symbol,
+          'CANCELLED',
+          params.checkFill
+        );
       }
 
       // 8. Only amend if price actually changed
@@ -365,6 +362,41 @@ export class ChasingExecutionEngine {
         // Other errors: ignore and continue
       }
     }
+  }
+
+  private async cancelAndCheckPartialFill(
+    orderId: string,
+    symbol: string,
+    fallbackStatus: 'TIMEOUT' | 'CANCELLED',
+    checkFill: (orderId: string) => Promise<CheckFillResult>
+  ): Promise<ChasingResult> {
+    await this.cancelOrder(orderId, symbol);
+    try {
+      const postCancelFill = await checkFill(orderId);
+      if (postCancelFill && postCancelFill.status === 'FILLED' && postCancelFill.fillQty > 0) {
+        this.setState({
+          active: false,
+          status: 'FILLED',
+          currentLimitPrice: postCancelFill.fillPrice,
+        });
+        return {
+          orderId,
+          status: 'FILLED',
+          fillPrice: postCancelFill.fillPrice,
+          fillQty: postCancelFill.fillQty,
+          amendCount: this.state!.amendCount,
+        };
+      }
+    } catch {
+      // Fall back to terminal status if post-cancel check fails
+    }
+
+    this.setState({ active: false, status: fallbackStatus });
+    return {
+      orderId,
+      status: fallbackStatus,
+      amendCount: this.state!.amendCount,
+    };
   }
 
   private async cancelOrder(orderId: string, symbol: string): Promise<void> {

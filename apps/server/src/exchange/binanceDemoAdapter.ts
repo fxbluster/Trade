@@ -91,6 +91,40 @@ export class BinanceDemoAdapter implements BrokerAdapter {
   }
 
   /**
+   * Queries all non-zero active contract positions across all symbols.
+   */
+  async getAllPositions(): Promise<PositionInfo[]> {
+    try {
+      const positions = await this.client.getPositionRisk();
+      if (!Array.isArray(positions)) {
+        return [];
+      }
+
+      const result: PositionInfo[] = [];
+      for (const pos of positions) {
+        const positionAmt = parseFloat(pos.positionAmt ?? '0');
+        if (Math.abs(positionAmt) < 1e-8) continue;
+        result.push({
+          symbol: String(pos.symbol ?? '').toUpperCase(),
+          positionAmt,
+          entryPrice: parseFloat(pos.entryPrice ?? '0'),
+          markPrice: parseFloat(pos.markPrice ?? '0'),
+          unRealizedProfit: parseFloat(pos.unRealizedProfit ?? '0'),
+          liquidationPrice: parseFloat(pos.liquidationPrice ?? '0'),
+          leverage: parseInt(pos.leverage ?? '1', 10),
+          marginType: pos.marginType,
+        });
+      }
+      return result;
+    } catch (err: any) {
+      throw new ExchangeDegradedError(
+        `Failed to retrieve all Binance Demo positions: ${err.message}`,
+        err
+      );
+    }
+  }
+
+  /**
    * Queries active contract position on symbol.
    */
   async getPosition(symbol: string): Promise<PositionInfo | null> {

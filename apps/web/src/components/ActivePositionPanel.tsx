@@ -8,16 +8,114 @@ import { calculateLiquidationPrice } from '@tradeos/shared';
 import { ShieldCheck, XCircle, ArrowUpRight, ArrowDownRight, AlertCircle, DollarSign } from 'lucide-react';
 
 export const ActivePositionPanel: React.FC = () => {
+  const symbol = useMarketStore((s) => s.symbol);
   const activePosition = useMarketStore((s) => s.activePosition);
+  const activePositions = useMarketStore((s) => s.activePositions);
+  const exchangePositions = useMarketStore((s) => s.exchangePositions);
   const markPrice = useMarketStore((s) => s.markPrice);
   const isAudioMuted = useUiStore((s) => s.isAudioMuted);
   const setIsPnlModalOpen = useUiStore((s) => s.setIsPnlModalOpen);
 
   const [isBreakevenLoading, setIsBreakevenLoading] = useState(false);
   const [isCloseLoading, setIsCloseLoading] = useState(false);
+  const [closingOrphanSymbol, setClosingOrphanSymbol] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const otherTrackedPositions = activePositions.filter(
+    (p) => p.symbol.toUpperCase() !== symbol.toUpperCase() && p.status !== 'CLOSED'
+  );
+  const untrackedExchangePositions = exchangePositions.filter((ep) => !ep.tracked);
+
+  const handleCloseUntracked = async (sym: string) => {
+    if (!window.confirm(`Close untracked ${sym} position on exchange at Market?`)) return;
+    setClosingOrphanSymbol(sym);
+    setActionError(null);
+    try {
+      await apiClient.closeOrder(sym, 'MANUAL_ORPHAN_CLOSE');
+      soundEffects.playAlert(isAudioMuted);
+      await useMarketStore.getState().refreshState();
+    } catch (err: any) {
+      setActionError(err.message || `Failed to close untracked ${sym}`);
+    } finally {
+      setClosingOrphanSymbol(null);
+    }
+  };
+
   if (!activePosition || activePosition.status === 'CLOSED') {
+    if (otherTrackedPositions.length > 0 || untrackedExchangePositions.length > 0) {
+      return (
+        <div className="flex flex-col space-y-2.5 p-3 bg-[#080c14] rounded-lg border border-[#151d2c] font-mono text-xs select-none">
+          {otherTrackedPositions.map((pos) => (
+            <div
+              key={pos.id}
+              className="flex items-center justify-between p-2.5 rounded bg-[#0d1421] border border-[#0ecb81]/30"
+            >
+              <div className="flex items-center space-x-2">
+                <span className="font-bold text-[#e6edf3]">{pos.symbol}</span>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                    pos.side === 'BUY' ? 'bg-[#0ecb81]/20 text-[#0ecb81]' : 'bg-[#f6465d]/20 text-[#f6465d]'
+                  }`}
+                >
+                  {pos.side === 'BUY' ? 'LONG' : 'SHORT'} {pos.leverage}x
+                </span>
+                <span className="text-[#8b949e]">
+                  Qty: {pos.remaining_qty} @ {pos.entry_price}
+                </span>
+              </div>
+              <button
+                onClick={() => useMarketStore.getState().setSymbol(pos.symbol)}
+                className="px-2.5 py-1 rounded bg-[#0ecb81]/20 hover:bg-[#0ecb81]/30 text-[#0ecb81] font-bold transition-colors"
+              >
+                {pos.symbol}-ə keç
+              </button>
+            </div>
+          ))}
+
+          {untrackedExchangePositions.map((ep) => {
+            const isLong = ep.positionAmt > 0;
+            return (
+              <div
+                key={ep.symbol}
+                className="flex items-center justify-between p-2.5 rounded bg-amber-500/10 border border-amber-500/40"
+              >
+                <div className="flex items-center space-x-2 flex-wrap">
+                  <span className="font-bold text-[#e6edf3]">{ep.symbol}</span>
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">
+                    BİRJADA AÇIQ (PANEL XARİCİ)
+                  </span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                      isLong ? 'bg-[#0ecb81]/20 text-[#0ecb81]' : 'bg-[#f6465d]/20 text-[#f6465d]'
+                    }`}
+                  >
+                    {isLong ? 'LONG' : 'SHORT'} {ep.leverage}x
+                  </span>
+                  <span className={ep.unRealizedProfit >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}>
+                    {ep.unRealizedProfit >= 0 ? '+' : ''}${ep.unRealizedProfit.toFixed(2)}
+                  </span>
+                </div>
+                <button
+                  disabled={closingOrphanSymbol === ep.symbol}
+                  onClick={() => handleCloseUntracked(ep.symbol)}
+                  className="px-2.5 py-1 rounded bg-[#f6465d]/20 hover:bg-[#f6465d]/30 text-[#f6465d] font-bold transition-colors disabled:opacity-50"
+                >
+                  {closingOrphanSymbol === ep.symbol ? 'Bağlanır...' : 'Market Bağla'}
+                </button>
+              </div>
+            );
+          })}
+
+          {actionError && (
+            <div className="flex items-center space-x-1.5 text-[#f6465d] text-[11px]">
+              <AlertCircle className="w-3.5 h-3.5" />
+              <span>{actionError}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     return (
       <div className="flex flex-col items-center justify-center h-48 text-[#7d8590] select-none p-4">
         <ShieldCheck className="w-8 h-8 mb-2 opacity-30 text-[#0ecb81]" />

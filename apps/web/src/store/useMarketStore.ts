@@ -20,6 +20,7 @@ import type {
   LiquiditySweep,
   FactorTelemetryEvent,
   PropFirmStatusResponse,
+  ExchangePositionSummary,
 } from '@tradeos/shared';
 import type { WsStatus, TickData, AnalysisData, PositionEventData, AutoPilotStatusData } from '../lib/wsClient';
 import { apiClient } from '../lib/apiClient';
@@ -55,6 +56,8 @@ export interface MarketStoreState {
   nextFundingTime: number | null;
   account: AccountInfo;
   activePosition: TradeRecord | null;
+  activePositions: TradeRecord[];
+  exchangePositions: ExchangePositionSummary[];
   openOrders: OpenOrderInfo[];
   indicators: TechnicalSummary | null;
   cvd: CvdSnapshot | null;
@@ -155,6 +158,8 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   nextFundingTime: null,
   account: defaultAccount,
   activePosition: null,
+  activePositions: [],
+  exchangePositions: [],
   openOrders: [],
   indicators: null,
   cvd: null,
@@ -251,6 +256,8 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
         nextFundingTime: snapshot.nextFundingTime,
         account: resolvedAccount,
         activePosition: resolvedPosition,
+        activePositions: snapshot.activePositions ?? state.activePositions,
+        exchangePositions: snapshot.exchangePositions ?? state.exchangePositions,
         openOrders: snapshot.openOrders ?? state.openOrders,
         indicators: snapshot.indicators ?? state.indicators,
         cvd: snapshot.cvd ?? state.cvd,

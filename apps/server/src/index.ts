@@ -257,6 +257,22 @@ export async function bootstrapServer(): Promise<{
       ? 'HEALTHY'
       : 'DEGRADED';
 
+    const activePositions = tradesRepo.getAllActivePositions(activeBroker.mode);
+    const trackedSymbols = new Set(activePositions.map((t) => t.symbol.toUpperCase()));
+    const rawExchangePositions =
+      typeof activeBroker.getAllPositions === 'function'
+        ? await activeBroker.getAllPositions().catch(() => [])
+        : [];
+    const exchangePositions = rawExchangePositions.map((p) => ({
+      symbol: p.symbol,
+      positionAmt: p.positionAmt,
+      entryPrice: p.entryPrice,
+      markPrice: p.markPrice,
+      unRealizedProfit: p.unRealizedProfit,
+      leverage: p.leverage,
+      tracked: trackedSymbols.has(p.symbol.toUpperCase()),
+    }));
+
     return {
       symbol: sym,
       markPrice,
@@ -264,6 +280,8 @@ export async function bootstrapServer(): Promise<{
       nextFundingTime: funding.nextTime,
       account,
       activePosition,
+      activePositions,
+      exchangePositions,
       openOrders,
       indicators,
       cvd: cvdSnapshot,

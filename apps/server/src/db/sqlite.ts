@@ -404,6 +404,15 @@ export class TradesRepo {
     }
   }
 
+  getAllActivePositions(brokerMode: BrokerMode): TradeRecord[] {
+    const stmt = this.db.prepare(`
+      SELECT * FROM trades 
+      WHERE broker_mode = ? AND status IN ('OPEN', 'PARTIALLY_CLOSED', 'CLOSING', 'CLOSING_IN_PROGRESS')
+      ORDER BY opened_at DESC
+    `);
+    return stmt.all(brokerMode) as unknown as TradeRecord[];
+  }
+
   getActiveSymbols(brokerMode: BrokerMode): string[] {
     const stmt = this.db.prepare(`
       SELECT DISTINCT symbol FROM trades

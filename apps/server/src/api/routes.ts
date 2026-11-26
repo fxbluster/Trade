@@ -243,6 +243,21 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
         currency: 'USDT',
       }));
       const activePosition = tradesRepo.getActivePosition(ctx.broker.mode, sym);
+      const activePositions = tradesRepo.getAllActivePositions(ctx.broker.mode);
+      const trackedSymbols = new Set(activePositions.map((t) => t.symbol.toUpperCase()));
+      const rawExchangePositions =
+        typeof ctx.broker.getAllPositions === 'function'
+          ? await ctx.broker.getAllPositions().catch(() => [])
+          : [];
+      const exchangePositions = rawExchangePositions.map((p) => ({
+        symbol: p.symbol,
+        positionAmt: p.positionAmt,
+        entryPrice: p.entryPrice,
+        markPrice: p.markPrice,
+        unRealizedProfit: p.unRealizedProfit,
+        leverage: p.leverage,
+        tracked: trackedSymbols.has(p.symbol.toUpperCase()),
+      }));
       const openOrders = await ctx.broker.getOpenOrders(sym).catch(() => []);
       const indicators = ctx.getIndicators ? ctx.getIndicators(sym) : null;
       const cvd = ctx.getCvdSnapshot?.(sym) ?? ctx.cvdEngine?.getSnapshot() ?? null;
@@ -265,6 +280,8 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
         nextFundingTime: funding.nextTime,
         account,
         activePosition,
+        activePositions,
+        exchangePositions,
         openOrders,
         indicators,
         cvd,
@@ -480,6 +497,14 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       const trade = await ctx.tradeManager.closePosition(sym, reason || 'USER_MANUAL');
       sendJson(res, 200, { success: true, trade });
     } catch (err: unknown) {
+      if (err instanceof TradeManagerError && err.code === 'ERR_NO_ACTIVE_POSITION') {
+        const exchangePos = await ctx.broker.getPosition(sym).catch(() => null);
+        if (exchangePos && Math.abs(exchangePos.positionAmt) > 1e-8) {
+          await ctx.broker.cancelAllOrders(sym).catch(() => {});
+          const closeRes = await ctx.broker.closePosition(sym, Math.abs(exchangePos.positionAmt));
+          return sendJson(res, 200, { success: true, untrackedClosed: true, closeRes });
+        }
+      }
       const msg = err instanceof Error ? err.message : String(err);
       const status = err instanceof TradeManagerError ? err.statusCode : 500;
       sendJson(res, status, { error: `Close position failed: ${msg}` });

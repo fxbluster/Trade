@@ -227,6 +227,15 @@ export class LocalPaperAdapter implements BrokerAdapter {
     };
   }
 
+  async getAllPositions(): Promise<PositionInfo[]> {
+    const result: PositionInfo[] = [];
+    for (const sym of this.positions.keys()) {
+      const pos = await this.getPosition(sym);
+      if (pos) result.push(pos);
+    }
+    return result;
+  }
+
   async getPosition(symbol: string): Promise<PositionInfo | null> {
     const symUpper = symbol.toUpperCase();
     const pos = this.positions.get(symUpper);

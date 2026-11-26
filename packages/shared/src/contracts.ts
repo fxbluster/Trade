@@ -412,6 +412,16 @@ export interface JournalSummary {
   kellyCriterion: number;
 }
 
+export interface ExchangePositionSummary {
+  symbol: string;
+  positionAmt: number;
+  entryPrice: number;
+  markPrice: number;
+  unRealizedProfit: number;
+  leverage: number;
+  tracked: boolean;
+}
+
 export interface CockpitState {
   symbol: string;
   markPrice: number;
@@ -419,6 +429,8 @@ export interface CockpitState {
   nextFundingTime: number | null;
   account: AccountInfo;
   activePosition: TradeRecord | null;
+  activePositions?: TradeRecord[];
+  exchangePositions?: ExchangePositionSummary[];
   openOrders: OpenOrderInfo[];
   indicators: TechnicalSummary | null;
   cvd: CvdSnapshot | null;

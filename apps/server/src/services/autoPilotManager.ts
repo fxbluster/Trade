@@ -291,6 +291,7 @@ export class AutoPilotManager {
     const stmt = this.db.prepare(`
       SELECT COUNT(*) as count FROM trades
       WHERE broker_mode = ? AND opened_at >= ?
+        AND (exit_reason IS NULL OR exit_reason NOT IN ('ORPHAN_MANUAL_CLOSE', 'CLEANUP_TINY_PARTIAL', 'USER_CLEAN_SLATE'))
     `);
     const row = stmt.get(brokerMode, startOfDayMs) as { count: number } | undefined;
     return row?.count ?? 0;
@@ -1734,8 +1735,12 @@ export class AutoPilotManager {
       }
     }
 
-    // Mathematical activation criteria: MFE >= 2.0x ATR
-    if (!trailingActive && peakMfe >= 2.0 * atr) {
+    // Fee-aware activation threshold: require at least max(2.0x ATR, 3.0x round-trip fees = 0.21%)
+    // so TRAILING_GIVEBACK_HALF never closes below round-trip commission cost.
+    const roundTripFeePerUnit = trade.entry_price * 0.0007;
+    const minTrailActivationMfe = Math.max(2.0 * atr, roundTripFeePerUnit * 3.0);
+
+    if (!trailingActive && peakMfe >= minTrailActivationMfe) {
       trailingActive = true;
       updatedPeak = true;
     }
@@ -1751,8 +1756,8 @@ export class AutoPilotManager {
       trade.trailing_stop_active = trailingActive ? 1 : 0;
     }
 
-    // Giveback-Half Trigger: Pullback >= 50% MFE once activated (or post-TP1 runner)
-    if (trailingActive && peakMfe >= 2.0 * atr) {
+    // Giveback-Half Trigger: Pullback >= 50% MFE once activated above fee-aware floor
+    if (trailingActive && peakMfe >= minTrailActivationMfe) {
       const givebackThreshold = 0.50 * peakMfe;
       const isGivebackTriggered =
         trade.side === 'BUY'

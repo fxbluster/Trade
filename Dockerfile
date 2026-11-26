@@ -24,8 +24,7 @@ COPY apps/server/package.json apps/server/
 COPY apps/web/package.json apps/web/
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY --from=builder /app/packages/shared/src ./packages/shared/src
-COPY --from=builder /app/packages/shared/tsconfig.json ./packages/shared/tsconfig.json
+COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/apps/server/dist ./apps/server/dist
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
 

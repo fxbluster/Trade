@@ -383,11 +383,11 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       // Entry Line
       const entryLine = candleSeries.createPriceLine({
         price: activePosition.entry_price,
-        color: '#2962ff',
-        lineWidth: 2,
-        lineStyle: LineStyle.Solid,
+        color: '#3b82f6',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `POS ENTRY [${activePosition.side}]`,
+        title: activePosition.side === 'BUY' ? 'Giriş (Alış)' : 'Giriş (Satış)',
       });
       priceLinesRef.current.push(entryLine);
 
@@ -399,7 +399,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           lineWidth: 2,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: 'ACTIVE SL',
+          title: 'Stop Loss',
         });
         priceLinesRef.current.push(slLine);
       }
@@ -409,10 +409,10 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         const tp1Line = candleSeries.createPriceLine({
           price: activePosition.tp1,
           color: '#0ecb81',
-          lineWidth: 2,
-          lineStyle: LineStyle.Solid,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dashed,
           axisLabelVisible: true,
-          title: 'TP1 (50%)',
+          title: 'Qazanc 1 (TP1)',
         });
         priceLinesRef.current.push(tp1Line);
       }
@@ -422,10 +422,10 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         const tp2Line = candleSeries.createPriceLine({
           price: activePosition.tp2,
           color: '#10b981',
-          lineWidth: 2,
-          lineStyle: LineStyle.Solid,
+          lineWidth: 1,
+          lineStyle: LineStyle.Dotted,
           axisLabelVisible: true,
-          title: 'TP2 (RUNNER)',
+          title: 'Qazanc 2 (TP2)',
         });
         priceLinesRef.current.push(tp2Line);
       }
@@ -436,9 +436,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           price: activePosition.be_price,
           color: '#f0b90b',
           lineWidth: 1,
-          lineStyle: LineStyle.Dashed,
+          lineStyle: LineStyle.Dotted,
           axisLabelVisible: true,
-          title: 'BREAKEVEN',
+          title: 'Başabaş (0 Zərər)',
         });
         priceLinesRef.current.push(beLine);
       }
@@ -453,17 +453,17 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         const liqLine = candleSeries.createPriceLine({
           price: liqPrice,
           color: '#ef4444',
-          lineWidth: 2,
+          lineWidth: 1,
           lineStyle: LineStyle.LargeDashed,
           axisLabelVisible: true,
-          title: 'LIQUIDATION',
+          title: 'Ləğv (Liq)',
         });
         priceLinesRef.current.push(liqLine);
       }
     }
 
-    // 2. Draw Order Ticket Preview Dashed Lines (if preview active and valid)
-    if (orderDraft.preview && orderDraft.marginUsd > 0) {
+    // 2. Draw Order Ticket Preview Dashed Lines (only when no active position is open)
+    if ((!activePosition || activePosition.status === 'CLOSED') && orderDraft.preview && orderDraft.marginUsd > 0) {
       const p = orderDraft.preview;
       const effectiveEntry =
         orderDraft.orderType === 'LIMIT' && orderDraft.limitPrice && orderDraft.limitPrice > 0

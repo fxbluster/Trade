@@ -31,16 +31,16 @@ import type { AlphaRegistry, CompositeFactorEvaluation } from './alphaRegistry.j
 
 /**
  * Rebalanced 7-pillar Bayesian weights (strictly summing to 1.0):
- * - Lifts high-hit-rate pillars LIQ_CLUSTERS (82.6% hit rate: 7.5% -> 11%) and MOMENTUM_RVOL (80.2% hit rate: 5% -> 9%)
- * - Trims dead weight from NATIVE_SMC (25% -> 18%) and SENTIMENT_MACRO (2.5% -> 2%)
+ * - Lifts high-hit-rate pillars LIQ_CLUSTERS (86.3% hit rate: 11% -> 18%) and MOMENTUM_RVOL (81.4% hit rate: 9% -> 17%)
+ * - Reduces low-hit-rate NATIVE_SMC (13.2% hit rate: 18% -> 5%) and tunes ORDER_FLOW_L2 (15% -> 16%) / MACRO_REGIME (25% -> 22%)
  */
 export const CALIBRATED_CONFLUENCE_WEIGHTS: Record<ConfluencePillarId, number> = {
-  MACRO_REGIME: 0.25,
-  NATIVE_SMC: 0.18,
+  MACRO_REGIME: 0.22,
+  NATIVE_SMC: 0.05,
   CVD_ABSORPTION: 0.20,
-  ORDER_FLOW_L2: 0.15,
-  LIQ_CLUSTERS: 0.11,
-  MOMENTUM_RVOL: 0.09,
+  ORDER_FLOW_L2: 0.16,
+  LIQ_CLUSTERS: 0.18,
+  MOMENTUM_RVOL: 0.17,
   SENTIMENT_MACRO: 0.02,
 };
 
@@ -316,10 +316,27 @@ export class ConfluenceEngine {
     const isScoreThresholdMode = this.consensusThreshold >= 20;
     const minConvictionScore = isScoreThresholdMode ? this.consensusThreshold : 60;
 
+    let isHardLongVeto = false;
+
     if (alphaEval && alphaEval.details && alphaEval.details.length > 0) {
       compositeScore = alphaEval.compositeScore;
       mathBias = alphaEval.compositeBias;
-      if (macroVetoActive) {
+
+      // macroVeto only constrains LONG entries:
+      // - Hard veto when 1h macro regime is confirmed BEARISH
+      // - Soft -10 penalty when 1h is RANGING below EMA200 (allows high-conviction V-reversals)
+      // - Never blocks SHORT entries
+      isHardLongVeto = macroVetoActive && mathBias === 'BULLISH' && macroRegime === 'MACRO_BEARISH';
+      const isSoftLongPenalty =
+        macroVetoActive &&
+        macroBias.ema200 !== null &&
+        mathBias === 'BULLISH' &&
+        macroRegime !== 'MACRO_BEARISH';
+      if (isSoftLongPenalty) {
+        compositeScore = Math.max(0, compositeScore - 10);
+      }
+
+      if (isHardLongVeto) {
         baseRecommendedAction = 'WAIT';
       } else if (mathBias === 'BULLISH') {
         baseRecommendedAction =
@@ -347,12 +364,13 @@ export class ConfluenceEngine {
       compositeScore = legacyResult.compositeScore;
       mathBias = legacyResult.bias;
       baseRecommendedAction = legacyResult.recommendedAction;
+      isHardLongVeto = macroVetoActive && mathBias === 'BULLISH';
     }
 
     // Institutional consensus rule:
     // - Next-Gen % score mode (threshold >= 20, e.g. 60/65/70/75 from Cockpit HUD): compositeScore >= threshold
     // - Legacy pillar-count mode (threshold < 20, e.g. 4/7 pillars): compositeScore >= 75 OR (>= 60 && >= threshold pillars)
-    // - Blocked if pre-trade gates or macro veto are active
+    // - Blocked if pre-trade gates or hard long macro veto are active
     const directionalCount = mathBias === 'BULLISH' ? bullishCount : mathBias === 'BEARISH' ? bearishCount : 0;
     const thresholdMet = isScoreThresholdMode
       ? compositeScore >= this.consensusThreshold
@@ -365,7 +383,7 @@ export class ConfluenceEngine {
 
     const consensusMet =
       !gateCheck.blocked &&
-      !macroVetoActive &&
+      !isHardLongVeto &&
       (isScoreThresholdMode
         ? thresholdMet && isActionable
         : compositeScore >= 75 || (compositeScore >= 60 && thresholdMet && isActionable));

@@ -250,8 +250,8 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
         symbol: 'SOLUSDT',
         currentPrice: 105.5,
         indicators,
-        cvd: createMockCvd({ cvd: 10000, delta: 5000 }),
-        recentHigh: 106.2,
+        cvd: createMockCvd({ cvd: 10000, delta: 5000, openInterestUsd: 50_000_000 }),
+        recentHigh: 105.7,
       });
 
       expect(snap.macroVetoActive).toBe(false);
@@ -461,7 +461,7 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
       expect(total).toBeCloseTo(1.0, 10);
       expect(CALIBRATED_CONFLUENCE_WEIGHTS.MOMENTUM_RVOL).toBeGreaterThan(0.05);
       expect(CALIBRATED_CONFLUENCE_WEIGHTS.LIQ_CLUSTERS).toBeGreaterThan(0.075);
-      expect(CALIBRATED_CONFLUENCE_WEIGHTS.NATIVE_SMC).toBeCloseTo(0.18, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.NATIVE_SMC).toBeCloseTo(0.05, 4);
       expect(CALIBRATED_CONFLUENCE_WEIGHTS.SENTIMENT_MACRO).toBeCloseTo(0.02, 4);
 
       const snap = engine.evaluate({
@@ -523,6 +523,94 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
       expect(passedCtx.depth).toBeDefined();
       expect(passedCtx.fundingRate).toBe(-0.0004);
       expect(passedCtx.spotPrice).toBe(106.6);
+    });
+
+    it('never blocks BEARISH short signals when macroVetoActive is true (price below 1h EMA200)', () => {
+      const isolatedEngine = new ConfluenceEngine({ economicEventGuard: new EconomicEventGuard() });
+      isolatedEngine.setConsensusThreshold(60);
+      vi.spyOn(isolatedEngine.mtfManager, 'getMacroBias').mockReturnValue({
+        regime: 'MACRO_BEARISH',
+        adx: 28,
+        ema200: 110,
+        supertrendDirection: 'BEARISH',
+        macroVetoActive: true,
+      } as any);
+      isolatedEngine.setAlphaRegistry({
+        evaluate: vi.fn().mockReturnValue({
+          compositeBias: 'BEARISH',
+          compositeScore: 68,
+          rawConviction: -0.5,
+          details: [{ factorId: 'ORDER_FLOW_L2', name: 'Order Flow L2', rawAlpha: -0.8, orthogonalAlpha: -0.8, posteriorWeight: 1, bias: 'BEARISH', confidence: 0.9, isCollinear: false, informationRatio: 1.5 }],
+          evaluatedAt: Date.now(),
+        }),
+      } as any);
+
+      const dummyCandles: KlineCandle[] = [{ time: 1000, open: 105, high: 106, low: 104, close: 105, volume: 1000 }];
+
+      const snap = isolatedEngine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 105,
+        indicators: createMockIndicators(),
+        cvd: createMockCvd(),
+        candles: dummyCandles,
+      });
+
+      expect(snap.macroVetoActive).toBe(true);
+      expect(snap.recommendedAction).toBe('SELL');
+      expect(snap.consensusMet).toBe(true);
+    });
+
+    it('applies -10 soft penalty to BULLISH longs in MACRO_RANGING below EMA200, while hard-vetoing MACRO_BEARISH longs', () => {
+      const isolatedEngine = new ConfluenceEngine({ economicEventGuard: new EconomicEventGuard() });
+      isolatedEngine.setConsensusThreshold(60);
+      isolatedEngine.setAlphaRegistry({
+        evaluate: vi.fn().mockReturnValue({
+          compositeBias: 'BULLISH',
+          compositeScore: 73,
+          rawConviction: 0.6,
+          details: [{ factorId: 'ORDER_FLOW_L2', name: 'Order Flow L2', rawAlpha: 0.8, orthogonalAlpha: 0.8, posteriorWeight: 1, bias: 'BULLISH', confidence: 0.9, isCollinear: false, informationRatio: 1.5 }],
+          evaluatedAt: Date.now(),
+        }),
+      } as any);
+
+      vi.spyOn(isolatedEngine.mtfManager, 'getMacroBias').mockReturnValue({
+        regime: 'MACRO_RANGING',
+        adx: 24.9,
+        ema200: 110,
+        supertrendDirection: 'NEUTRAL',
+        macroVetoActive: true,
+      } as any);
+
+      const dummyCandles: KlineCandle[] = [{ time: 1000, open: 109, high: 110, low: 108, close: 109.5, volume: 1000 }];
+
+      const rangingLong = isolatedEngine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 109.5,
+        indicators: createMockIndicators(),
+        cvd: createMockCvd(),
+        candles: dummyCandles,
+      });
+      expect(rangingLong.compositeScore).toBe(63);
+      expect(rangingLong.recommendedAction).toBe('BUY');
+      expect(rangingLong.consensusMet).toBe(true);
+
+      vi.spyOn(isolatedEngine.mtfManager, 'getMacroBias').mockReturnValue({
+        regime: 'MACRO_BEARISH',
+        adx: 28,
+        ema200: 110,
+        supertrendDirection: 'BEARISH',
+        macroVetoActive: true,
+      } as any);
+
+      const bearishLong = isolatedEngine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 105,
+        indicators: createMockIndicators(),
+        cvd: createMockCvd(),
+        candles: dummyCandles,
+      });
+      expect(bearishLong.recommendedAction).toBe('WAIT');
+      expect(bearishLong.consensusMet).toBe(false);
     });
   });
 });

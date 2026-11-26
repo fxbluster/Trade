@@ -576,6 +576,7 @@ export async function bootstrapServer(): Promise<{
       candle15m,
       prevCandle15m,
       vwap: rollingVwap15m,
+      fundingRate: fundingRateMap.get(event.symbol)?.rate ?? undefined,
     });
     createdWsHub.broadcastConfluence(confluenceSnapshot);
 

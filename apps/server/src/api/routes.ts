@@ -884,6 +884,24 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     }
     try {
       const walletBalance = await resolvePropFirmWalletBalance(ctx);
+      if (ctx.broker.mode === 'BINANCE_DEMO' && ctx.pnlService) {
+        const pnl = await ctx.pnlService.getPnlSummary(resolveActiveSymbol()).catch(() => null);
+        const acct = await ctx.broker.getAccount().catch(() => null);
+        if (pnl) {
+          const realizedCyclePnlUsd = Number(
+            (pnl.today.realizedPnl + pnl.today.commission + pnl.today.funding).toFixed(2)
+          );
+          const unrealizedPnlUsd =
+            typeof acct?.unrealizedPnl === 'number' ? acct.unrealizedPnl : pnl.today.unrealizedPnl;
+          const evalRes = ctx.propFirmRiskGuard.evaluateLiveEquity({
+            realizedCyclePnlUsd,
+            unrealizedPnlUsd,
+            liveWalletBalanceUsd: walletBalance,
+            hasOpenPosition: Math.abs(unrealizedPnlUsd) > 0,
+          });
+          return sendJson(res, 200, evalRes.status);
+        }
+      }
       const status = ctx.propFirmRiskGuard.getStatus(walletBalance);
       sendJson(res, 200, status);
     } catch (err: unknown) {

@@ -177,6 +177,7 @@ export async function bootstrapServer(): Promise<{
   const watchlistSet = new Set(watchlistSymbols);
   let activeSymbol = watchlistSymbols[0] || 'SOLUSDT';
   let lastWalletBalanceUsd = 0;
+  let lastSyncedBrokerRealizedPnlUsd: number | null = null;
   let lastPropFirmEvalAt = 0;
   const markPriceMap = new Map<string, number>(watchlistSymbols.map((s) => [s, 0]));
   const fundingRateMap = new Map<string, { rate: number | null; nextTime: number | null }>();
@@ -214,6 +215,14 @@ export async function bootstrapServer(): Promise<{
     }));
     if (Number.isFinite(account.walletBalance) && account.walletBalance > 0) {
       lastWalletBalanceUsd = account.walletBalance;
+    }
+    if (activeBroker.mode === 'BINANCE_DEMO' && typeof pnlService !== 'undefined') {
+      try {
+        const pnl = await pnlService.getPnlSummary(sym);
+        lastSyncedBrokerRealizedPnlUsd = Number(
+          (pnl.today.realizedPnl + pnl.today.commission + pnl.today.funding).toFixed(2)
+        );
+      } catch {}
     }
 
     let activePosition = tradesRepo.getActivePositionCached(activeBroker.mode, sym);
@@ -660,7 +669,10 @@ export async function bootstrapServer(): Promise<{
             );
           }
           propFirmRiskGuard.evaluateLiveEquity({
-            realizedCyclePnlUsd: propFirmRiskGuard.getCurrentRealizedCyclePnl(),
+            realizedCyclePnlUsd:
+              activeBroker.mode === 'BINANCE_DEMO' && lastSyncedBrokerRealizedPnlUsd !== null
+                ? lastSyncedBrokerRealizedPnlUsd
+                : propFirmRiskGuard.getCurrentRealizedCyclePnl(),
             unrealizedPnlUsd: liveUnrealizedPnl,
             liveWalletBalanceUsd: lastWalletBalanceUsd,
             hasOpenPosition: Boolean(openPos),

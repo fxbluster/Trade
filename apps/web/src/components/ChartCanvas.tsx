@@ -63,6 +63,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const candleInterval = useMarketStore((s) => s.candleInterval);
   const setCandleInterval = useMarketStore((s) => s.setCandleInterval);
   const activePosition = useMarketStore((s) => s.activePosition);
+  const activePosRef = useRef(activePosition);
+  activePosRef.current = activePosition;
   const orderDraft = useUiStore((s) => s.orderDraft);
   const markPrice = useMarketStore((s) => s.markPrice);
   const hidePineOverlay = useMarketStore((s) => s.hidePineOverlay);
@@ -153,6 +155,28 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       borderDownColor: '#f6465d',
       wickUpColor: '#0ecb81',
       wickDownColor: '#f6465d',
+      autoscaleInfoProvider: (original) => {
+        const res = original();
+        const pos = activePosRef.current;
+        if (!res || !pos || pos.status === 'CLOSED') return res;
+        let { minValue, maxValue } = res.priceRange;
+        if (pos.stop_loss && pos.stop_loss > 0) {
+          minValue = Math.min(minValue, pos.stop_loss);
+          maxValue = Math.max(maxValue, pos.stop_loss);
+        }
+        if (pos.tp1 && pos.tp1 > 0) {
+          minValue = Math.min(minValue, pos.tp1);
+          maxValue = Math.max(maxValue, pos.tp1);
+        }
+        if (pos.tp2 && pos.tp2 > 0) {
+          minValue = Math.min(minValue, pos.tp2);
+          maxValue = Math.max(maxValue, pos.tp2);
+        }
+        return {
+          ...res,
+          priceRange: { minValue, maxValue },
+        };
+      },
     });
 
     const volumeSeries = chart.addHistogramSeries({

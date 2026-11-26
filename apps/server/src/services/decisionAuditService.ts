@@ -1127,10 +1127,14 @@ export class DecisionAuditService {
    */
   public generateSessionSummary(
     sinceMs?: number,
-    opts?: { limit?: number; offset?: number }
+    opts?: { limit?: number; offset?: number; symbol?: string }
   ): DailyAuditResponse {
     const since = sinceMs ?? 0;
-    const records = this.repo.listSessionDecisions(since);
+    const symbolFilter = opts?.symbol ? opts.symbol.toUpperCase().trim() : undefined;
+    const allRecords = this.repo.listSessionDecisions(since);
+    const records = symbolFilter
+      ? allRecords.filter((r) => String(r.symbol || '').toUpperCase() === symbolFilter)
+      : allRecords;
 
     let executed_trades = 0;
     let blocked_setups = 0;
@@ -1196,19 +1200,28 @@ export class DecisionAuditService {
 
     const limit = opts?.limit ?? 50;
     const offset = opts?.offset ?? 0;
-    const factor_telemetry_events = this.factorTelemetryRecordsRepo
+    const rawEvents = this.factorTelemetryRecordsRepo
       ? this.factorTelemetryRecordsRepo.listRecentEvents(since, limit, offset)
       : [];
+    const factor_telemetry_events = symbolFilter
+      ? rawEvents.filter((e) => String(e.symbol || '').toUpperCase() === symbolFilter)
+      : rawEvents;
 
     const db = this.getDb();
     let subThresholdCount = 0;
     if (this.factorTelemetryRecordsRepo && db) {
       try {
-        const row = db
-          .prepare(
-            "SELECT COUNT(DISTINCT event_id) AS cnt FROM factor_telemetry_records WHERE trigger_type = 'SUB_THRESHOLD_IMPULSE' AND timestamp >= ?"
-          )
-          .get(since) as { cnt: number } | undefined;
+        const row = symbolFilter
+          ? (db
+              .prepare(
+                "SELECT COUNT(DISTINCT event_id) AS cnt FROM factor_telemetry_records WHERE trigger_type = 'SUB_THRESHOLD_IMPULSE' AND timestamp >= ? AND UPPER(symbol) = ?"
+              )
+              .get(since, symbolFilter) as { cnt: number } | undefined)
+          : (db
+              .prepare(
+                "SELECT COUNT(DISTINCT event_id) AS cnt FROM factor_telemetry_records WHERE trigger_type = 'SUB_THRESHOLD_IMPULSE' AND timestamp >= ?"
+              )
+              .get(since) as { cnt: number } | undefined);
         subThresholdCount = Number(row?.cnt ?? 0);
       } catch {
         subThresholdCount = factor_telemetry_events.filter(
@@ -1218,11 +1231,11 @@ export class DecisionAuditService {
     } else if (this.pillarRepo) {
       subThresholdCount = this.pillarRepo
         .listEventsSince(since)
-        .filter((e) => e.composite_score < 60).length;
+        .filter((e) => e.composite_score < 60 && (!symbolFilter || String(e.symbol || '').toUpperCase() === symbolFilter)).length;
     }
 
     const execution_chase_summary = this.executionChaseLogsRepo
-      ? this.executionChaseLogsRepo.getFeeSavings(undefined, sinceMs)
+      ? this.executionChaseLogsRepo.getFeeSavings(symbolFilter, sinceMs)
       : {
           totalFeeSavedUsd: Number(chaseFallbackFeeSaved.toFixed(4)),
           totalChases: chaseFallbackTotal,
@@ -1236,15 +1249,25 @@ export class DecisionAuditService {
 
     if (db) {
       try {
-        const tradeRows = db
-          .prepare(
-            'SELECT realized_pnl, fees_usd, status FROM trades WHERE opened_at >= ? OR closed_at >= ?'
-          )
-          .all(since, since) as Array<{
-          realized_pnl: number;
-          fees_usd: number;
-          status: string;
-        }>;
+        const tradeRows = symbolFilter
+          ? (db
+              .prepare(
+                'SELECT realized_pnl, fees_usd, status FROM trades WHERE (opened_at >= ? OR closed_at >= ?) AND UPPER(symbol) = ?'
+              )
+              .all(since, since, symbolFilter) as Array<{
+              realized_pnl: number;
+              fees_usd: number;
+              status: string;
+            }>)
+          : (db
+              .prepare(
+                'SELECT realized_pnl, fees_usd, status FROM trades WHERE opened_at >= ? OR closed_at >= ?'
+              )
+              .all(since, since) as Array<{
+              realized_pnl: number;
+              fees_usd: number;
+              status: string;
+            }>);
         for (const t of tradeRows) {
           if (t.status === 'CLOSED') {
             closedTradeCount += 1;

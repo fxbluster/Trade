@@ -794,7 +794,10 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
 
     const sinceMs = session === 'current' ? Date.now() - 28_800_000 : undefined;
 
-    const paginationOpts: { limit?: number; offset?: number } = {};
+    const paginationOpts: { limit?: number; offset?: number; symbol?: string } = {};
+    if (query.symbol !== undefined && query.symbol.trim() !== '') {
+      paginationOpts.symbol = query.symbol.toUpperCase().trim();
+    }
     if (query.limit !== undefined && query.limit !== '') {
       const parsedLimit = Number.parseInt(query.limit, 10);
       if (Number.isFinite(parsedLimit)) {

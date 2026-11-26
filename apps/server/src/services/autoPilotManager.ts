@@ -1206,7 +1206,11 @@ export class AutoPilotManager {
             placeOrder,
           });
           executedQty = twapResult.filledQty;
-          finalStatus = twapResult.status === 'COMPLETED' ? 'FILLED' : twapResult.status;
+          finalStatus =
+            twapResult.status === 'COMPLETED' ||
+            (twapResult.status === 'PARTIAL' && twapResult.filledQty > 0)
+              ? 'FILLED'
+              : twapResult.status;
           amendCount = twapResult.slices.length;
           const filledSlice = twapResult.slices.find((s) => s.status === 'FILLED' && s.orderId);
           entryOrderId = filledSlice?.orderId ?? lastPlacedOrderId;
@@ -1298,6 +1302,11 @@ export class AutoPilotManager {
           (side === 'BUY' ? effectivePrice * 1.0015 : effectivePrice * 0.9985).toFixed(4)
         );
 
+        const actualMarginUsd =
+          executedQty > 0 && effectivePrice > 0
+            ? Number(((executedQty * effectivePrice) / leverage).toFixed(2))
+            : marginUsd;
+
         const tradeRecord: TradeRecord = {
           id: tradeId,
           symbol,
@@ -1309,7 +1318,7 @@ export class AutoPilotManager {
           quantity: executedQty,
           remaining_qty: executedQty,
           leverage,
-          margin_usd: marginUsd,
+          margin_usd: actualMarginUsd,
           stop_loss: stopLoss,
           tp1,
           tp2,

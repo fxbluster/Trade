@@ -603,4 +603,233 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     const settingsRepo = new SettingsRepo(db);
     expect(settingsRepo.get('autopilot_cooldown_until')).toBeNull();
   });
+
+  // --------------------------------------------------------------------------
+  // Test 9: Multi-symbol entry & cross-symbol tick guard during POSITION_OPEN / LIMIT_CHASING
+  // --------------------------------------------------------------------------
+  it('enters ETHUSDT when SOLUSDT is WAIT and ETHUSDT qualifies, and ignores BTCUSDT ticks while ETHUSDT is open or LIMIT_CHASING', async () => {
+    const solEngine = new ConfluenceEngine();
+    const ethEngine = new ConfluenceEngine();
+    const btcEngine = new ConfluenceEngine();
+
+    const makeSnap = (
+      symbol: string,
+      overrides: Partial<ConfluenceSnapshot>
+    ): ConfluenceSnapshot => ({
+      symbol,
+      pillars: [],
+      bullishCount: 0,
+      bearishCount: 0,
+      neutralCount: 7,
+      consensusBias: 'NEUTRAL',
+      consensusMet: false,
+      threshold: 4,
+      compositeScore: 40,
+      recommendedAction: 'WAIT',
+      macroVetoActive: false,
+      macroRegime: 'MACRO_BULLISH',
+      activeFvgs: [],
+      activeOrderBlocks: [],
+      latestSweep: null,
+      ...overrides,
+    });
+
+    const solSnap = makeSnap('SOLUSDT', { recommendedAction: 'WAIT', consensusMet: false });
+    const ethSnap = makeSnap('ETHUSDT', {
+      bullishCount: 5,
+      neutralCount: 2,
+      consensusBias: 'BULLISH',
+      consensusMet: true,
+      compositeScore: 82,
+      recommendedAction: 'BUY',
+    });
+    const btcSnap = makeSnap('BTCUSDT', {
+      bullishCount: 5,
+      neutralCount: 2,
+      consensusBias: 'BULLISH',
+      consensusMet: true,
+      compositeScore: 85,
+      recommendedAction: 'BUY',
+    });
+
+    solEngine.getSnapshot = () => solSnap;
+    ethEngine.getSnapshot = () => ethSnap;
+    btcEngine.getSnapshot = () => btcSnap;
+
+    const contexts = new Map<string, { symbol: string; confluenceEngine: ConfluenceEngine }>([
+      ['SOLUSDT', { symbol: 'SOLUSDT', confluenceEngine: solEngine }],
+      ['ETHUSDT', { symbol: 'ETHUSDT', confluenceEngine: ethEngine }],
+      ['BTCUSDT', { symbol: 'BTCUSDT', confluenceEngine: btcEngine }],
+    ]);
+
+    const multiAutoPilot = new AutoPilotManager({
+      db,
+      tradeManager,
+      broker: mockBroker,
+      confluenceEngine: solEngine,
+      getMarkPrice: (sym: string) => (sym === 'ETHUSDT' ? 3000 : sym === 'BTCUSDT' ? 95000 : 100),
+      getAtr: (sym: string) => (sym === 'ETHUSDT' ? 30 : 1.5),
+      broadcastWs: (m: WsServerMessage) => wsMessages.push(m),
+      getSymbolQuantContext: (sym: string) => contexts.get(sym.toUpperCase()),
+      forEachQuantContext: (cb) => contexts.forEach(cb),
+      watchlistSymbols: ['SOLUSDT', 'BTCUSDT', 'ETHUSDT', 'XRPUSDT'],
+      config: {
+        enabled: true,
+        consensusThreshold: 4,
+        marginAllocationPct: 10,
+        leverage: 10,
+        oppositeExitEnabled: true,
+      },
+    });
+
+    expect(multiAutoPilot.getStatusPayload().watchlistSymbols).toEqual([
+      'SOLUSDT',
+      'BTCUSDT',
+      'ETHUSDT',
+      'XRPUSDT',
+    ]);
+
+    // 1. SOLUSDT is WAIT -> no entry
+    await multiAutoPilot.onTick('SOLUSDT', 100);
+    expect(mockBroker.openOrderCalls.length).toBe(0);
+
+    // 2. ETHUSDT qualifies -> enters ETHUSDT
+    await multiAutoPilot.onTick('ETHUSDT', 3000);
+    expect(mockBroker.openOrderCalls.length).toBe(1);
+    expect(mockBroker.openOrderCalls[0].symbol).toBe('ETHUSDT');
+    expect(multiAutoPilot.getState()).toBe('POSITION_OPEN');
+
+    // 3. BTCUSDT tick at 100 (far below ETHUSDT SL 2955) must NOT trigger WATCHDOG_STOP_LOSS or a 2nd order
+    await multiAutoPilot.onTick('BTCUSDT', 100);
+    expect(mockBroker.closePositionCalls.length).toBe(0);
+    expect(mockBroker.openOrderCalls.length).toBe(1);
+    expect(multiAutoPilot.getState()).toBe('POSITION_OPEN');
+
+    // 4. Simulate LIMIT_CHASING on ETHUSDT (no openTradeId yet, activeEntryContext.symbol === 'ETHUSDT')
+    (multiAutoPilot as any).openTradeId = null;
+    (multiAutoPilot as any).state = 'LIMIT_CHASING';
+    (multiAutoPilot as any).activeEntryContext = {
+      symbol: 'ETHUSDT',
+      side: 'BUY',
+      markPrice: 3000,
+      notionalUsd: 1000,
+      snapshot: ethSnap,
+      sizing: {
+        allocatedMarginUsd: 100,
+        allocatedMarginPct: 10,
+        baseConvictionMargin: 0.1,
+        quarterKellyMultiplier: 1,
+        volatilityParityMultiplier: 1,
+        circuitBreakerMultiplier: 1,
+        solvencyAirbagOk: true,
+      },
+    };
+
+    await multiAutoPilot.onTick('BTCUSDT', 95000);
+    expect(mockBroker.openOrderCalls.length).toBe(1);
+    expect(mockBroker.closePositionCalls.length).toBe(0);
+    expect(multiAutoPilot.getState()).toBe('LIMIT_CHASING');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 10: Global maxDailyTrades across all symbols combined
+  // --------------------------------------------------------------------------
+  it('enforces global maxDailyTrades across all symbols combined', async () => {
+    const btcEngine = new ConfluenceEngine();
+    const btcSnap: ConfluenceSnapshot = {
+      symbol: 'BTCUSDT',
+      pillars: [],
+      bullishCount: 5,
+      bearishCount: 0,
+      neutralCount: 2,
+      consensusBias: 'BULLISH',
+      consensusMet: true,
+      threshold: 4,
+      compositeScore: 85,
+      recommendedAction: 'BUY',
+      macroVetoActive: false,
+      macroRegime: 'MACRO_BULLISH',
+      activeFvgs: [],
+      activeOrderBlocks: [],
+      latestSweep: null,
+    };
+    btcEngine.getSnapshot = () => btcSnap;
+
+    const contexts = new Map<string, { symbol: string; confluenceEngine: ConfluenceEngine }>([
+      ['BTCUSDT', { symbol: 'BTCUSDT', confluenceEngine: btcEngine }],
+    ]);
+
+    const multiAutoPilot = new AutoPilotManager({
+      db,
+      tradeManager,
+      broker: mockBroker,
+      confluenceEngine,
+      getMarkPrice: () => 95000,
+      getAtr: () => 500,
+      broadcastWs: (m: WsServerMessage) => wsMessages.push(m),
+      getSymbolQuantContext: (sym: string) => contexts.get(sym.toUpperCase()),
+      config: {
+        enabled: true,
+        consensusThreshold: 4,
+        maxDailyTrades: 2,
+      },
+    });
+
+    const tradesRepo = new TradesRepo(db);
+    const nowUtc = new Date();
+    const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
+
+    const baseTrade = {
+      broker_mode: 'BINANCE_DEMO' as const,
+      side: 'BUY' as const,
+      status: 'CLOSED' as const,
+      entry_price: 100,
+      exit_price: 102,
+      quantity: 1,
+      remaining_qty: 0,
+      leverage: 10,
+      margin_usd: 10,
+      stop_loss: 95,
+      tp1: 105,
+      tp2: 110,
+      be_price: null,
+      is_breakeven: 0,
+      peak_price: 102,
+      peak_mfe: 2,
+      trailing_stop_active: 0,
+      client_sl_id: null,
+      client_tp1_id: null,
+      client_tp2_id: null,
+      entry_order_id: null,
+      sl_algo_id: null,
+      tp1_algo_id: null,
+      tp2_algo_id: null,
+      realized_pnl: 2.0,
+      fees_usd: 0.1,
+      exit_reason: 'TAKE_PROFIT_1',
+    };
+
+    tradesRepo.insert({
+      ...baseTrade,
+      id: 'global_cap_sol',
+      symbol: 'SOLUSDT',
+      client_order_id: 'c_sol',
+      opened_at: startOfUtcDay + 1000,
+      closed_at: startOfUtcDay + 5000,
+    });
+    tradesRepo.insert({
+      ...baseTrade,
+      id: 'global_cap_eth',
+      symbol: 'ETHUSDT',
+      client_order_id: 'c_eth',
+      opened_at: startOfUtcDay + 6000,
+      closed_at: startOfUtcDay + 9000,
+    });
+
+    await multiAutoPilot.onTick('BTCUSDT', 95000);
+
+    expect(mockBroker.openOrderCalls.length).toBe(0);
+    expect(multiAutoPilot.getState()).toBe('BLOCKED_SESSION_TRADE_CAP');
+    expect(multiAutoPilot.getStatusPayload().filledToday).toBe(2);
+  });
 });

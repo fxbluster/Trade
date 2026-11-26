@@ -35,6 +35,11 @@ import type { AlertNotifier } from './alertNotifier.js';
 
 export type { AutoPilotState };
 
+export interface SymbolQuantContextLike {
+  symbol: string;
+  confluenceEngine: ConfluenceEngine;
+}
+
 export interface AutoPilotOrderDispatchEvent {
   symbol: string;
   side: TradeSide;
@@ -74,6 +79,9 @@ export interface AutoPilotManagerOptions {
   onOrderDispatched?: (event: AutoPilotOrderDispatchEvent) => void;
   onTelemetryEvent?: (event: FactorTelemetryEvent) => void;
   onStateTransition?: (newState: AutoPilotState | string) => void;
+  getSymbolQuantContext?: (symbol: string) => SymbolQuantContextLike | undefined;
+  forEachQuantContext?: (cb: (ctx: SymbolQuantContextLike) => void) => void;
+  watchlistSymbols?: string[];
 }
 
 /**
@@ -100,6 +108,9 @@ export class AutoPilotManager {
   private onOrderDispatched?: (event: AutoPilotOrderDispatchEvent) => void;
   private onTelemetryEvent?: (event: FactorTelemetryEvent) => void;
   private onStateTransition?: (newState: AutoPilotState | string) => void;
+  private getSymbolQuantContextFn?: (symbol: string) => SymbolQuantContextLike | undefined;
+  private forEachQuantContextFn?: (cb: (ctx: SymbolQuantContextLike) => void) => void;
+  private watchlistSymbols?: string[];
 
   private tradesRepo: TradesRepo;
   private settingsRepo: SettingsRepo;
@@ -161,6 +172,9 @@ export class AutoPilotManager {
     this.onOrderDispatched = options.onOrderDispatched;
     this.onTelemetryEvent = options.onTelemetryEvent;
     this.onStateTransition = options.onStateTransition;
+    this.getSymbolQuantContextFn = options.getSymbolQuantContext;
+    this.forEachQuantContextFn = options.forEachQuantContext;
+    this.watchlistSymbols = options.watchlistSymbols ? [...options.watchlistSymbols] : undefined;
     this.adaptiveSizingEngine = options.adaptiveSizingEngine;
     this.propFirmRiskGuard = options.propFirmRiskGuard;
     this.chasingExecutionEngine = options.chasingExecutionEngine;
@@ -192,7 +206,9 @@ export class AutoPilotManager {
           const ctx = this.activeEntryContext;
           const notionalUsd = ctx?.notionalUsd ?? 0;
           const chasingTelemetry = this.buildChasingTelemetry(chaseState, notionalUsd);
-          const snap = ctx?.snapshot ?? this.confluenceEngine.getSnapshot(chaseState.symbol);
+          const snap =
+            ctx?.snapshot ??
+            this.getConfluenceForSymbol(chaseState.symbol).getSnapshot(chaseState.symbol);
           const ev = this.buildTelemetryEvent(
             'ORDER_AMENDED',
             chaseState.symbol,
@@ -214,6 +230,9 @@ export class AutoPilotManager {
     if (persistedConfig) {
       this.config = { ...this.config, ...persistedConfig };
       this.confluenceEngine.setConsensusThreshold(this.config.consensusThreshold);
+      this.forEachQuantContextFn?.((ctx) =>
+        ctx.confluenceEngine.setConsensusThreshold(this.config.consensusThreshold)
+      );
     }
 
     if (options.config) {
@@ -260,7 +279,21 @@ export class AutoPilotManager {
       cooldownRemainingSec,
       blockReason: this.blockReason,
       message: this.statusMessage ?? undefined,
+      ...(this.watchlistSymbols ? { watchlistSymbols: this.watchlistSymbols } : {}),
     };
+  }
+
+  private getConfluenceForSymbol(symbol: string): ConfluenceEngine {
+    return this.getSymbolQuantContextFn?.(symbol)?.confluenceEngine ?? this.confluenceEngine;
+  }
+
+  private getGlobalFilledTradeCountToday(brokerMode: string, startOfDayMs: number): number {
+    const stmt = this.db.prepare(`
+      SELECT COUNT(*) as count FROM trades
+      WHERE broker_mode = ? AND opened_at >= ?
+    `);
+    const row = stmt.get(brokerMode, startOfDayMs) as { count: number } | undefined;
+    return row?.count ?? 0;
   }
 
   public updateConfig(partial: Partial<AutoPilotConfig>): void {
@@ -271,6 +304,9 @@ export class AutoPilotManager {
           ? Math.max(50, Math.min(95, partial.consensusThreshold))
           : Math.max(1, Math.min(7, partial.consensusThreshold));
       this.confluenceEngine.setConsensusThreshold(this.config.consensusThreshold);
+      this.forEachQuantContextFn?.((ctx) =>
+        ctx.confluenceEngine.setConsensusThreshold(this.config.consensusThreshold)
+      );
     }
     if (partial.marginAllocationPct !== undefined) {
       // Auto-Pilot is strictly clamped to max 10.0% margin
@@ -605,6 +641,18 @@ export class AutoPilotManager {
     if (this.isCooldownActive()) return;
     if (this.state === 'CLOSING') return;
 
+    // Cross-symbol guard: ignore ticks for other symbols while a position is open or LIMIT_CHASING
+    if (this.openTradeId) {
+      const openTrade = this.tradesRepo.getById(this.openTradeId);
+      if (openTrade && openTrade.symbol !== sym) {
+        return;
+      }
+    } else if (this.state !== 'IDLE') {
+      if (this.activeEntryContext && this.activeEntryContext.symbol !== sym) {
+        return;
+      }
+    }
+
     // Position Management Branch: when position is open or while in LIMIT_CHASING
     if (this.openTradeId) {
       if (this.isManagingPosition) return;
@@ -686,9 +734,9 @@ export class AutoPilotManager {
       ? Math.max(startOfUtcDay, this.cycleStartedAtMs)
       : startOfUtcDay;
 
-    // 1. Session Trade Cap: Max N filled round-trip trades per calendar day (UTC) [CUJ 4 / DEF-12]
+    // 1. Session Trade Cap: Max N filled round-trip trades per calendar day (UTC) across all symbols [CUJ 4 / DEF-12]
     const maxTrades = this.config.maxDailyTrades ?? 5;
-    this.filledToday = this.tradesRepo.getFilledTradeCountToday(this.broker.mode, sym, tradeCountStartMs);
+    this.filledToday = this.getGlobalFilledTradeCountToday(this.broker.mode, tradeCountStartMs);
     if (this.filledToday >= maxTrades) {
       if (this.state !== 'BLOCKED_SESSION_TRADE_CAP') {
         this.state = 'BLOCKED_SESSION_TRADE_CAP';
@@ -727,7 +775,7 @@ export class AutoPilotManager {
     }
 
     // Evaluate Confluence Consensus
-    const snapshot = this.confluenceEngine.getSnapshot(sym);
+    const snapshot = this.getConfluenceForSymbol(sym).getSnapshot(sym);
     if (!snapshot || !snapshot.consensusMet || snapshot.blockReason) {
       return;
     }
@@ -841,7 +889,7 @@ export class AutoPilotManager {
           ? Math.max(balance, this.propFirmRiskGuard.getConfig().accountSizeUsd)
           : balance;
 
-      const snapshot = this.confluenceEngine.getSnapshot(symbol);
+      const snapshot = this.getConfluenceForSymbol(symbol).getSnapshot(symbol);
       const score = snapshot?.compositeScore ?? 75;
 
       if (this.adaptiveSizingEngine) {
@@ -998,7 +1046,7 @@ export class AutoPilotManager {
 
       // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
       const risk = Math.abs(refPrice - stopLoss);
-      const clusters = this.confluenceEngine.liquidationEngine.projectClusters(refPrice, 100_000_000);
+      const clusters = this.getConfluenceForSymbol(symbol).liquidationEngine.projectClusters(refPrice, 100_000_000);
 
       let clusterTp1: number | null = null;
       if (snapshot?.macroRegime) {
@@ -1067,8 +1115,9 @@ export class AutoPilotManager {
         let entryOrderId: string | null = null;
 
         const getDepth = async () => {
-          const bids = this.confluenceEngine.orderFlowEngine.getBids();
-          const asks = this.confluenceEngine.orderFlowEngine.getAsks();
+          const orderFlow = this.getConfluenceForSymbol(symbol).orderFlowEngine;
+          const bids = orderFlow.getBids();
+          const asks = orderFlow.getAsks();
           if (bids.length > 0 && asks.length > 0) {
             return { bestBid: bids[0].price, bestAsk: asks[0].price };
           }
@@ -1465,7 +1514,7 @@ export class AutoPilotManager {
       this.emitStateTransition('IDLE');
 
       const errorMessage = err instanceof Error ? err.message : String(err);
-      const snap = this.confluenceEngine.getSnapshot(symbol);
+      const snap = this.getConfluenceForSymbol(symbol).getSnapshot(symbol);
       this.onOrderDispatched?.({
         symbol,
         side,
@@ -1594,9 +1643,10 @@ export class AutoPilotManager {
       trade.side === 'BUY' ? markPrice - trade.entry_price : trade.entry_price - markPrice;
 
     // Case 2a: High-Impact Economic Event Blackout Window Unwind (CUJ 3)
-    const blackout = this.confluenceEngine.economicEventGuard.isBlackoutActive();
+    const eventGuard = this.getConfluenceForSymbol(symbol).economicEventGuard;
+    const blackout = eventGuard.isBlackoutActive();
     if (blackout.active) {
-      const decision = this.confluenceEngine.economicEventGuard.evaluateOpenPositionAtBlackout({
+      const decision = eventGuard.evaluateOpenPositionAtBlackout({
         entryPrice: trade.entry_price,
         markPrice,
         side: trade.side,
@@ -1739,7 +1789,7 @@ export class AutoPilotManager {
 
     // Case 3: Opposite-Confluence Exit (persisting for >= 2 consecutive ticks)
     if (this.config.oppositeExitEnabled) {
-      const snapshot = this.confluenceEngine.getSnapshot(symbol);
+      const snapshot = this.getConfluenceForSymbol(symbol).getSnapshot(symbol);
       const isOpposite =
         snapshot &&
         snapshot.consensusMet &&
@@ -1813,7 +1863,7 @@ export class AutoPilotManager {
     const sym = trade?.symbol ?? this.activeEntryContext?.symbol ?? this.activeSymbol;
     const exitPrice = trade?.exit_price ?? this.getMarkPriceFn(sym);
     const side = trade?.side ?? this.activeEntryContext?.side ?? 'NEUTRAL';
-    const snap = this.activeEntryContext?.snapshot ?? this.confluenceEngine.getSnapshot(sym);
+    const snap = this.activeEntryContext?.snapshot ?? this.getConfluenceForSymbol(sym).getSnapshot(sym);
     const exitedEvent = this.buildTelemetryEvent(
       'POSITION_EXITED',
       sym,

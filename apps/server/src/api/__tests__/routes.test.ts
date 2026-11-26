@@ -590,4 +590,264 @@ describe('TradeOS v2 16 REST Routes', () => {
     expect(resData.body.maxDrawdownUsd).toBe(500);
     expect(resData.body.maxDrawdown).toBeCloseTo(500 / 50200, 4);
   });
+
+  it('20. GET /api/confluence?symbol=BTCUSDT reads from getConfluenceSnapshot even when activeSymbol is SOLUSDT', async () => {
+    const getConfluenceSnapshot = vi.fn((symbol: string) => ({
+      symbol,
+      score: symbol === 'BTCUSDT' ? 82 : 41,
+      bias: 'BULLISH',
+      timestamp: Date.now(),
+    })) as unknown as NonNullable<AppContext['getConfluenceSnapshot']>;
+
+    const fallbackGetSnapshot = vi.fn(() => ({
+      symbol: 'SOLUSDT',
+      score: 10,
+    }));
+
+    const multiApp = polka();
+    registerRoutes(multiApp, {
+      ...ctx,
+      activeSymbol: 'SOLUSDT',
+      confluenceEngine: {
+        getSnapshot: fallbackGetSnapshot,
+      } as unknown as AppContext['confluenceEngine'],
+      getConfluenceSnapshot,
+    });
+
+    const parsedUrl = new URL(`http://127.0.0.1:${PORT}/api/confluence?symbol=BTCUSDT`);
+    const emitter = new EventEmitter();
+    const req = Object.assign(emitter, {
+      method: 'GET',
+      url: '/api/confluence?symbol=BTCUSDT',
+      path: '/api/confluence',
+      headers: {
+        host: `127.0.0.1:${PORT}`,
+        authorization: `Bearer ${SESSION_TOKEN}`,
+      },
+      params: {},
+      query: { symbol: 'BTCUSDT' },
+      body: {},
+      socket: { remoteAddress: '127.0.0.1' },
+    }) as unknown as Request;
+
+    const resData = await new Promise<{ status: number; body: any }>((resolve) => {
+      let statusCode = 200;
+      let responseBody = '';
+      const res = {
+        statusCode: 200,
+        setHeader: vi.fn(),
+        getHeader: vi.fn(),
+        end(data?: string) {
+          if (data) responseBody = data;
+          resolve({ status: statusCode, body: responseBody ? JSON.parse(responseBody) : null });
+        },
+      } as unknown as Response;
+      Object.defineProperty(res, 'statusCode', {
+        get: () => statusCode,
+        set: (val: number) => { statusCode = val; },
+      });
+      multiApp.handler(req, res, { pathname: '/api/confluence', query: 'symbol=BTCUSDT' });
+    });
+
+    expect(resData.status).toBe(200);
+    expect(getConfluenceSnapshot).toHaveBeenCalledWith('BTCUSDT');
+    expect(fallbackGetSnapshot).not.toHaveBeenCalled();
+    expect(resData.body.symbol).toBe('BTCUSDT');
+    expect(resData.body.score).toBe(82);
+  });
+
+  it('21. POST /api/symbol allows switching between watchlistSymbols when a trade is open, while still blocking non-watchlist switches', async () => {
+    const tradesRepo = new TradesRepo(db);
+    tradesRepo.insert({
+      id: 'open-sol-1',
+      symbol: 'SOLUSDT',
+      broker_mode: 'BINANCE_DEMO',
+      side: 'BUY',
+      status: 'OPEN',
+      entry_price: 150,
+      exit_price: null,
+      quantity: 1,
+      remaining_qty: 1,
+      leverage: 5,
+      margin_usd: 30,
+      stop_loss: 145,
+      tp1: null,
+      tp2: null,
+      be_price: null,
+      is_breakeven: 0,
+      peak_price: 150,
+      peak_mfe: 0,
+      trailing_stop_active: 0,
+      client_order_id: null,
+      client_sl_id: null,
+      client_tp1_id: null,
+      client_tp2_id: null,
+      entry_order_id: null,
+      sl_algo_id: null,
+      tp1_algo_id: null,
+      tp2_algo_id: null,
+      realized_pnl: 0,
+      fees_usd: 0,
+      exit_reason: null,
+      opened_at: Date.now(),
+      closed_at: null,
+    });
+
+    const setActiveSymbol = vi.fn();
+    const watchlistApp = polka();
+    registerRoutes(watchlistApp, {
+      ...ctx,
+      activeSymbol: 'SOLUSDT',
+      watchlistSymbols: ['SOLUSDT', 'BTCUSDT', 'ETHUSDT', 'XRPUSDT'],
+      setActiveSymbol,
+    });
+
+    const callSwitch = (symbol: string) =>
+      new Promise<{ status: number; body: any }>((resolve) => {
+        const emitter = new EventEmitter();
+        const req = Object.assign(emitter, {
+          method: 'POST',
+          url: '/api/symbol',
+          path: '/api/symbol',
+          headers: {
+            host: `127.0.0.1:${PORT}`,
+            authorization: `Bearer ${SESSION_TOKEN}`,
+          },
+          params: {},
+          query: {},
+          body: {},
+          socket: { remoteAddress: '127.0.0.1' },
+        }) as unknown as Request;
+
+        let statusCode = 200;
+        let responseBody = '';
+        const res = {
+          statusCode: 200,
+          setHeader: vi.fn(),
+          getHeader: vi.fn(),
+          end(data?: string) {
+            if (data) responseBody = data;
+            resolve({ status: statusCode, body: responseBody ? JSON.parse(responseBody) : null });
+          },
+        } as unknown as Response;
+        Object.defineProperty(res, 'statusCode', {
+          get: () => statusCode,
+          set: (val: number) => { statusCode = val; },
+        });
+        watchlistApp.handler(req, res, { pathname: '/api/symbol', query: {} });
+        process.nextTick(() => {
+          emitter.emit('data', Buffer.from(JSON.stringify({ symbol })));
+          emitter.emit('end');
+        });
+      });
+
+    // Switching to another watchlist symbol succeeds even with an open trade
+    const btcRes = await callSwitch('btcusdt');
+    expect(btcRes.status).toBe(200);
+    expect(btcRes.body.success).toBe(true);
+    expect(btcRes.body.symbol).toBe('BTCUSDT');
+    expect(setActiveSymbol).toHaveBeenCalledWith('BTCUSDT');
+
+    // Switching to a non-watchlist symbol is still blocked with 409 OPEN_POSITION_EXISTS
+    const dogeRes = await callSwitch('DOGEUSDT');
+    expect(dogeRes.status).toBe(409);
+    expect(dogeRes.body.code).toBe('OPEN_POSITION_EXISTS');
+  });
+
+  it('22. GET /api/state uses getCvdSnapshot and POST /api/webhook routes to getConfluenceEngine per symbol', async () => {
+    const getCvdSnapshot = vi.fn((symbol: string) => ({
+      symbol,
+      delta: 1234,
+      cumulativeDelta: 5678,
+      buyVolume: 2000,
+      sellVolume: 766,
+      openInterestUsd: null,
+      timestamp: Date.now(),
+    })) as unknown as NonNullable<AppContext['getCvdSnapshot']>;
+
+    const ethIngest = vi.fn(() => ({ accepted: true }));
+    const fallbackIngest = vi.fn(() => ({ accepted: true }));
+    const getConfluenceEngine = vi.fn((symbol: string) =>
+      symbol.toUpperCase() === 'ETHUSDT'
+        ? ({ ingestWebhookAlert: ethIngest } as unknown as NonNullable<AppContext['confluenceEngine']>)
+        : undefined
+    );
+
+    const prevSecret = process.env.WEBHOOK_SECRET;
+    process.env.WEBHOOK_SECRET = 'super-secret-webhook-passphrase-1234';
+
+    try {
+      const routedApp = polka();
+      registerRoutes(routedApp, {
+        ...ctx,
+        activeSymbol: 'SOLUSDT',
+        getCvdSnapshot,
+        confluenceEngine: {
+          ingestWebhookAlert: fallbackIngest,
+        } as unknown as AppContext['confluenceEngine'],
+        getConfluenceEngine,
+      });
+
+      const callRouted = (method: string, url: string, body?: unknown) =>
+        new Promise<{ status: number; body: any }>((resolve) => {
+          const parsedUrl = new URL(`http://127.0.0.1:${PORT}${url}`);
+          const emitter = new EventEmitter();
+          const req = Object.assign(emitter, {
+            method,
+            url,
+            path: parsedUrl.pathname,
+            headers: {
+              host: `127.0.0.1:${PORT}`,
+              authorization: `Bearer ${SESSION_TOKEN}`,
+            },
+            params: {},
+            query: Object.fromEntries(parsedUrl.searchParams),
+            body: {},
+            socket: { remoteAddress: '127.0.0.1' },
+          }) as unknown as Request;
+
+          let statusCode = 200;
+          let responseBody = '';
+          const res = {
+            statusCode: 200,
+            setHeader: vi.fn(),
+            getHeader: vi.fn(),
+            end(data?: string) {
+              if (data) responseBody = data;
+              resolve({ status: statusCode, body: responseBody ? JSON.parse(responseBody) : null });
+            },
+          } as unknown as Response;
+          Object.defineProperty(res, 'statusCode', {
+            get: () => statusCode,
+            set: (val: number) => { statusCode = val; },
+          });
+          routedApp.handler(req, res, { pathname: parsedUrl.pathname, query: {} });
+          process.nextTick(() => {
+            if (body !== undefined) emitter.emit('data', Buffer.from(JSON.stringify(body)));
+            emitter.emit('end');
+          });
+        });
+
+      const stateRes = await callRouted('GET', '/api/state');
+      expect(stateRes.status).toBe(200);
+      expect(getCvdSnapshot).toHaveBeenCalledWith('SOLUSDT');
+      expect(stateRes.body.cvd.delta).toBe(1234);
+
+      const hookRes = await callRouted('POST', '/api/webhook', {
+        secret: 'super-secret-webhook-passphrase-1234',
+        symbol: 'ETHUSDT',
+        side: 'BUY',
+      });
+      expect(hookRes.status).toBe(200);
+      expect(getConfluenceEngine).toHaveBeenCalledWith('ETHUSDT');
+      expect(ethIngest).toHaveBeenCalledTimes(1);
+      expect(fallbackIngest).not.toHaveBeenCalled();
+    } finally {
+      if (prevSecret === undefined) {
+        delete process.env.WEBHOOK_SECRET;
+      } else {
+        process.env.WEBHOOK_SECRET = prevSecret;
+      }
+    }
+  });
 });

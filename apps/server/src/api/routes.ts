@@ -11,7 +11,9 @@ import {
   type KlineCandle,
   type JournalSummary,
   type TrajectoryHorizon,
-  type PillarAttributionResponse
+  type PillarAttributionResponse,
+  type ConfluenceSnapshot,
+  type CvdSnapshot
 } from '@tradeos/shared';
 import {
   TradesRepo,
@@ -71,6 +73,10 @@ export interface AppContext {
   streamsManager?: BinanceStreamsManager;
   cvdEngine?: CvdEngine;
   confluenceEngine?: ConfluenceEngine;
+  getConfluenceSnapshot?: (symbol: string) => ConfluenceSnapshot | null;
+  getCvdSnapshot?: (symbol: string) => CvdSnapshot | null;
+  getConfluenceEngine?: (symbol: string) => ConfluenceEngine | undefined;
+  watchlistSymbols?: string[];
   autoPilotManager?: AutoPilotManager;
   decisionAuditService?: DecisionAuditService;
   pillarAttributionService?: PillarAttributionService;
@@ -239,7 +245,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       const activePosition = tradesRepo.getActivePosition(ctx.broker.mode, sym);
       const openOrders = await ctx.broker.getOpenOrders(sym).catch(() => []);
       const indicators = ctx.getIndicators ? ctx.getIndicators(sym) : null;
-      const cvd = ctx.cvdEngine ? ctx.cvdEngine.getSnapshot() : null;
+      const cvd = ctx.getCvdSnapshot?.(sym) ?? ctx.cvdEngine?.getSnapshot() ?? null;
       const risk = riskRepo.get(ctx.broker.mode) || {
         broker_mode: ctx.broker.mode,
         consecutive_losses: 0,
@@ -330,9 +336,13 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       return sendJson(res, 400, { error: 'Missing or invalid symbol string' });
     }
 
-    // Guard: conflict if active open position exists
+    const cleanSymbol = symbol.trim().toUpperCase();
+    const isWatchlistSwitch = Boolean(ctx.watchlistSymbols?.some((s) => s.toUpperCase() === cleanSymbol));
+
+    // Guard: conflict if active open position exists (allow non-destructive chart switch within watchlist)
     const active = tradesRepo.getActivePosition(ctx.broker.mode);
     if (
+      !isWatchlistSwitch &&
       active &&
       (active.status === 'OPEN' ||
         active.status === 'PARTIALLY_CLOSED' ||
@@ -345,7 +355,6 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       });
     }
 
-    const cleanSymbol = symbol.trim().toUpperCase();
     fallbackSymbol = cleanSymbol;
 
     if (ctx.setActiveSymbol) {
@@ -667,8 +676,9 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       return sendJson(res, 400, { error: 'Bad Request: Missing symbol or side in webhook payload' });
     }
 
-    if (ctx.confluenceEngine) {
-      const result = ctx.confluenceEngine.ingestWebhookAlert(payload);
+    const targetEngine = ctx.getConfluenceEngine?.(String(payload.symbol)) ?? ctx.confluenceEngine;
+    if (targetEngine) {
+      const result = targetEngine.ingestWebhookAlert(payload);
       if (!result.accepted) {
         return sendJson(res, 400, { error: result.reason || 'Webhook rejected' });
       }
@@ -686,8 +696,8 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   // 18. GET /api/confluence — Live 6+1 Confluence snapshot
   app.get('/api/confluence', (req: Request, res: Response) => {
     const symbol = ((req.query?.symbol as string) || resolveActiveSymbol()).toUpperCase();
-    if (ctx.confluenceEngine) {
-      const snapshot = ctx.confluenceEngine.getSnapshot(symbol);
+    const snapshot = ctx.getConfluenceSnapshot?.(symbol) ?? ctx.confluenceEngine?.getSnapshot(symbol);
+    if (snapshot) {
       return sendJson(res, 200, snapshot);
     }
     sendJson(res, 404, { error: 'ConfluenceEngine not initialized' });

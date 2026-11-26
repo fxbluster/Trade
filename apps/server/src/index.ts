@@ -47,14 +47,9 @@ import { EconomicEventGuard } from './quant/economicEventGuard.js';
 import { NoiseBandEngine } from './quant/noiseBandEngine.js';
 import { AlphaRegistry } from './quant/alphaRegistry.js';
 import {
-  OrderFlowFactor,
-  NativeSmcFactor,
-  CvdAbsorptionFactor,
-  MacroRegimeFactor,
-  FundingArbitrageFactor,
-  CrossExchangeSweepFactor,
-  LiqClustersFactor,
-} from './quant/factors/index.js';
+  SymbolQuantRegistry,
+  parseWatchlistSymbols,
+} from './quant/symbolQuantRegistry.js';
 import { AdaptiveSizingEngine } from './quant/adaptiveSizingEngine.js';
 import { ChasingExecutionEngine } from './services/chasingExecutionEngine.js';
 import { TwapExecutionSlicer } from './services/twapExecutionSlicer.js';
@@ -178,14 +173,15 @@ export async function bootstrapServer(): Promise<{
   });
 
   // 3. State and Cache Management
-  let activeSymbol = 'SOLUSDT';
+  const watchlistSymbols = parseWatchlistSymbols(process.env.AUTOPILOT_SYMBOLS);
+  const watchlistSet = new Set(watchlistSymbols);
+  let activeSymbol = watchlistSymbols[0] || 'SOLUSDT';
   let lastWalletBalanceUsd = 0;
   let lastPropFirmEvalAt = 0;
-  const markPriceMap = new Map<string, number>([['SOLUSDT', 0]]);
+  const markPriceMap = new Map<string, number>(watchlistSymbols.map((s) => [s, 0]));
   const fundingRateMap = new Map<string, { rate: number | null; nextTime: number | null }>();
   const candleHistoryMap = new Map<string, KlineCandle[]>();
-
-  const cvdEngine = new CvdEngine(activeSymbol);
+  const vwap15mMap = new Map<string, number>();
 
   // 4. Initialize Binance Public & User Streams Manager
   const streamsManager = new BinanceStreamsManager({ client });
@@ -234,7 +230,7 @@ export async function bootstrapServer(): Promise<{
 
     const candles = candleHistoryMap.get(sym) || [];
     const indicators = calculateIndicators(candles, 0.01);
-    const cvdSnapshot = cvdEngine.getSnapshot();
+    const cvdSnapshot = symbolQuantRegistry.getOrCreate(sym).cvdEngine.getSnapshot();
 
     const currentRisk = riskRepo.get(activeBroker.mode) || {
       broker_mode: activeBroker.mode,
@@ -285,18 +281,24 @@ export async function bootstrapServer(): Promise<{
   sentimentHarvester.start();
 
   const economicEventGuard = new EconomicEventGuard(db);
-  const noiseBandEngine = new NoiseBandEngine();
 
-  // Next-Gen Modular Quant Architecture: AlphaRegistry & 7 Orthogonal Alpha Factors
-  const alphaRegistry = new AlphaRegistry();
-  alphaRegistry.registerFactor(new OrderFlowFactor());
-  alphaRegistry.registerFactor(new NativeSmcFactor());
-  alphaRegistry.registerFactor(new CvdAbsorptionFactor());
-  alphaRegistry.registerFactor(new MacroRegimeFactor());
-  alphaRegistry.registerFactor(new FundingArbitrageFactor());
-  alphaRegistry.registerFactor(new CrossExchangeSweepFactor());
-  alphaRegistry.registerFactor(new LiqClustersFactor());
-  await alphaRegistry.initialize(db);
+  // Next-Gen Modular Quant Architecture: Per-Symbol SymbolQuantRegistry
+  const symbolQuantRegistry = new SymbolQuantRegistry({
+    mtfManager,
+    smcEngine,
+    sentimentHarvester,
+    economicEventGuard,
+  });
+  for (const sym of watchlistSymbols) {
+    symbolQuantRegistry.getOrCreate(sym);
+  }
+  await symbolQuantRegistry.initializeAll(db);
+
+  const defaultQuantCtx = symbolQuantRegistry.getOrCreate(activeSymbol);
+  const cvdEngine = defaultQuantCtx.cvdEngine;
+  const noiseBandEngine = defaultQuantCtx.noiseBandEngine;
+  const alphaRegistry = defaultQuantCtx.alphaRegistry;
+  const confluenceEngine = defaultQuantCtx.confluenceEngine;
 
   // Strategy Decay Engine & CUSUM drift detection
   const strategyDecayEngine = new StrategyDecayEngine();
@@ -308,18 +310,11 @@ export async function bootstrapServer(): Promise<{
   strategyDecayEngine.registerFactor('CROSS_EXCHANGE_SWEEP', 0.09);
   strategyDecayEngine.registerFactor('LIQ_CLUSTERS', 0.08);
 
-  const confluenceEngine = new ConfluenceEngine({
-    mtfManager,
-    smcEngine,
-    sentimentHarvester,
-    economicEventGuard,
-    noiseBandEngine,
-    alphaRegistry,
-  });
-
   let autoPilotManagerRef: AutoPilotManager | null = null;
 
   const prewarmSymbolKlines = (sym: string): void => {
+    const ctx = symbolQuantRegistry.getOrCreate(sym);
+
     // Pre-warm 1m candle history (500 candles) for smooth chart & indicator feeds
     client.getKlines(sym, '1m', 500).then((raw) => {
       if (Array.isArray(raw) && raw.length > 0) {
@@ -333,7 +328,7 @@ export async function bootstrapServer(): Promise<{
         }));
         candleHistoryMap.set(sym, klines);
         mtfManager.setInitialCandles(sym, '1m', klines);
-        alphaRegistry.warmup(klines);
+        ctx.alphaRegistry.warmup(klines);
       }
     }).catch(() => {});
 
@@ -350,8 +345,9 @@ export async function bootstrapServer(): Promise<{
         }));
         mtfManager.setInitialCandles(sym, '15m', klines);
         smcEngine.onCandleClosed(sym, '15m', klines);
-        noiseBandEngine.loadKlines(klines);
-        alphaRegistry.warmup(klines);
+        ctx.noiseBandEngine.loadKlines(klines);
+        vwap15mMap.set(sym, ctx.noiseBandEngine.calculateVWAP(klines));
+        ctx.alphaRegistry.warmup(klines);
       }
     }).catch(() => {});
 
@@ -367,7 +363,7 @@ export async function bootstrapServer(): Promise<{
           volume: Number(k[5]),
         }));
         mtfManager.setInitialCandles(sym, '1h', klines);
-        alphaRegistry.warmup(klines);
+        ctx.alphaRegistry.warmup(klines);
       }
     }).catch(() => {});
   };
@@ -377,7 +373,7 @@ export async function bootstrapServer(): Promise<{
     if (!nextSymbol) return;
     const prevSymbol = activeSymbol;
 
-    if (prevSymbol !== nextSymbol) {
+    if (prevSymbol !== nextSymbol && !watchlistSet.has(prevSymbol)) {
       const prevOpen = tradesRepo.getActivePositionCached(activeBroker.mode, prevSymbol);
       if (!prevOpen) {
         streamsManager.unsubscribeSymbol(prevSymbol);
@@ -385,11 +381,22 @@ export async function bootstrapServer(): Promise<{
     }
 
     activeSymbol = nextSymbol;
-    cvdEngine.reset(nextSymbol);
+    autoPilotManagerRef?.setActiveSymbol(nextSymbol);
+
+    if (watchlistSet.has(nextSymbol) && candleHistoryMap.has(nextSymbol)) {
+      void buildCockpitState(nextSymbol)
+        .then((snapshot) => {
+          createdWsHub.broadcast({ type: 'SNAPSHOT', data: snapshot });
+        })
+        .catch(() => {});
+      return;
+    }
+
+    const nextCtx = symbolQuantRegistry.getOrCreate(nextSymbol);
+    nextCtx.cvdEngine.reset(nextSymbol);
     mtfManager.reset(nextSymbol);
     smcEngine.reset(nextSymbol);
-    confluenceEngine.reset(nextSymbol);
-    autoPilotManagerRef?.setActiveSymbol(nextSymbol);
+    nextCtx.confluenceEngine.reset(nextSymbol);
     streamsManager.subscribeSymbol(nextSymbol);
     prewarmSymbolKlines(nextSymbol);
   };
@@ -448,6 +455,9 @@ export async function bootstrapServer(): Promise<{
     chasingExecutionEngine,
     twapExecutionSlicer,
     executionChaseLogsRepo,
+    getSymbolQuantContext: (s) => symbolQuantRegistry.get(s),
+    forEachQuantContext: (cb) => symbolQuantRegistry.getAll().forEach(cb),
+    watchlistSymbols,
     alertNotifier,
     getMarkPrice: (sym) => markPriceMap.get(sym) || 0,
     getAtr: (sym) => {
@@ -463,7 +473,7 @@ export async function bootstrapServer(): Promise<{
     onStateTransition: (newState) => {
       if (newState === 'IDLE') {
         strategyDecayEngine.flushPendingWeightsIfIdle(newState, (w) =>
-          alphaRegistry.applyCalibratedWeights(w)
+          symbolQuantRegistry.applyCalibratedWeights(w)
         );
       }
     },
@@ -501,19 +511,20 @@ export async function bootstrapServer(): Promise<{
 
   // 9. Wire Stream Events to TradeManager, CvdEngine, and WsHub
   streamsManager.onMarkPrice((event) => {
-    if (event.symbol.toUpperCase() !== activeSymbol) return;
-    markPriceMap.set(event.symbol, event.markPrice);
-    fundingRateMap.set(event.symbol, {
+    const sym = event.symbol.toUpperCase();
+    if (!watchlistSet.has(sym) && sym !== activeSymbol) return;
+    markPriceMap.set(sym, event.markPrice);
+    fundingRateMap.set(sym, {
       rate: event.fundingRate,
       nextTime: event.nextFundingTime,
     });
 
     if (activeBroker.mode === 'LOCAL_PAPER' && 'onMarkPriceTick' in activeBroker) {
-      (activeBroker as any).onMarkPriceTick(event.symbol, event.markPrice);
+      (activeBroker as any).onMarkPriceTick(sym, event.markPrice);
     }
 
     // Throttled tick broadcast (<= 4Hz)
-    const candles = candleHistoryMap.get(event.symbol) || [];
+    const candles = candleHistoryMap.get(sym) || [];
     let latestCandle = candles[candles.length - 1];
     if (latestCandle) {
       const p = event.markPrice;
@@ -533,41 +544,43 @@ export async function bootstrapServer(): Promise<{
         close: event.markPrice,
         volume: 0,
       };
-      candleHistoryMap.set(event.symbol, [latestCandle]);
+      candleHistoryMap.set(sym, [latestCandle]);
     }
 
-    const activePos = tradesRepo.getActivePositionCached(activeBroker.mode, event.symbol);
-    let uPnl = 0;
-    if (activePos && activePos.remaining_qty > 0) {
-      uPnl =
-        activePos.side === 'BUY'
-          ? (event.markPrice - activePos.entry_price) * activePos.remaining_qty
-          : (activePos.entry_price - event.markPrice) * activePos.remaining_qty;
-    }
+    const ctx = symbolQuantRegistry.getOrCreate(sym);
+    const cvdSnap = ctx.cvdEngine.getSnapshot();
 
-    createdWsHub.broadcastTick({
-      symbol: event.symbol,
-      markPrice: event.markPrice,
-      candle: latestCandle,
-      cvd: cvdEngine.getSnapshot().cvd,
-      unrealizedPnl: Number(uPnl.toFixed(4)),
-    });
+    if (sym === activeSymbol) {
+      const activePos = tradesRepo.getActivePositionCached(activeBroker.mode, sym);
+      let uPnl = 0;
+      if (activePos && activePos.remaining_qty > 0) {
+        uPnl =
+          activePos.side === 'BUY'
+            ? (event.markPrice - activePos.entry_price) * activePos.remaining_qty
+            : (activePos.entry_price - event.markPrice) * activePos.remaining_qty;
+      }
+
+      createdWsHub.broadcastTick({
+        symbol: sym,
+        markPrice: event.markPrice,
+        candle: latestCandle,
+        cvd: cvdSnap.cvd,
+        unrealizedPnl: Number(uPnl.toFixed(4)),
+      });
+    }
 
     // 6+1 Confluence Matrix Evaluation & Throttled 2Hz Broadcast
     const ind = calculateIndicators(candles, 0.01);
-    const cvdSnap = cvdEngine.getSnapshot();
     const recentHigh = candles.length > 0 ? Math.max(...candles.slice(-20).map(c => c.high)) : undefined;
     const recentLow = candles.length > 0 ? Math.min(...candles.slice(-20).map(c => c.low)) : undefined;
 
-    const candles15m = mtfManager.getCandles(event.symbol, '15m');
+    const candles15m = mtfManager.getCandles(sym, '15m');
     const candle15m = candles15m.length > 0 ? candles15m[candles15m.length - 1] : undefined;
     const prevCandle15m = candles15m.length > 1 ? candles15m[candles15m.length - 2] : undefined;
-    const rollingVwap15m = candles15m.length > 0
-      ? noiseBandEngine.calculateVWAP(candles15m)
-      : event.markPrice;
+    const rollingVwap15m = vwap15mMap.get(sym) ?? event.markPrice;
 
-    const confluenceSnapshot = confluenceEngine.evaluate({
-      symbol: event.symbol,
+    const confluenceSnapshot = ctx.confluenceEngine.evaluate({
+      symbol: sym,
       currentPrice: event.markPrice,
       indicators: ind,
       cvd: cvdSnap,
@@ -576,11 +589,13 @@ export async function bootstrapServer(): Promise<{
       candle15m,
       prevCandle15m,
       vwap: rollingVwap15m,
-      fundingRate: fundingRateMap.get(event.symbol)?.rate ?? undefined,
+      fundingRate: fundingRateMap.get(sym)?.rate ?? undefined,
     });
-    createdWsHub.broadcastConfluence(confluenceSnapshot);
+    if (sym === activeSymbol) {
+      createdWsHub.broadcastConfluence(confluenceSnapshot);
+    }
 
-    const atr = ind?.atr14 || (markPriceMap.get(event.symbol) || event.markPrice || 100) * 0.005;
+    const atr = ind?.atr14 || (markPriceMap.get(sym) || event.markPrice || 100) * 0.005;
     decisionAuditService.evaluateSnapshot(confluenceSnapshot, atr, event.markPrice);
     if (confluenceSnapshot.telemetryEvent) {
       const te = confluenceSnapshot.telemetryEvent;
@@ -599,7 +614,7 @@ export async function bootstrapServer(): Promise<{
       }
     }
     pillarAttributionService.evaluateTick(
-      event.symbol,
+      sym,
       event.markPrice,
       atr,
       confluenceSnapshot,
@@ -608,14 +623,14 @@ export async function bootstrapServer(): Promise<{
 
     // Autonomous Auto-Pilot Tick Evaluation & Live Prop Firm Equity Watchdog
     autoPilotManager
-      .onTick(event.symbol, event.markPrice)
+      .onTick(sym, event.markPrice)
       .catch(() => {})
       .finally(() => {
         if (activeBroker.mode !== 'BINANCE_DEMO') return;
         const nowPropFirmTs = Date.now();
         if (nowPropFirmTs - lastPropFirmEvalAt >= 500) {
           lastPropFirmEvalAt = nowPropFirmTs;
-          const openPos = tradesRepo.getActivePositionCached(activeBroker.mode, event.symbol);
+          const openPos = tradesRepo.getActivePositionCached(activeBroker.mode, sym);
           let liveUnrealizedPnl = 0;
           if (openPos && openPos.remaining_qty > 0) {
             const rawFloating =
@@ -639,8 +654,9 @@ export async function bootstrapServer(): Promise<{
 
   streamsManager.onKline((event) => {
     const sym = event.symbol.toUpperCase();
-    if (sym !== activeSymbol) return;
+    if (!watchlistSet.has(sym) && sym !== activeSymbol) return;
     const interval = event.interval;
+    const ctx = symbolQuantRegistry.getOrCreate(sym);
 
     // Feed MTF Manager ring buffers for 1m, 15m, and 1h
     if (interval === '1m' || interval === '15m' || interval === '1h') {
@@ -648,7 +664,7 @@ export async function bootstrapServer(): Promise<{
     }
 
     if (event.isFinal) {
-      alphaRegistry.onCandleClosed(event.candle, interval);
+      ctx.alphaRegistry.onCandleClosed(event.candle, interval);
     }
 
     if (interval === '1m') {
@@ -671,7 +687,8 @@ export async function bootstrapServer(): Promise<{
       const closedCandles = mtfManager.getCandles(sym, interval as any);
       smcEngine.onCandleClosed(sym, interval, closedCandles);
       if (interval === '15m') {
-        noiseBandEngine.loadKlines(closedCandles);
+        ctx.noiseBandEngine.loadKlines(closedCandles);
+        vwap15mMap.set(sym, ctx.noiseBandEngine.calculateVWAP(closedCandles));
       }
     }
 
@@ -680,7 +697,7 @@ export async function bootstrapServer(): Promise<{
       decisionAuditService.onCandleClose(sym, event.candle);
       pillarAttributionService.onClosedCandle(sym, event.candle);
 
-      const latestSnapshot = confluenceEngine.getLatestSnapshot();
+      const latestSnapshot = symbolQuantRegistry.getLatestSnapshot(sym);
       if (latestSnapshot && latestSnapshot.factorDetails && latestSnapshot.factorDetails.length > 0) {
         const records = latestSnapshot.factorDetails.map((f) => ({
           timestamp: Date.now(),
@@ -733,27 +750,38 @@ export async function bootstrapServer(): Promise<{
         }
 
         strategyDecayEngine.flushPendingWeightsIfIdle(autoPilotManager.getState(), (w) =>
-          alphaRegistry.applyCalibratedWeights(w)
+          symbolQuantRegistry.applyCalibratedWeights(w)
         );
       }
     }
   });
 
   streamsManager.onDepth((event) => {
-    if (event.symbol && event.symbol.toUpperCase() !== activeSymbol) return;
-    confluenceEngine.orderFlowEngine.updateDepth(event.bids, event.asks);
+    const sym = event.symbol ? event.symbol.toUpperCase() : activeSymbol;
+    if (!watchlistSet.has(sym) && sym !== activeSymbol) return;
+    symbolQuantRegistry.getOrCreate(sym).confluenceEngine.orderFlowEngine.updateDepth(
+      event.bids,
+      event.asks
+    );
   });
 
   streamsManager.onAggTrade((event) => {
-    if (event.symbol !== activeSymbol) return;
-    cvdEngine.processTrade({
+    const sym = event.symbol.toUpperCase();
+    if (!watchlistSet.has(sym) && sym !== activeSymbol) return;
+    const ctx = symbolQuantRegistry.getOrCreate(sym);
+    ctx.cvdEngine.processTrade({
       p: event.price,
       q: event.qty,
       m: event.isBuyerMaker,
-      s: event.symbol,
+      s: sym,
       T: event.time,
     });
-    confluenceEngine.orderFlowEngine.processTrade(event.qty, event.isBuyerMaker, event.time, event.price);
+    ctx.confluenceEngine.orderFlowEngine.processTrade(
+      event.qty,
+      event.isBuyerMaker,
+      event.time,
+      event.price
+    );
   });
 
   streamsManager.onUserData((event) => {
@@ -796,6 +824,10 @@ export async function bootstrapServer(): Promise<{
     streamsManager,
     cvdEngine,
     confluenceEngine,
+    getConfluenceSnapshot: (sym) => symbolQuantRegistry.getLatestSnapshot(sym),
+    getCvdSnapshot: (sym) => symbolQuantRegistry.get(sym)?.cvdEngine.getSnapshot() ?? null,
+    getConfluenceEngine: (sym) => symbolQuantRegistry.get(sym)?.confluenceEngine,
+    watchlistSymbols,
     autoPilotManager,
     activeSymbol,
     getActiveSymbol: () => activeSymbol,
@@ -887,8 +919,8 @@ export async function bootstrapServer(): Promise<{
     });
   });
 
-  // Start Binance WebSocket streams for active symbol
-  await streamsManager.start([activeSymbol]);
+  // Start Binance WebSocket streams for all watchlist symbols
+  await streamsManager.start(watchlistSymbols);
 
   // Seed live wallet balance cache once on startup for PropFirmRiskGuard HUD
   activeBroker
@@ -902,13 +934,6 @@ export async function bootstrapServer(): Promise<{
       }
     })
     .catch(() => null);
-
-  // Pre-fetch initial mark price and candle history
-  try {
-    const mpData = await client.getMarkPrice(activeSymbol);
-    const p = parseFloat(mpData?.markPrice || '0');
-    if (p > 0) markPriceMap.set(activeSymbol, p);
-  } catch {}
 
   // Pre-load 200 historical klines for immediate indicator warmup across 1m, 15m, and 1h
   const fetchBootKlines = async (sym: string, interval: string, limit: number = 200): Promise<KlineCandle[]> => {
@@ -950,46 +975,61 @@ export async function bootstrapServer(): Promise<{
     return [];
   };
 
-  try {
-    const candles1m = await fetchBootKlines(activeSymbol, '1m', 200);
-    if (candles1m.length > 0) {
-      candleHistoryMap.set(activeSymbol, candles1m);
-      mtfManager.setInitialCandles(activeSymbol, '1m', candles1m);
-      alphaRegistry.warmup(candles1m);
-      console.log(`[BOOT] Preloaded ${candles1m.length} 1m candles for ${activeSymbol}. Indicators fully warmed up!`);
+  // Staggered boot preloader across all watchlist symbols (250ms per symbol)
+  for (let i = 0; i < watchlistSymbols.length; i++) {
+    const sym = watchlistSymbols[i]!;
+    if (i > 0) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    const ctx = symbolQuantRegistry.getOrCreate(sym);
+
+    try {
+      const mpData = await client.getMarkPrice(sym);
+      const p = parseFloat(mpData?.markPrice || '0');
+      if (p > 0) markPriceMap.set(sym, p);
+    } catch {}
+
+    try {
+      const candles1m = await fetchBootKlines(sym, '1m', 200);
+      if (candles1m.length > 0) {
+        candleHistoryMap.set(sym, candles1m);
+        mtfManager.setInitialCandles(sym, '1m', candles1m);
+        ctx.alphaRegistry.warmup(candles1m);
+        console.log(`[BOOT] Preloaded ${candles1m.length} 1m candles for ${sym}. Indicators fully warmed up!`);
+      }
+
+      const candles15m = await fetchBootKlines(sym, '15m', 1000);
+      if (candles15m.length > 0) {
+        mtfManager.setInitialCandles(sym, '15m', candles15m);
+        smcEngine.onCandleClosed(sym, '15m', candles15m);
+        ctx.noiseBandEngine.loadKlines(candles15m);
+        vwap15mMap.set(sym, ctx.noiseBandEngine.calculateVWAP(candles15m));
+        ctx.alphaRegistry.warmup(candles15m);
+        console.log(`[BOOT] Preloaded ${candles15m.length} 15m candles for ${sym}. Native SMC & NoiseBandEngine initialized!`);
+      }
+
+      const candles1h = await fetchBootKlines(sym, '1h', 200);
+      if (candles1h.length > 0) {
+        mtfManager.setInitialCandles(sym, '1h', candles1h);
+        ctx.alphaRegistry.warmup(candles1h);
+        console.log(`[BOOT] Preloaded ${candles1h.length} 1h candles for ${sym}. Macro Regime & ADX initialized!`);
+      }
+    } catch (err: any) {
+      console.warn(`[BOOT] Failed to preload historical klines for ${sym}: ${err.message}`);
     }
 
-    const candles15m = await fetchBootKlines(activeSymbol, '15m', 1000);
-    if (candles15m.length > 0) {
-      mtfManager.setInitialCandles(activeSymbol, '15m', candles15m);
-      smcEngine.onCandleClosed(activeSymbol, '15m', candles15m);
-      noiseBandEngine.loadKlines(candles15m);
-      alphaRegistry.warmup(candles15m);
-      console.log(`[BOOT] Preloaded ${candles15m.length} 15m candles for ${activeSymbol}. Native SMC & NoiseBandEngine initialized!`);
+    try {
+      const depthResp = await fetch(`https://fapi.binance.com/fapi/v1/depth?symbol=${sym}&limit=20`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (depthResp.ok) {
+        const depthData = (await depthResp.json()) as any;
+        ctx.confluenceEngine.orderFlowEngine.updateDepth(depthData.bids, depthData.asks);
+        console.log(`[BOOT] Preloaded initial L2 depth for ${sym}.`);
+      }
+    } catch (err: any) {
+      console.warn(`[BOOT] Failed to preload L2 depth for ${sym}: ${err.message}`);
     }
-
-    const candles1h = await fetchBootKlines(activeSymbol, '1h', 200);
-    if (candles1h.length > 0) {
-      mtfManager.setInitialCandles(activeSymbol, '1h', candles1h);
-      alphaRegistry.warmup(candles1h);
-      console.log(`[BOOT] Preloaded ${candles1h.length} 1h candles for ${activeSymbol}. Macro Regime & ADX initialized!`);
-    }
-  } catch (err: any) {
-    console.warn(`[BOOT] Failed to preload historical klines: ${err.message}`);
-  }
-
-  // Preload initial L2 order book depth for Order Flow Engine
-  try {
-    const depthResp = await fetch(`https://fapi.binance.com/fapi/v1/depth?symbol=${activeSymbol}&limit=20`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (depthResp.ok) {
-      const depthData = (await depthResp.json()) as any;
-      confluenceEngine.orderFlowEngine.updateDepth(depthData.bids, depthData.asks);
-      console.log(`[BOOT] Preloaded initial L2 depth for ${activeSymbol}.`);
-    }
-  } catch (err: any) {
-    console.warn(`[BOOT] Failed to preload L2 depth: ${err.message}`);
   }
 
   // Start hourly economic event calendar ingestion cron and fetch initial events
@@ -1019,7 +1059,9 @@ export async function bootstrapServer(): Promise<{
       await strategyDecayEngine.dispose();
     } catch {}
     try {
-      await alphaRegistry.teardown();
+      for (const ctx of symbolQuantRegistry.getAll()) {
+        await ctx.alphaRegistry.teardown();
+      }
     } catch {}
     try {
       economicEventGuard.stopCron();

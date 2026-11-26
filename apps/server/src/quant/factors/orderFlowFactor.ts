@@ -37,15 +37,18 @@ export class OrderFlowFactor implements IAlphaFactor {
 
   computeFactor(context: FactorEvaluationContext): FactorOutput {
     const depth = context.depth;
+    const cvd = context.cvd;
+    const hasDepth = Boolean(depth && depth.bids.length > 0 && depth.asks.length > 0);
+    const hasFlow = Boolean(cvd && cvd.buyVolume + cvd.sellVolume > 0);
 
-    // If no depth data, return neutral
-    if (!depth || depth.bids.length === 0 || depth.asks.length === 0) {
+    // If neither depth nor taker flow data is available, return neutral
+    if (!hasDepth && !hasFlow) {
       return neutral(context.timestamp);
     }
 
     // Top-20 depth slices
-    const topBids = depth.bids.slice(0, TOP_N_LEVELS);
-    const topAsks = depth.asks.slice(0, TOP_N_LEVELS);
+    const topBids = hasDepth ? depth!.bids.slice(0, TOP_N_LEVELS) : [];
+    const topAsks = hasDepth ? depth!.asks.slice(0, TOP_N_LEVELS) : [];
 
     const bidVolume = topBids.reduce((s, l) => s + l.qty, 0);
     const askVolume = topAsks.reduce((s, l) => s + l.qty, 0);
@@ -69,10 +72,14 @@ export class OrderFlowFactor implements IAlphaFactor {
 
     // 60-second taker flow imbalance from CVD snapshot
     let flowSignal = 0;
-    const cvd = context.cvd;
-    if (cvd && cvd.buyVolume + cvd.sellVolume > 0) {
+    let takerRatio = 1.0;
+    if (hasFlow && cvd) {
       const totalFlow = cvd.buyVolume + cvd.sellVolume;
       const flowRatio = cvd.buyVolume / totalFlow;
+      const minFlow = Math.min(cvd.buyVolume, cvd.sellVolume);
+      const maxFlow = Math.max(cvd.buyVolume, cvd.sellVolume);
+      takerRatio = minFlow > 0 ? maxFlow / minFlow : maxFlow;
+
       // flowRatio > FLOW_IMBALANCE_THRESHOLD => bullish taker flow
       if (flowRatio > FLOW_IMBALANCE_THRESHOLD) {
         flowSignal = Math.min(1.0, (flowRatio - 0.5) * 2);
@@ -82,8 +89,16 @@ export class OrderFlowFactor implements IAlphaFactor {
       flowSignal = Math.max(-1.0, Math.min(1.0, flowSignal));
     }
 
-    // Combine: 60% weight on depth pressure, 40% on taker flow
-    const rawAlpha = Math.max(-1.0, Math.min(1.0, depthSignal * 0.6 + flowSignal * 0.4));
+    // [DEF-02 / ARCH-02] Give aggressive 60s taker flow (>= 3.0x) clear priority over passive depth
+    let rawAlpha: number;
+    if (hasFlow && takerRatio >= 3.0) {
+      rawAlpha = Math.max(-1.0, Math.min(1.0, flowSignal * 0.85 + depthSignal * 0.15));
+    } else if (!hasDepth) {
+      rawAlpha = flowSignal;
+    } else {
+      // Combine: 60% weight on depth pressure, 40% on taker flow
+      rawAlpha = Math.max(-1.0, Math.min(1.0, depthSignal * 0.6 + flowSignal * 0.4));
+    }
 
     const bias = rawAlpha > 0.1 ? 'BULLISH' : rawAlpha < -0.1 ? 'BEARISH' : 'NEUTRAL';
     const confidence = Math.abs(rawAlpha);
@@ -100,7 +115,8 @@ export class OrderFlowFactor implements IAlphaFactor {
         askVolume,
         depthSignal,
         flowSignal,
-        topLevelsUsed: Math.min(TOP_N_LEVELS, depth.bids.length),
+        takerRatio,
+        topLevelsUsed: hasDepth ? Math.min(TOP_N_LEVELS, depth!.bids.length) : 0,
       },
     };
   }

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { LiquidationEngine } from '../liquidationEngine.js';
-import { ConfluenceEngine } from '../confluenceEngine.js';
+import { ConfluenceEngine, CALIBRATED_CONFLUENCE_WEIGHTS } from '../confluenceEngine.js';
 import { EconomicEventGuard } from '../economicEventGuard.js';
 import { NoiseBandEngine } from '../noiseBandEngine.js';
 import type { TechnicalSummary, CvdSnapshot, KlineCandle } from '@tradeos/shared';
@@ -243,7 +243,7 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
 
       const indicators = createMockIndicators({
         rsi14: 58,
-        macd: { macd: 1.5, signal: 1.0, histogram: 0.8 },
+        macd: { macd: 3.0, signal: 1.0, histogram: 2.0 },
       });
 
       const snap = engine.evaluate({
@@ -251,6 +251,7 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
         currentPrice: 105.5,
         indicators,
         cvd: createMockCvd({ cvd: 10000, delta: 5000 }),
+        recentHigh: 106.2,
       });
 
       expect(snap.macroVetoActive).toBe(false);
@@ -453,6 +454,75 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
       expect(snapFail.compositeScore).toBe(68);
       expect(snapFail.consensusMet).toBe(false);
       expect(snapFail.recommendedAction).toBe('WAIT');
+    });
+
+    it('rebalances CALIBRATED_CONFLUENCE_WEIGHTS to sum to 1.0, lifting MOMENTUM_RVOL & LIQ_CLUSTERS', () => {
+      const total = Object.values(CALIBRATED_CONFLUENCE_WEIGHTS).reduce((acc, w) => acc + w, 0);
+      expect(total).toBeCloseTo(1.0, 10);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.MOMENTUM_RVOL).toBeGreaterThan(0.05);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.LIQ_CLUSTERS).toBeGreaterThan(0.075);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.NATIVE_SMC).toBeCloseTo(0.18, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.SENTIMENT_MACRO).toBeCloseTo(0.02, 4);
+
+      const snap = engine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 105,
+        indicators: createMockIndicators(),
+        cvd: createMockCvd(),
+      });
+      const liqFactor = snap.telemetryEvent?.activeFactors.find((f) => f.factorId === 'LIQ_CLUSTERS');
+      const momFactor = snap.telemetryEvent?.activeFactors.find((f) => f.factorId === 'MOMENTUM_RVOL');
+      expect(liqFactor?.effectiveWeight).toBeCloseTo(CALIBRATED_CONFLUENCE_WEIGHTS.LIQ_CLUSTERS, 4);
+      expect(momFactor?.effectiveWeight).toBeCloseTo(CALIBRATED_CONFLUENCE_WEIGHTS.MOMENTUM_RVOL, 4);
+    });
+
+    it('passes full MTF candles and market context to AlphaRegistry instead of a 1-candle array', () => {
+      const isolatedEngine = new ConfluenceEngine({
+        economicEventGuard: new EconomicEventGuard(),
+        noiseBandEngine: new NoiseBandEngine(),
+      });
+      const candles15m: KlineCandle[] = [];
+      for (let i = 0; i < 30; i++) {
+        candles15m.push({
+          time: 1000 + i * 900,
+          open: 100 + i * 0.2,
+          high: 101 + i * 0.2,
+          low: 99 + i * 0.2,
+          close: 100.5 + i * 0.2,
+          volume: 1500,
+        });
+      }
+      isolatedEngine.mtfManager.setInitialCandles('SOLUSDT', '15m', candles15m);
+
+      const mockEvaluate = vi.fn().mockReturnValue({
+        compositeBias: 'BULLISH',
+        compositeScore: 80,
+        rawConviction: 0.6,
+        details: [],
+        evaluatedAt: Date.now(),
+      });
+      isolatedEngine.setAlphaRegistry({ evaluate: mockEvaluate } as any);
+
+      isolatedEngine.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 106.5,
+        indicators: createMockIndicators(),
+        cvd: createMockCvd(),
+        candle15m: candles15m[candles15m.length - 1],
+        prevCandle15m: candles15m[candles15m.length - 2],
+        vwap: 102,
+        fundingRate: -0.0004,
+        spotPrice: 106.6,
+      });
+
+      expect(mockEvaluate).toHaveBeenCalledTimes(1);
+      const passedCtx = mockEvaluate.mock.calls[0]![0];
+      expect(passedCtx.candles.length).toBe(30);
+      expect(passedCtx.indicators).toBeDefined();
+      expect(passedCtx.cvd).toBeDefined();
+      expect(passedCtx.depth).toBeDefined();
+      expect(passedCtx.fundingRate).toBe(-0.0004);
+      expect(passedCtx.spotPrice).toBe(106.6);
     });
   });
 });

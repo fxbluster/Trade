@@ -19,7 +19,7 @@ import type {
   FactorStateDetail,
   FactorTelemetryEvent,
 } from '@tradeos/shared';
-import { calculateCompositeConfluenceScore, EMPIRICAL_CONFLUENCE_WEIGHTS } from '@tradeos/shared';
+import { calculateCompositeConfluenceScore } from '@tradeos/shared';
 import { HierarchicalMtfManager } from './hierarchicalMtfManager.js';
 import { NativeSmcEngine } from './nativeSmcEngine.js';
 import { OrderFlowEngine, type DepthLevel } from './orderFlowEngine.js';
@@ -28,6 +28,21 @@ import { LiquidationEngine } from './liquidationEngine.js';
 import { NoiseBandEngine, noiseBandEngine } from './noiseBandEngine.js';
 import { EconomicEventGuard, economicEventGuard } from './economicEventGuard.js';
 import type { AlphaRegistry, CompositeFactorEvaluation } from './alphaRegistry.js';
+
+/**
+ * Rebalanced 7-pillar Bayesian weights (strictly summing to 1.0):
+ * - Lifts high-hit-rate pillars LIQ_CLUSTERS (82.6% hit rate: 7.5% -> 11%) and MOMENTUM_RVOL (80.2% hit rate: 5% -> 9%)
+ * - Trims dead weight from NATIVE_SMC (25% -> 18%) and SENTIMENT_MACRO (2.5% -> 2%)
+ */
+export const CALIBRATED_CONFLUENCE_WEIGHTS: Record<ConfluencePillarId, number> = {
+  MACRO_REGIME: 0.25,
+  NATIVE_SMC: 0.18,
+  CVD_ABSORPTION: 0.20,
+  ORDER_FLOW_L2: 0.15,
+  LIQ_CLUSTERS: 0.11,
+  MOMENTUM_RVOL: 0.09,
+  SENTIMENT_MACRO: 0.02,
+};
 
 export interface ConfluenceMarketData {
   symbol: string;
@@ -42,6 +57,8 @@ export interface ConfluenceMarketData {
   vwap?: number;
   timestamp?: number;
   depth?: { bids: DepthLevel[]; asks: DepthLevel[] };
+  fundingRate?: number;
+  spotPrice?: number;
 }
 
 interface StoredPineAlert {
@@ -240,7 +257,8 @@ export class ConfluenceEngine {
       data.candle15m,
       data.vwap,
       now,
-      data.prevCandle15m
+      data.prevCandle15m,
+      indicators?.atr14 ?? undefined
     );
 
     const blockReason: BlockReason | null = gateCheck.blocked ? (gateCheck.reason ?? null) : null;
@@ -272,11 +290,9 @@ export class ConfluenceEngine {
     // Quantitative factor evaluation via AlphaRegistry (invoked if pre-trade gates pass)
     let alphaEval: CompositeFactorEvaluation | null = null;
     if (!eventBlackoutActive && this.alphaRegistry) {
-      const candles =
-        data.candles ||
-        (data.candle15m ? [data.candle15m] : this.mtfManager.getCandles(symbol, '1m'));
+      const candles = this.resolveFactorCandles(symbol, data.candles);
       const depth = data.depth || this.orderFlowEngine.getDepth();
-      const context: FactorEvaluationContext = {
+      const context: FactorEvaluationContext & { fundingRate?: number; spotPrice?: number } = {
         symbol,
         currentPrice,
         depth,
@@ -284,6 +300,8 @@ export class ConfluenceEngine {
         candles,
         indicators: indicators ?? undefined,
         timestamp: now,
+        ...(data.fundingRate !== undefined ? { fundingRate: data.fundingRate } : {}),
+        ...(data.spotPrice !== undefined ? { spotPrice: data.spotPrice } : {}),
       };
       try {
         alphaEval = this.alphaRegistry.evaluate(context);
@@ -324,7 +342,7 @@ export class ConfluenceEngine {
       const legacyResult = calculateCompositeConfluenceScore(
         pillars,
         macroVetoActive,
-        EMPIRICAL_CONFLUENCE_WEIGHTS
+        CALIBRATED_CONFLUENCE_WEIGHTS
       );
       compositeScore = legacyResult.compositeScore;
       mathBias = legacyResult.bias;
@@ -430,7 +448,8 @@ export class ConfluenceEngine {
     candle15m?: KlineCandle,
     vwap?: number,
     timestamp?: number,
-    prevCandle15m?: KlineCandle
+    prevCandle15m?: KlineCandle,
+    atr14?: number
   ): { blocked: boolean; reason?: BlockReason; details?: string } {
     const now = timestamp ?? Date.now();
 
@@ -446,7 +465,7 @@ export class ConfluenceEngine {
 
     // 2. Volatility Noise Band Filter Gate
     if (candle15m && vwap !== undefined) {
-      const isNoise = this.noiseBandEngine.isNoise(candle15m, vwap, currentPrice, prevCandle15m);
+      const isNoise = this.noiseBandEngine.isNoise(candle15m, vwap, currentPrice, prevCandle15m, atr14);
       if (isNoise) {
         return {
           blocked: true,
@@ -543,6 +562,21 @@ export class ConfluenceEngine {
     };
   }
 
+  private resolveFactorCandles(symbol: string, explicitCandles?: KlineCandle[]): KlineCandle[] {
+    if (explicitCandles && explicitCandles.length > 0) {
+      return explicitCandles;
+    }
+    const mtf15m = this.mtfManager.getCandles(symbol, '15m');
+    if (mtf15m.length >= 5) return mtf15m;
+    const mtf1h = this.mtfManager.getCandles(symbol, '1h');
+    if (mtf1h.length >= 5) return mtf1h;
+    const mtf1m = this.mtfManager.getCandles(symbol, '1m');
+    if (mtf1m.length >= 5) return mtf1m;
+    if (mtf15m.length > 0) return mtf15m;
+    if (mtf1h.length > 0) return mtf1h;
+    return mtf1m;
+  }
+
   private pruneNonceCache(now: number): void {
     for (const [id, timestamp] of this.alertNonceCache.entries()) {
       if (now - timestamp > 60_000) {
@@ -618,7 +652,7 @@ export function synthesizeTelemetryEvent(params: {
       });
     collinearFactors = alphaDetails.filter((d) => d.isCollinear).map((d) => d.name);
   } else {
-    const rawWeights = pillars.map((p) => EMPIRICAL_CONFLUENCE_WEIGHTS[p.id] ?? 1 / Math.max(1, pillars.length));
+    const rawWeights = pillars.map((p) => CALIBRATED_CONFLUENCE_WEIGHTS[p.id] ?? 1 / Math.max(1, pillars.length));
     const totalWeight = rawWeights.reduce((sum, w) => sum + w, 0) || 1;
     activeFactors = pillars.map((p, idx) => {
       const signedMag = Math.max(0, Math.min(1, Math.abs(p.score - 50) / 50));

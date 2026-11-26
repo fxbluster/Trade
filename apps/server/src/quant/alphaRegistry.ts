@@ -212,28 +212,52 @@ export class AlphaRegistry {
     let orthogonalAlphas: number[];
     let isCollinear: boolean[];
 
-    if (maxHistLen >= 2) {
-      // Build vectors from sliding-window history
-      const vectors: number[][] = factorEntries.map((e) => {
-        const h = e.history;
-        if (h.length < maxHistLen) {
-          const pad = new Array(maxHistLen - h.length).fill(h[0] ?? 0);
-          return [...pad, ...h];
-        }
-        return h;
-      });
+    // Only run MGS across factors when history dimension >= number of factors (and >= 2)
+    // to avoid rank-deficiency artificially zeroing active factors on early ticks.
+    if (maxHistLen >= Math.max(2, factorEntries.length)) {
+      // Separate time-varying factors from steady-state (constant) factors so slow-timeframe
+      // factors (e.g. 1h MACRO_REGIME, 15m NATIVE_SMC) are not projected onto each other's
+      // constant subspace and zeroed as collinear.
+      const varyingIndices: number[] = [];
+      const varyingVectors: number[][] = [];
 
-      const res = mgsOrthogonalizeVectors(vectors);
-      isCollinear = res.isCollinear;
-      orthogonalAlphas = res.orthogonalVectors.map((v, k) => {
-        if (isCollinear[k]) return 0;
-        const lastVal = v[v.length - 1] ?? 0;
-        return Math.max(-1.0, Math.min(1.0, lastVal));
-      });
+      for (let k = 0; k < factorEntries.length; k++) {
+        const h = factorEntries[k]!.history;
+        const padded =
+          h.length < maxHistLen
+            ? [...new Array(maxHistLen - h.length).fill(h[0] ?? 0), ...h]
+            : h;
+        if (!isConstantSeries(padded)) {
+          varyingIndices.push(k);
+          varyingVectors.push(padded);
+        }
+      }
+
+      isCollinear = factorEntries.map((e) => Math.abs(e.output.rawAlpha) <= 1e-6);
+      orthogonalAlphas = factorEntries.map((e) =>
+        Math.abs(e.output.rawAlpha) <= 1e-6 ? 0 : e.output.rawAlpha
+      );
+
+      if (varyingVectors.length >= 2) {
+        const res = mgsOrthogonalizeVectors(varyingVectors);
+        for (let idx = 0; idx < varyingIndices.length; idx++) {
+          const k = varyingIndices[idx]!;
+          isCollinear[k] = res.isCollinear[idx]!;
+          if (res.isCollinear[idx]) {
+            orthogonalAlphas[k] = 0;
+          } else {
+            const v = res.orthogonalVectors[idx]!;
+            const lastVal = v[v.length - 1] ?? 0;
+            orthogonalAlphas[k] = Math.max(-1.0, Math.min(1.0, lastVal));
+          }
+        }
+      }
     } else {
-      // Single-tick evaluation without prior history: factors are independent initially
-      isCollinear = factorEntries.map(() => false);
-      orthogonalAlphas = factorEntries.map((e) => e.output.rawAlpha);
+      // Early ticks before history dimension >= factor count: factors are independent
+      isCollinear = factorEntries.map((e) => Math.abs(e.output.rawAlpha) <= 1e-6);
+      orthogonalAlphas = factorEntries.map((e) =>
+        Math.abs(e.output.rawAlpha) <= 1e-6 ? 0 : e.output.rawAlpha
+      );
     }
 
     // 5. Bayesian Dirichlet-regularized posterior weight synthesis
@@ -305,6 +329,15 @@ export class AlphaRegistry {
 // ---------------------------------------------------------------------------
 // Mathematical Helpers
 // ---------------------------------------------------------------------------
+
+/** Check if a time series has near-zero variance (steady-state / slow-timeframe factor) */
+function isConstantSeries(history: number[], stdThreshold: number = 1e-4): boolean {
+  if (history.length < 2) return true;
+  const mean = history.reduce((s, v) => s + v, 0) / history.length;
+  const variance =
+    history.reduce((s, v) => s + (v - mean) ** 2, 0) / history.length;
+  return Math.sqrt(variance) < stdThreshold;
+}
 
 /**
  * Compute Information Ratio of a time series over sliding window:

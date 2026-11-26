@@ -191,4 +191,84 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
     expect(snap.consensusMet).toBe(false);
     expect(snap.recommendedAction).toBe('WAIT');
   });
+
+  it('bypasses NoiseBand immediately when effectiveRange >= 1.5 * atr14 (sharp directional impulse)', () => {
+    const candles = generateMockCandles(96, 100, 10.0); // MTR = 10.0 -> threshold = 5.00
+    const engine = new NoiseBandEngine(candles);
+
+    // Range = 3.0 (< threshold 5.00) and price is right at VWAP (dist = 0.2 < 2.50),
+    // but atr14 = 2.0 so effectiveRange (3.0) >= 1.5 * atr14 (3.0) -> impulse bypass clears NoiseBand.
+    const impulseCandle: KlineCandle = {
+      time: 1795132800,
+      open: 100,
+      high: 101.5,
+      low: 98.5,
+      close: 98.8,
+      volume: 5000,
+    };
+
+    expect(engine.isNoise(impulseCandle, 99.0, 98.8)).toBe(true); // without atr14 -> blocked
+    expect(engine.isNoise(impulseCandle, 99.0, 98.8, undefined, 2.0)).toBe(false); // with atr14=2.0 -> bypassed
+    expect(engine.getSnapshot(impulseCandle, 99.0, 98.8, undefined, 2.0).isNoise).toBe(false);
+  });
+
+  it('still blocks low-volatility chop when effectiveRange < threshold and effectiveRange < 1.5 * atr14', () => {
+    const candles = generateMockCandles(96, 100, 4.0); // MTR = 4.0 -> threshold = 2.00
+    const engine = new NoiseBandEngine(candles);
+
+    const chopCandle: KlineCandle = {
+      time: 1795132800,
+      open: 100,
+      high: 100.4,
+      low: 99.6,
+      close: 100.1,
+      volume: 300,
+    };
+
+    // effectiveRange = 0.8 < threshold (2.00) and < 1.5 * atr14 (1.5 * 1.0 = 1.5)
+    expect(engine.isNoise(chopCandle, 95.0, 100.1, undefined, 1.0)).toBe(true);
+    // atr14 <= 0 does not trigger bypass
+    expect(engine.isNoise(chopCandle, 95.0, 100.1, undefined, 0)).toBe(true);
+  });
+
+  it('clears BLOCKED_NOISE_BAND in ConfluenceEngine when indicators.atr14 triggers breakout bypass', () => {
+    const candles = generateMockCandles(96, 100, 10.0); // threshold = 5.00
+    const engine = new NoiseBandEngine(candles);
+    const confluence = new ConfluenceEngine({ noiseBandEngine: engine });
+
+    const crashCandle: KlineCandle = {
+      time: 1795132800,
+      open: 100,
+      high: 101.5,
+      low: 98.5,
+      close: 98.7,
+      volume: 8000,
+    };
+
+    // effectiveRange = 3.0 >= 1.5 * atr14 (1.5 * 1.8 = 2.7) -> clears NoiseBand
+    const snapBypass = confluence.evaluate({
+      symbol: 'SOLUSDT',
+      currentPrice: 98.7,
+      indicators: {
+        ema9: 100,
+        ema21: 101,
+        ema50: 102,
+        ema200: 105,
+        rsi14: 32,
+        atr14: 1.8,
+        macd: { macd: -1, signal: -0.5, histogram: -0.5 },
+        bollingerBands: { upper: 105, middle: 100, lower: 95 },
+        adx14: { adx: 28, pdi: 12, mdi: 30 },
+        support: 95,
+        resistance: 105,
+        volumeSma20: 1000,
+      },
+      cvd: null,
+      candle15m: crashCandle,
+      vwap: 99.0,
+    });
+
+    expect(snapBypass.noiseBandActive).toBe(false);
+    expect(snapBypass.blockReason).not.toBe('BLOCKED_NOISE_BAND');
+  });
 });

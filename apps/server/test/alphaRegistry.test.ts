@@ -498,4 +498,112 @@ describe('AlphaRegistry', () => {
       expect(after.rawConviction).toBeGreaterThan(0);
     });
   });
+
+  describe('DEF-03: Steady-State & Multi-Factor MGS Preservation', () => {
+    const context: FactorEvaluationContext = {
+      symbol: 'SOLUSDT',
+      currentPrice: 150.0,
+      candles: [],
+      timestamp: Date.now(),
+    };
+
+    it('preserves non-zero signal and weight for steady-state active factors (e.g. MACRO_REGIME, NATIVE_SMC) across ticks', () => {
+      const registry = new AlphaRegistry();
+
+      let tick = 0;
+      const orderFlow: IAlphaFactor = {
+        ...createMockFactor('ORDER_FLOW_L2', 'Order Flow L2', 0.25),
+        computeFactor: () => ({
+          factorId: 'ORDER_FLOW_L2',
+          bias: 'BULLISH',
+          rawAlpha: 0.4 + 0.1 * Math.sin(tick),
+          confidence: 0.8,
+          uncertainty: 0.2,
+          halfLifeMs: 60_000,
+          metadata: {},
+        }),
+      };
+      const macro = createMockFactor('MACRO_REGIME', 'Macro Regime', 0.25, {
+        rawAlpha: -0.42,
+        bias: 'BEARISH',
+        confidence: 0.7,
+      });
+      const smc = createMockFactor('NATIVE_SMC', 'Native SMC', 0.25, {
+        rawAlpha: -0.35,
+        bias: 'BEARISH',
+        confidence: 0.7,
+      });
+      const funding = createMockFactor('FUNDING_ARBITRAGE', 'Funding Arbitrage', 0.25, {
+        rawAlpha: 0.2,
+        bias: 'BULLISH',
+        confidence: 0.6,
+      });
+
+      registry.registerFactor(orderFlow);
+      registry.registerFactor(macro);
+      registry.registerFactor(smc);
+      registry.registerFactor(funding);
+
+      // Evaluate across both early ticks (D < M) and mature ticks (D >= M)
+      for (let i = 0; i < 10; i++) {
+        tick = i;
+        const res = registry.evaluate(context);
+        const macroDetail = res.details.find((d) => d.factorId === 'MACRO_REGIME')!;
+        const smcDetail = res.details.find((d) => d.factorId === 'NATIVE_SMC')!;
+
+        expect(macroDetail.isCollinear).toBe(false);
+        expect(macroDetail.orthogonalAlpha).toBeCloseTo(-0.42, 6);
+        expect(macroDetail.posteriorWeight).toBeGreaterThan(0);
+
+        expect(smcDetail.isCollinear).toBe(false);
+        expect(smcDetail.orthogonalAlpha).toBeCloseTo(-0.35, 6);
+        expect(smcDetail.posteriorWeight).toBeGreaterThan(0);
+      }
+    });
+
+    it('still flags genuinely collinear time-varying factors as collinear with zero weight', () => {
+      const registry = new AlphaRegistry();
+
+      let tick = 0;
+      const f1: IAlphaFactor = {
+        ...createMockFactor('F1', 'Factor 1', 0.5),
+        computeFactor: () => ({
+          factorId: 'F1',
+          bias: 'BULLISH',
+          rawAlpha: 0.3 + 0.2 * Math.sin(tick),
+          confidence: 0.8,
+          uncertainty: 0.2,
+          halfLifeMs: 60_000,
+          metadata: {},
+        }),
+      };
+      const f2: IAlphaFactor = {
+        ...createMockFactor('F2', 'Factor 2', 0.5),
+        computeFactor: () => ({
+          factorId: 'F2',
+          bias: 'BULLISH',
+          rawAlpha: 0.6 + 0.4 * Math.sin(tick), // Exact 2x multiple of F1
+          confidence: 0.8,
+          uncertainty: 0.2,
+          halfLifeMs: 60_000,
+          metadata: {},
+        }),
+      };
+
+      registry.registerFactor(f1);
+      registry.registerFactor(f2);
+
+      let lastRes;
+      for (let i = 0; i < 6; i++) {
+        tick = i;
+        lastRes = registry.evaluate(context);
+      }
+
+      const collinearCount = lastRes!.details.filter((d) => d.isCollinear).length;
+      expect(collinearCount).toBe(1);
+      const collinearDetail = lastRes!.details.find((d) => d.isCollinear)!;
+      expect(collinearDetail.posteriorWeight).toBe(0);
+      expect(collinearDetail.orthogonalAlpha).toBe(0);
+    });
+  });
 });

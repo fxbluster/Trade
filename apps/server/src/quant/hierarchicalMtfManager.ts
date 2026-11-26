@@ -169,9 +169,9 @@ export class HierarchicalMtfManager {
     let regime: MacroRegime = 'MACRO_RANGING';
 
     if (ema200 !== null) {
-      if (mark > ema200 && latestDir === 'BULLISH' && adx >= 20.0) {
+      if (mark > ema200 && (adx >= 25.0 || (latestDir === 'BULLISH' && adx >= 20.0))) {
         regime = 'MACRO_BULLISH';
-      } else if (mark < ema200 && latestDir === 'BEARISH' && adx >= 20.0) {
+      } else if (mark < ema200 && (adx >= 25.0 || (latestDir === 'BEARISH' && adx >= 20.0))) {
         regime = 'MACRO_BEARISH';
       } else {
         regime = 'MACRO_RANGING';
@@ -235,7 +235,7 @@ export class HierarchicalMtfManager {
         score,
         bias: 'BULLISH',
         valueText: `Macro Bullish (ADX ${bias.adx.toFixed(1)})`,
-        subText: `Price > 1h EMA200 ($${bias.ema200?.toFixed(2) ?? 'N/A'}) & SuperTrend Bullish`,
+        subText: `Price > 1h EMA200 ($${bias.ema200?.toFixed(2) ?? 'N/A'})${bias.supertrendDirection === 'BULLISH' ? ' & SuperTrend Bullish' : ''}`,
         confirmed: true,
         updatedAt: bias.lastUpdate || now,
       };
@@ -249,7 +249,7 @@ export class HierarchicalMtfManager {
         score,
         bias: 'BEARISH',
         valueText: `Macro Bearish (ADX ${bias.adx.toFixed(1)})`,
-        subText: `Price < 1h EMA200 ($${bias.ema200?.toFixed(2) ?? 'N/A'}) & SuperTrend Bearish`,
+        subText: `Price < 1h EMA200 ($${bias.ema200?.toFixed(2) ?? 'N/A'})${bias.supertrendDirection === 'BEARISH' ? ' & SuperTrend Bearish' : ' (Longs Vetoed)'}`,
         confirmed: true,
         updatedAt: bias.lastUpdate || now,
       };

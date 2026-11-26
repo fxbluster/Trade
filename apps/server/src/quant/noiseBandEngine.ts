@@ -95,12 +95,16 @@ export class NoiseBandEngine {
    * Blocked if:
    * 1. Effective 15m candle range (max of current developing & previous closed 15m candle) < NoiseThreshold_h, OR
    * 2. Distance between mark price and rolling 15m VWAP < NoiseThreshold_h * 0.5.
+   *
+   * Breakout bypass: if `atr14 > 0` and `effectiveRange >= 1.5 * atr14`, a sharp directional
+   * impulse clears the NoiseBand immediately instead of lagging through the first half of a move.
    */
   public isNoise(
     candle15m: KlineCandle,
     vwap: number,
     markPrice?: number,
-    prevClosedCandle15m?: KlineCandle
+    prevClosedCandle15m?: KlineCandle,
+    atr14?: number
   ): boolean {
     const d = candle15m.time > 1e11 ? new Date(candle15m.time) : new Date(candle15m.time * 1000);
     const hour = d.getUTCHours();
@@ -108,6 +112,11 @@ export class NoiseBandEngine {
     const currentRange = candle15m.high - candle15m.low;
     const prevRange = prevClosedCandle15m ? prevClosedCandle15m.high - prevClosedCandle15m.low : 0;
     const effectiveRange = Math.max(currentRange, prevRange);
+
+    if (atr14 !== undefined && Number.isFinite(atr14) && atr14 > 0 && effectiveRange >= 1.5 * atr14) {
+      return false;
+    }
+
     const price = markPrice ?? candle15m.close;
     const vwapDist = Math.abs(price - vwap);
 
@@ -121,7 +130,8 @@ export class NoiseBandEngine {
     candle15m: KlineCandle,
     vwap: number,
     markPrice?: number,
-    prevClosedCandle15m?: KlineCandle
+    prevClosedCandle15m?: KlineCandle,
+    atr14?: number
   ): NoiseBandSnapshot {
     const d = candle15m.time > 1e11 ? new Date(candle15m.time) : new Date(candle15m.time * 1000);
     const hour = d.getUTCHours();
@@ -129,7 +139,7 @@ export class NoiseBandEngine {
     const currentRange = candle15m.high - candle15m.low;
     const prevRange = prevClosedCandle15m ? prevClosedCandle15m.high - prevClosedCandle15m.low : 0;
     const effectiveRange = Number(Math.max(currentRange, prevRange).toFixed(4));
-    const noise = this.isNoise(candle15m, vwap, markPrice, prevClosedCandle15m);
+    const noise = this.isNoise(candle15m, vwap, markPrice, prevClosedCandle15m, atr14);
     const ts = candle15m.time > 1e11 ? candle15m.time : candle15m.time * 1000;
 
     return {

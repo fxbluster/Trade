@@ -270,18 +270,45 @@ export class OrderFlowEngine {
     };
 
     const hasFlow = rollingBuyVol > 0 || rollingSellVol > 0;
-    const takerRatio =
-      rollingSellVol > 0
-        ? rollingBuyVol >= rollingSellVol
-          ? rollingBuyVol / Math.max(1, rollingSellVol)
-          : rollingSellVol / Math.max(1, rollingBuyVol)
-        : rollingBuyVol > 0
-        ? rollingBuyVol
-        : 1.0;
+    const minFlowVol = Math.min(rollingBuyVol, rollingSellVol);
+    const maxFlowVol = Math.max(rollingBuyVol, rollingSellVol);
+    const takerRatio = !hasFlow
+      ? 1.0
+      : minFlowVol > 0
+      ? maxFlowVol / minFlowVol
+      : maxFlowVol;
     const takerDominant = rollingBuyVol >= rollingSellVol ? 'Buy' : 'Sell';
     const flowTelemetry = hasFlow
       ? `Flow: ${takerRatio.toFixed(1)}x ${takerDominant} (60s) | `
       : '';
+
+    // [DEF-02 / ARCH-02] Priority 1: Aggressive 60s taker flow surge (>= 3.0x) overrides passive L2 depth
+    if (hasFlow && takerRatio >= 3.0) {
+      const imbalancePct = Math.round((takerRatio - 1) * 100);
+      const score = Math.min(100, Math.round(75 + Math.min(25, (takerRatio - 1) * 5)));
+      if (takerDominant === 'Buy') {
+        return {
+          id: pillarId,
+          title: 'Order Flow Footprint',
+          score,
+          bias: 'BULLISH',
+          valueText: `+${imbalancePct}% Buy Imbalance`,
+          subText: `${flowTelemetry}Top L2 Bids: ${formatNotional(bidNotional)} / Asks: ${formatNotional(askNotional)}`,
+          confirmed: true,
+          updatedAt: this.lastUpdate || now,
+        };
+      }
+      return {
+        id: pillarId,
+        title: 'Order Flow Footprint',
+        score,
+        bias: 'BEARISH',
+        valueText: `-${imbalancePct}% Sell Imbalance`,
+        subText: `${flowTelemetry}Top L2 Asks: ${formatNotional(askNotional)} / Bids: ${formatNotional(bidNotional)}`,
+        confirmed: true,
+        updatedAt: this.lastUpdate || now,
+      };
+    }
 
     if (buyRatio >= 3.0) {
       const imbalancePct = Math.round((buyRatio - 1) * 100);
@@ -420,6 +447,35 @@ export class OrderFlowEngine {
         bias: 'BEARISH',
         valueText: `Bearish Absorption (Z: +${zDelta.toFixed(2)})`,
         subText: `Aggressive buys absorbed by passive limits (Price Delta: ${deltaPrice60s.toFixed(2)})`,
+        confirmed: true,
+        updatedAt: this.lastUpdate || now,
+      };
+    }
+
+    // [DEF-01] Directional CVD Expansion when |Z_delta| >= 2.0 and price moves WITH the aggressive flow
+    if (zDelta <= -2.0 && deltaPrice60s < 0) {
+      const score = Math.min(100, Math.round(70 + Math.min(30, (Math.abs(zDelta) - 2.0) * 10)));
+      return {
+        id: 'CVD_ABSORPTION' as any,
+        title: 'CVD Volume Delta Absorption',
+        score,
+        bias: 'BEARISH',
+        valueText: `Bearish CVD Expansion (Z: ${zDelta.toFixed(2)})`,
+        subText: `Aggressive sells driving price lower (Price Delta: ${deltaPrice60s.toFixed(2)})`,
+        confirmed: true,
+        updatedAt: this.lastUpdate || now,
+      };
+    }
+
+    if (zDelta >= 2.0 && deltaPrice60s > 0) {
+      const score = Math.min(100, Math.round(70 + Math.min(30, (zDelta - 2.0) * 10)));
+      return {
+        id: 'CVD_ABSORPTION' as any,
+        title: 'CVD Volume Delta Absorption',
+        score,
+        bias: 'BULLISH',
+        valueText: `Bullish CVD Expansion (Z: +${zDelta.toFixed(2)})`,
+        subText: `Aggressive buys driving price higher (Price Delta: +${deltaPrice60s.toFixed(2)})`,
         confirmed: true,
         updatedAt: this.lastUpdate || now,
       };

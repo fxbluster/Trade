@@ -27,6 +27,7 @@ import {
   CrossExchangeSweepFactor,
   LiqClustersFactor,
 } from '../src/quant/factors/index.js';
+import { HierarchicalMtfManager } from '../src/quant/hierarchicalMtfManager.js';
 import type {
   FactorEvaluationContext,
   KlineCandle,
@@ -401,6 +402,151 @@ describe('Next-Gen Alpha Factors', () => {
       expect(out.rawAlpha).toBeLessThan(-0.3);
       expect(out.bias).toBe('BEARISH');
       expect(out.rawAlpha).toBeGreaterThanOrEqual(-1.0);
+    });
+
+    it('DEF-03: produces non-zero BEARISH rawAlpha when price < EMA200 and ADX >= 25 even with lagging EMA50 or empty candles', () => {
+      const factor = new MacroRegimeFactor();
+
+      const ctx: FactorEvaluationContext = {
+        symbol: 'SOLUSDT',
+        currentPrice: 149.7, // Just below EMA200
+        candles: [],
+        indicators: {
+          ema200: 150.0,
+          ema50: 151.0, // Lagging EMA50 still above EMA200
+          ema21: null,
+          ema9: null,
+          rsi14: 42,
+          atr14: 1.5,
+          macd: null,
+          bollingerBands: null,
+          adx14: { adx: 25.2, pdi: 14, mdi: 26 },
+          support: null,
+          resistance: null,
+          volumeSma20: null,
+        },
+        timestamp: Date.now(),
+      };
+
+      const out = factor.computeFactor(ctx);
+      expect(out.rawAlpha).toBeLessThan(-0.2);
+      expect(out.bias).toBe('BEARISH');
+    });
+
+    it('DEF-03: produces non-zero BULLISH rawAlpha when price > EMA200 and ADX >= 25 even with lagging EMA50', () => {
+      const factor = new MacroRegimeFactor();
+
+      const ctx: FactorEvaluationContext = {
+        symbol: 'SOLUSDT',
+        currentPrice: 150.3, // Just above EMA200
+        candles: [],
+        indicators: {
+          ema200: 150.0,
+          ema50: 149.0, // Lagging EMA50 still below EMA200
+          ema21: null,
+          ema9: null,
+          rsi14: 58,
+          atr14: 1.5,
+          macd: null,
+          bollingerBands: null,
+          adx14: { adx: 25.2, pdi: 26, mdi: 14 },
+          support: null,
+          resistance: null,
+          volumeSma20: null,
+        },
+        timestamp: Date.now(),
+      };
+
+      const out = factor.computeFactor(ctx);
+      expect(out.rawAlpha).toBeGreaterThan(0.2);
+      expect(out.bias).toBe('BULLISH');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 5b. HierarchicalMtfManager (DEF-04) Tests
+  // -------------------------------------------------------------------------
+  describe('HierarchicalMtfManager (DEF-04)', () => {
+    it('returns BEARISH (confirmed: true, score >= 65) when price < 1h EMA200 and ADX >= 25 even if SuperTrend is not bearish', () => {
+      const mgr = new HierarchicalMtfManager();
+      const now = Date.now();
+      // Build 200 1h candles in a strong downtrend followed by a sharp 3-bar bounce that
+      // keeps price < EMA200 and ADX >= 25 while potentially flipping short-term SuperTrend
+      const candles: KlineCandle[] = [];
+      let price = 200;
+      for (let i = 0; i < 197; i++) {
+        price -= 0.4;
+        candles.push({
+          time: Math.floor((now - (200 - i) * 3600_000) / 1000),
+          open: price + 0.3,
+          high: price + 0.6,
+          low: price - 0.4,
+          close: price,
+          volume: 1000,
+        });
+      }
+      for (let i = 197; i < 200; i++) {
+        price += 2.5;
+        candles.push({
+          time: Math.floor((now - (200 - i) * 3600_000) / 1000),
+          open: price - 2.0,
+          high: price + 0.5,
+          low: price - 2.2,
+          close: price,
+          volume: 1500,
+        });
+      }
+
+      mgr.setInitialCandles('SOLUSDT', '1h', candles, now);
+      const bias = mgr.getMacroBias('SOLUSDT', price, now);
+      expect(bias.ema200).not.toBeNull();
+      expect(price).toBeLessThan(bias.ema200!);
+      expect(bias.adx).toBeGreaterThanOrEqual(25);
+
+      const pillar = mgr.evaluatePillar('SOLUSDT', price, now);
+      expect(pillar.bias).toBe('BEARISH');
+      expect(pillar.confirmed).toBe(true);
+      expect(pillar.score).toBeGreaterThanOrEqual(65);
+    });
+
+    it('returns BULLISH (confirmed: true, score >= 65) symmetrically when price > 1h EMA200 and ADX >= 25', () => {
+      const mgr = new HierarchicalMtfManager();
+      const now = Date.now();
+      const candles: KlineCandle[] = [];
+      let price = 100;
+      for (let i = 0; i < 197; i++) {
+        price += 0.4;
+        candles.push({
+          time: Math.floor((now - (200 - i) * 3600_000) / 1000),
+          open: price - 0.3,
+          high: price + 0.4,
+          low: price - 0.6,
+          close: price,
+          volume: 1000,
+        });
+      }
+      for (let i = 197; i < 200; i++) {
+        price -= 2.5;
+        candles.push({
+          time: Math.floor((now - (200 - i) * 3600_000) / 1000),
+          open: price + 2.0,
+          high: price + 2.2,
+          low: price - 0.5,
+          close: price,
+          volume: 1500,
+        });
+      }
+
+      mgr.setInitialCandles('SOLUSDT', '1h', candles, now);
+      const bias = mgr.getMacroBias('SOLUSDT', price, now);
+      expect(bias.ema200).not.toBeNull();
+      expect(price).toBeGreaterThan(bias.ema200!);
+      expect(bias.adx).toBeGreaterThanOrEqual(25);
+
+      const pillar = mgr.evaluatePillar('SOLUSDT', price, now);
+      expect(pillar.bias).toBe('BULLISH');
+      expect(pillar.confirmed).toBe(true);
+      expect(pillar.score).toBeGreaterThanOrEqual(65);
     });
   });
 

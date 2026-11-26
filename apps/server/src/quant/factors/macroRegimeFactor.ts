@@ -16,7 +16,7 @@ import type {
   KlineCandle,
 } from '@tradeos/shared';
 import type { IAlphaFactor } from '../alphaRegistry.js';
-import { calculateEMA } from '../indicators.js';
+import { calculateEMA, calculateADX } from '../indicators.js';
 
 const FACTOR_ID = 'MACRO_REGIME';
 const FACTOR_NAME = 'Macro Regime';
@@ -44,7 +44,7 @@ export class MacroRegimeFactor implements IAlphaFactor {
     const candles = context.candles.length > 0 ? context.candles : this.candles;
     const currentPrice = context.currentPrice;
 
-    if (candles.length < 5) {
+    if (candles.length < 5 && !context.indicators?.ema200) {
       return neutral(context.timestamp);
     }
 
@@ -55,47 +55,65 @@ export class MacroRegimeFactor implements IAlphaFactor {
     }
 
     // 1. Trend Filter: EMA200 & EMA50
+    const longFallbackPeriod = Math.min(closePrices.length, 50);
+    const shortFallbackPeriod = Math.max(5, Math.min(20, Math.floor(longFallbackPeriod / 2)));
     const ema200 =
       context.indicators?.ema200 ??
-      calculateEMA(closePrices, EMA_LONG_PERIOD) ??
-      calculateEMA(closePrices, Math.min(closePrices.length, 50));
+      (closePrices.length > 0
+        ? (calculateEMA(closePrices, EMA_LONG_PERIOD) ??
+           calculateEMA(closePrices, longFallbackPeriod))
+        : null);
     const ema50 =
       context.indicators?.ema50 ??
-      calculateEMA(closePrices, EMA_SHORT_PERIOD) ??
-      calculateEMA(closePrices, Math.min(closePrices.length, 20));
-
-    let trendScore = 0;
-    if (ema200 && ema50) {
-      const priceVsEma200 = (currentPrice - ema200) / ema200;
-      const ema50VsEma200 = (ema50 - ema200) / ema200;
-
-      if (priceVsEma200 > 0.002 && ema50VsEma200 > 0) {
-        // Bullish macro alignment
-        trendScore = Math.min(1.0, 0.4 + priceVsEma200 * 20);
-      } else if (priceVsEma200 < -0.002 && ema50VsEma200 < 0) {
-        // Bearish macro alignment
-        trendScore = Math.max(-1.0, -0.4 + priceVsEma200 * 20);
-      } else {
-        // Ranging / conflicting EMAs
-        trendScore = Math.max(-0.3, Math.min(0.3, priceVsEma200 * 10));
-      }
-    } else {
-      // Fallback: simple price vs average close
-      const avg = closePrices.reduce((s, p) => s + p, 0) / closePrices.length;
-      trendScore = Math.max(-0.5, Math.min(0.5, (currentPrice - avg) / avg * 10));
-    }
+      (closePrices.length > 0
+        ? (calculateEMA(closePrices, EMA_SHORT_PERIOD) ??
+           calculateEMA(closePrices, shortFallbackPeriod))
+        : null);
 
     // 2. Yang-Zhang Volatility Estimator
     const yzVol = computeYangZhangVolatility(candles.slice(-MIN_CANDLES_FOR_YZ * 3));
 
-    // 3. ADX Modulation (if indicators provided)
+    // 3. ADX Modulation (if indicators provided or computable from candles)
     let adxMultiplier = 1.0;
-    const adx = context.indicators?.adx14?.adx;
+    const adx =
+      context.indicators?.adx14?.adx ??
+      (candles.length >= 28 ? calculateADX(candles, 14)?.adx : undefined);
     if (adx !== undefined && adx !== null) {
       if (adx >= 25) {
         adxMultiplier = 1.2; // Strong trending market expands signal
       } else if (adx < 18) {
         adxMultiplier = 0.7; // Chop / weak trend contracts signal
+      }
+    }
+
+    let trendScore = 0;
+    if (ema200 && ema200 > 0 && currentPrice > 0) {
+      const priceVsEma200 = (currentPrice - ema200) / ema200;
+      const ema50VsEma200 = ema50 && ema50 > 0 ? (ema50 - ema200) / ema200 : 0;
+      const hasDistinctEma50 = ema50 !== null && ema50 !== undefined && ema50 !== ema200;
+
+      if (priceVsEma200 > 0.002 && (!hasDistinctEma50 || ema50VsEma200 > 0)) {
+        // Bullish macro alignment
+        trendScore = Math.min(1.0, 0.4 + priceVsEma200 * 20);
+      } else if (priceVsEma200 < -0.002 && (!hasDistinctEma50 || ema50VsEma200 < 0)) {
+        // Bearish macro alignment
+        trendScore = Math.max(-1.0, -0.4 + priceVsEma200 * 20);
+      } else if (adx !== undefined && adx !== null && adx >= 25) {
+        // Strong trend (ADX >= 25) with clear price side relative to EMA200
+        if (currentPrice < ema200) {
+          trendScore = Math.max(-1.0, Math.min(-0.25, -0.25 + priceVsEma200 * 15));
+        } else if (currentPrice > ema200) {
+          trendScore = Math.min(1.0, Math.max(0.25, 0.25 + priceVsEma200 * 15));
+        }
+      } else {
+        // Ranging / conflicting EMAs
+        trendScore = Math.max(-0.3, Math.min(0.3, priceVsEma200 * 10));
+      }
+    } else if (currentPrice > 0 && closePrices.length > 0) {
+      // Fallback: simple price vs average close
+      const avg = closePrices.reduce((s, p) => s + p, 0) / closePrices.length;
+      if (avg > 0) {
+        trendScore = Math.max(-0.5, Math.min(0.5, ((currentPrice - avg) / avg) * 10));
       }
     }
 

@@ -7,11 +7,15 @@
 
 import type { KlineCandle, NoiseBandSnapshot } from '@tradeos/shared';
 
+export const DEFAULT_NOISE_BAND_MULTIPLIER = 0.5;
+
 export class NoiseBandEngine {
   private hourlyMtr: Map<number, number> = new Map();
   private defaultThreshold: number = 0;
+  private readonly multiplier: number;
 
-  constructor(candles?: KlineCandle[]) {
+  constructor(candles?: KlineCandle[], multiplier: number = DEFAULT_NOISE_BAND_MULTIPLIER) {
+    this.multiplier = multiplier;
     if (candles && candles.length > 0) {
       this.loadKlines(candles);
     }
@@ -48,7 +52,7 @@ export class NoiseBandEngine {
     }
 
     const overallMeanTr = allTrCount > 0 ? allTrSum / allTrCount : 0;
-    this.defaultThreshold = overallMeanTr * 1.25;
+    this.defaultThreshold = overallMeanTr * this.multiplier;
 
     for (let h = 0; h < 24; h++) {
       const trs = hourlyTrs.get(h) ?? [];
@@ -63,13 +67,25 @@ export class NoiseBandEngine {
   }
 
   /**
+   * Returns the 20-day Mean True Range (MTR) for the given UTC hour (0..23).
+   */
+  public getMeanTrueRange(hourOfDay: number): number {
+    const mtr = this.hourlyMtr.get(hourOfDay);
+    if (mtr !== undefined && mtr > 0) {
+      return Number(mtr.toFixed(4));
+    }
+    const fallback = this.multiplier > 0 ? this.defaultThreshold / this.multiplier : 0;
+    return Number(fallback.toFixed(4));
+  }
+
+  /**
    * Returns the dynamic noise threshold for the given UTC hour (0..23).
-   * NoiseThreshold_h = MTR_h * 1.25
+   * NoiseThreshold_h = MTR_h * multiplier
    */
   public getThreshold(hourOfDay: number): number {
     const mtr = this.hourlyMtr.get(hourOfDay);
     if (mtr !== undefined && mtr > 0) {
-      return Number((mtr * 1.25).toFixed(4));
+      return Number((mtr * this.multiplier).toFixed(4));
     }
     return Number(this.defaultThreshold.toFixed(4));
   }
@@ -77,35 +93,49 @@ export class NoiseBandEngine {
   /**
    * Evaluates whether a setup is inside the market noise band.
    * Blocked if:
-   * 1. Current 15m candle range < NoiseThreshold_h, OR
+   * 1. Effective 15m candle range (max of current developing & previous closed 15m candle) < NoiseThreshold_h, OR
    * 2. Distance between mark price and rolling 15m VWAP < NoiseThreshold_h * 0.5.
    */
-  public isNoise(candle15m: KlineCandle, vwap: number, markPrice?: number): boolean {
+  public isNoise(
+    candle15m: KlineCandle,
+    vwap: number,
+    markPrice?: number,
+    prevClosedCandle15m?: KlineCandle
+  ): boolean {
     const d = candle15m.time > 1e11 ? new Date(candle15m.time) : new Date(candle15m.time * 1000);
     const hour = d.getUTCHours();
     const threshold = this.getThreshold(hour);
     const currentRange = candle15m.high - candle15m.low;
+    const prevRange = prevClosedCandle15m ? prevClosedCandle15m.high - prevClosedCandle15m.low : 0;
+    const effectiveRange = Math.max(currentRange, prevRange);
     const price = markPrice ?? candle15m.close;
     const vwapDist = Math.abs(price - vwap);
 
-    return currentRange < threshold || vwapDist < threshold * 0.5;
+    return effectiveRange < threshold || vwapDist < threshold * 0.5;
   }
 
   /**
    * Generates a telemetry snapshot of the current noise band metrics.
    */
-  public getSnapshot(candle15m: KlineCandle, vwap: number, markPrice?: number): NoiseBandSnapshot {
+  public getSnapshot(
+    candle15m: KlineCandle,
+    vwap: number,
+    markPrice?: number,
+    prevClosedCandle15m?: KlineCandle
+  ): NoiseBandSnapshot {
     const d = candle15m.time > 1e11 ? new Date(candle15m.time) : new Date(candle15m.time * 1000);
     const hour = d.getUTCHours();
     const threshold = this.getThreshold(hour);
-    const currentRange = Number((candle15m.high - candle15m.low).toFixed(4));
-    const noise = this.isNoise(candle15m, vwap, markPrice);
+    const currentRange = candle15m.high - candle15m.low;
+    const prevRange = prevClosedCandle15m ? prevClosedCandle15m.high - prevClosedCandle15m.low : 0;
+    const effectiveRange = Number(Math.max(currentRange, prevRange).toFixed(4));
+    const noise = this.isNoise(candle15m, vwap, markPrice, prevClosedCandle15m);
     const ts = candle15m.time > 1e11 ? candle15m.time : candle15m.time * 1000;
 
     return {
       hourOfDay: hour,
       noiseThreshold: threshold,
-      currentRange,
+      currentRange: effectiveRange,
       isNoise: noise,
       timestamp: ts,
     };

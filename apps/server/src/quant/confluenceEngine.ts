@@ -37,6 +37,7 @@ export interface ConfluenceMarketData {
   recentHigh?: number;
   recentLow?: number;
   candle15m?: KlineCandle;
+  prevCandle15m?: KlineCandle;
   candles?: KlineCandle[];
   vwap?: number;
   timestamp?: number;
@@ -238,7 +239,8 @@ export class ConfluenceEngine {
       currentPrice,
       data.candle15m,
       data.vwap,
-      now
+      now,
+      data.prevCandle15m
     );
 
     const blockReason: BlockReason | null = gateCheck.blocked ? (gateCheck.reason ?? null) : null;
@@ -249,8 +251,13 @@ export class ConfluenceEngine {
       data.candle15m && data.vwap !== undefined
         ? {
             active: noiseBandActive,
-            currentTrueRange15m: Number((data.candle15m.high - data.candle15m.low).toFixed(4)),
-            meanTrueRange20d: this.noiseBandEngine.getThreshold(new Date(now).getUTCHours()) / 1.25,
+            currentTrueRange15m: Number(
+              Math.max(
+                data.candle15m.high - data.candle15m.low,
+                data.prevCandle15m ? data.prevCandle15m.high - data.prevCandle15m.low : 0
+              ).toFixed(4)
+            ),
+            meanTrueRange20d: this.noiseBandEngine.getMeanTrueRange(new Date(now).getUTCHours()),
             noiseThreshold: this.noiseBandEngine.getThreshold(new Date(now).getUTCHours()),
             isNoise: noiseBandActive,
             currentPrice,
@@ -422,7 +429,8 @@ export class ConfluenceEngine {
     currentPrice: number,
     candle15m?: KlineCandle,
     vwap?: number,
-    timestamp?: number
+    timestamp?: number,
+    prevCandle15m?: KlineCandle
   ): { blocked: boolean; reason?: BlockReason; details?: string } {
     const now = timestamp ?? Date.now();
 
@@ -438,7 +446,7 @@ export class ConfluenceEngine {
 
     // 2. Volatility Noise Band Filter Gate
     if (candle15m && vwap !== undefined) {
-      const isNoise = this.noiseBandEngine.isNoise(candle15m, vwap, currentPrice);
+      const isNoise = this.noiseBandEngine.isNoise(candle15m, vwap, currentPrice, prevCandle15m);
       if (isNoise) {
         return {
           blocked: true,

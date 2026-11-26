@@ -551,6 +551,7 @@ export async function bootstrapServer(): Promise<{
 
     const candles15m = mtfManager.getCandles(event.symbol, '15m');
     const candle15m = candles15m.length > 0 ? candles15m[candles15m.length - 1] : undefined;
+    const prevCandle15m = candles15m.length > 1 ? candles15m[candles15m.length - 2] : undefined;
     const rollingVwap15m = candles15m.length > 0
       ? noiseBandEngine.calculateVWAP(candles15m)
       : event.markPrice;
@@ -563,6 +564,7 @@ export async function bootstrapServer(): Promise<{
       recentHigh,
       recentLow,
       candle15m,
+      prevCandle15m,
       vwap: rollingVwap15m,
     });
     createdWsHub.broadcastConfluence(confluenceSnapshot);

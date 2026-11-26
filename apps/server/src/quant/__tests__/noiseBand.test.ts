@@ -26,30 +26,31 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
     return candles;
   }
 
-  it('calculates hourly Mean True Range (MTR) and sets threshold to MTR * 1.25', () => {
+  it('calculates hourly Mean True Range (MTR) and sets threshold to MTR * 0.5', () => {
     // Generate 1,920 candles (20 days * 96 candles/day) with constant range = 2.0
     const candles = generateMockCandles(1920, 100, 2.0);
     const engine = new NoiseBandEngine(candles);
 
     // Each candle has TR = high - low = 2.0
-    // Expected threshold = 2.0 * 1.25 = 2.50
+    // Expected threshold = 2.0 * 0.5 = 1.00
     for (let h = 0; h < 24; h++) {
       const threshold = engine.getThreshold(h);
-      expect(threshold).toBeCloseTo(2.5, 2);
+      expect(threshold).toBeCloseTo(1.0, 2);
+      expect(engine.getMeanTrueRange(h)).toBeCloseTo(2.0, 2);
     }
   });
 
   it('detects noise when current 15m candle range is below the dynamic threshold', () => {
-    const candles = generateMockCandles(96, 100, 2.0); // MTR = 2.0 -> threshold = 2.50
+    const candles = generateMockCandles(96, 100, 2.0); // MTR = 2.0 -> threshold = 1.00
     const engine = new NoiseBandEngine(candles);
 
-    // Sub-threshold candle: range = 1.2 (< 2.50)
+    // Sub-threshold candle: range = 0.4 (< 1.00)
     const tightCandle: KlineCandle = {
       time: 1795132800, // UTC 00:00
       open: 100,
-      high: 100.6,
-      low: 99.4,
-      close: 100.2,
+      high: 100.2,
+      low: 99.8,
+      close: 100.1,
       volume: 500,
     };
 
@@ -57,16 +58,52 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
     expect(isNoise).toBe(true);
   });
 
-  it('detects noise when price is too close to rolling 15m VWAP (distance < threshold * 0.5)', () => {
-    const candles = generateMockCandles(96, 100, 2.0); // threshold = 2.50 -> 0.5 * threshold = 1.25
+  it('uses previous closed 15m candle range for continuity when a new 15m candle just opened', () => {
+    const candles = generateMockCandles(96, 100, 2.0); // threshold = 1.00
     const engine = new NoiseBandEngine(candles);
 
-    // Wide candle: range = 3.0 (> 2.50), but mark price is right at VWAP (distance = 0.2 < 1.25)
+    // Newly opened tight candle (range = 0.1)
+    const freshCandle: KlineCandle = {
+      time: 1795132800,
+      open: 100,
+      high: 100.05,
+      low: 99.95,
+      close: 100.02,
+      volume: 100,
+    };
+    // Previous closed 15m candle had healthy range = 1.5 (>= 1.00)
+    const activePrevCandle: KlineCandle = {
+      time: 1795131900,
+      open: 99,
+      high: 100.5,
+      low: 99.0,
+      close: 100.0,
+      volume: 2000,
+    };
+    // Quiet previous closed 15m candle (range = 0.3 < 1.00)
+    const quietPrevCandle: KlineCandle = {
+      time: 1795131900,
+      open: 100,
+      high: 100.15,
+      low: 99.85,
+      close: 100.0,
+      volume: 200,
+    };
+
+    expect(engine.isNoise(freshCandle, 95.0, 100.02, activePrevCandle)).toBe(false);
+    expect(engine.isNoise(freshCandle, 95.0, 100.02, quietPrevCandle)).toBe(true);
+  });
+
+  it('detects noise when price is too close to rolling 15m VWAP (distance < threshold * 0.5)', () => {
+    const candles = generateMockCandles(96, 100, 2.0); // threshold = 1.00 -> 0.5 * threshold = 0.50
+    const engine = new NoiseBandEngine(candles);
+
+    // Wide candle: range = 1.6 (> 1.00), but mark price is right at VWAP (distance = 0.2 < 0.50)
     const wideCandleAtVwap: KlineCandle = {
       time: 1795132800,
       open: 100,
-      high: 101.5,
-      low: 98.5,
+      high: 100.8,
+      low: 99.2,
       close: 100.1,
       volume: 500,
     };
@@ -76,20 +113,20 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
   });
 
   it('passes noise check when range exceeds threshold and price expands away from VWAP', () => {
-    const candles = generateMockCandles(96, 100, 2.0); // threshold = 2.50, 0.5*thresh = 1.25
+    const candles = generateMockCandles(96, 100, 2.0); // threshold = 1.00, 0.5*thresh = 0.50
     const engine = new NoiseBandEngine(candles);
 
-    // Strong impulse candle: range = 4.0 (> 2.50), price is at 103.5 with VWAP at 100.0 (distance = 3.5 > 1.25)
+    // Strong impulse candle: range = 2.0 (> 1.00), price is at 101.5 with VWAP at 100.0 (distance = 1.5 > 0.50)
     const impulseCandle: KlineCandle = {
       time: 1795132800,
       open: 100,
-      high: 104.0,
+      high: 102.0,
       low: 100.0,
-      close: 103.5,
+      close: 101.5,
       volume: 5000,
     };
 
-    const isNoise = engine.isNoise(impulseCandle, 100.0, 103.5);
+    const isNoise = engine.isNoise(impulseCandle, 100.0, 101.5);
     expect(isNoise).toBe(false);
   });
 
@@ -108,7 +145,7 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
 
     const snapshot = engine.getSnapshot(candle, 100.0);
     expect(snapshot.hourOfDay).toBe(0);
-    expect(snapshot.noiseThreshold).toBeCloseTo(2.5, 2);
+    expect(snapshot.noiseThreshold).toBeCloseTo(1.0, 2);
     expect(snapshot.currentRange).toBe(4.0);
     expect(snapshot.isNoise).toBe(false);
     expect(snapshot.timestamp).toBe(1795132800 * 1000);
@@ -126,23 +163,23 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
   });
 
   it('blocks consensus in ConfluenceEngine with BLOCKED_NOISE_BAND when 15m candle is inside noise band', () => {
-    const candles = generateMockCandles(96, 100, 2.0); // threshold = 2.50
+    const candles = generateMockCandles(96, 100, 2.0); // threshold = 1.00
     const engine = new NoiseBandEngine(candles);
     const confluence = new ConfluenceEngine({ noiseBandEngine: engine });
 
-    // Sub-threshold candle: range = 1.0 (< 2.50)
+    // Sub-threshold candle: range = 0.4 (< 1.00)
     const tightCandle: KlineCandle = {
       time: 1795132800,
       open: 100,
-      high: 100.5,
-      low: 99.5,
-      close: 100.2,
+      high: 100.2,
+      low: 99.8,
+      close: 100.1,
       volume: 500,
     };
 
     const snap = confluence.evaluate({
       symbol: 'SOLUSDT',
-      currentPrice: 100.2,
+      currentPrice: 100.1,
       indicators: null,
       cvd: null,
       candle15m: tightCandle,

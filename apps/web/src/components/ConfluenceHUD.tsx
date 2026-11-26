@@ -154,7 +154,7 @@ export const ConfluenceHUD: React.FC = () => {
           </div>
           {confluence.noiseBand && (
             <span className="text-[10px] text-[#7d8590] tabular-nums font-normal">
-              TR: ${confluence.noiseBand.currentTrueRange15m.toFixed(2)} / Threshold: ${confluence.noiseBand.noiseThreshold.toFixed(2)} (VWAP Dist: ${(confluence.noiseBand.vwapDistancePct * 100).toFixed(2)}%)
+              TR: ${confluence.noiseBand.currentTrueRange15m.toFixed(2)} / Threshold: ${confluence.noiseBand.noiseThreshold.toFixed(2)} (VWAP Dist: {(confluence.noiseBand.vwapDistancePct * 100).toFixed(2)}%)
             </span>
           )}
         </div>

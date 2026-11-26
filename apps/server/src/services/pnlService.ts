@@ -108,15 +108,18 @@ export class PnlService {
       };
     } catch {}
 
-    // 2. Fetch active position details
-    const activePos = this.tradesRepo.getActivePosition(broker.mode, sym);
+    // 2. Fetch active position details (fall back to any open symbol so cross-symbol trades still appear)
+    const activePos =
+      this.tradesRepo.getActivePosition(broker.mode, sym) ??
+      this.tradesRepo.getActivePosition(broker.mode);
     let live: LivePositionStats = {
       hasPosition: false,
     };
 
     let liveUnrealizedPnl = 0;
     if (activePos && activePos.status !== 'CLOSED' && activePos.remaining_qty > 0) {
-      const markPrice = this.getMarkPrice(sym) || activePos.entry_price;
+      const posSym = activePos.symbol.toUpperCase();
+      const markPrice = this.getMarkPrice(posSym) || activePos.entry_price;
       const isLong = activePos.side === 'BUY';
       const priceDiff = isLong ? markPrice - activePos.entry_price : activePos.entry_price - markPrice;
       liveUnrealizedPnl = Number((priceDiff * activePos.remaining_qty).toFixed(2));
@@ -146,10 +149,20 @@ export class PnlService {
       };
     }
 
-    // 3. Time horizons
-    const oneDayAgo = now - 24 * 3600 * 1000;
-    const threeDaysAgo = now - 3 * 24 * 3600 * 1000;
-    const sevenDaysAgo = now - 7 * 24 * 3600 * 1000;
+    // 3. Time horizons (clamped to session_started_at so pre-$5000 reset history is excluded)
+    let sessionEpochMs = 0;
+    try {
+      const riskRow = this.db
+        .prepare('SELECT session_started_at FROM risk_state WHERE broker_mode = ?')
+        .get(broker.mode) as { session_started_at?: number } | undefined;
+      if (riskRow && typeof riskRow.session_started_at === 'number' && riskRow.session_started_at > 0) {
+        sessionEpochMs = riskRow.session_started_at;
+      }
+    } catch {}
+
+    const oneDayAgo = Math.max(now - 24 * 3600 * 1000, sessionEpochMs);
+    const threeDaysAgo = Math.max(now - 3 * 24 * 3600 * 1000, sessionEpochMs);
+    const sevenDaysAgo = Math.max(now - 7 * 24 * 3600 * 1000, sessionEpochMs);
 
     // 4. Fetch income from exchange (with DB fallback)
     const incomeRecords = await this.getBinanceIncome();

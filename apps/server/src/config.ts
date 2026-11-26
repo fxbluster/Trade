@@ -14,7 +14,8 @@ try {
 }
 
 export const PORT: number = Number(process.env.PORT) || 3400;
-export const HOST: string = '127.0.0.1';
+export const HOST: string = process.env.HOST || '127.0.0.1';
+export const DB_PATH: string = process.env.DB_PATH || path.resolve(process.cwd(), 'data/tradeos.db');
 
 export const BINANCE_DEMO_API_KEY: string = process.env.BINANCE_DEMO_API_KEY || '';
 export const BINANCE_DEMO_API_SECRET: string = process.env.BINANCE_DEMO_API_SECRET || '';
@@ -35,7 +36,10 @@ export function getOperatorAccessPin(): string {
 // 256-bit cryptographic session token persisted across daemon auto-restarts
 function getOrGenerateSessionToken(): string {
   if (process.env.TEST_SESSION_TOKEN) return process.env.TEST_SESSION_TOKEN;
-  const tokenFile = path.resolve('data/session_token.secret');
+  const tokenFile =
+    DB_PATH && DB_PATH !== ':memory:'
+      ? path.join(path.dirname(path.resolve(DB_PATH)), 'session_token.secret')
+      : path.resolve('data/session_token.secret');
   try {
     if (fs.existsSync(tokenFile)) {
       const stored = fs.readFileSync(tokenFile, 'utf-8').trim();
@@ -65,8 +69,6 @@ export const ALLOWED_ORIGINS = new Set<string>([
   'http://localhost:5173',
   'http://127.0.0.1:5173'
 ]);
-
-export const DB_PATH: string = process.env.DB_PATH || path.resolve(process.cwd(), 'data/tradeos.db');
 
 /**
  * Sanitizes sensitive credentials and tokens from logging objects.

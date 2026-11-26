@@ -80,6 +80,9 @@ describe('Auth & Tunnel Hardening', () => {
   const origPublicDomain = process.env.PUBLIC_DOMAIN;
   const origOperatorPin = process.env.OPERATOR_ACCESS_PIN;
   const origWebhookSecret = process.env.WEBHOOK_SECRET;
+  const origRailwayPublicDomain = process.env.RAILWAY_PUBLIC_DOMAIN;
+  const origRailwayEnvironment = process.env.RAILWAY_ENVIRONMENT;
+  const origRailwayProjectId = process.env.RAILWAY_PROJECT_ID;
 
   let db: DatabaseSync;
   let app: ReturnType<typeof polka>;
@@ -88,6 +91,9 @@ describe('Auth & Tunnel Hardening', () => {
     delete process.env.PUBLIC_DOMAIN;
     delete process.env.OPERATOR_ACCESS_PIN;
     delete process.env.WEBHOOK_SECRET;
+    delete process.env.RAILWAY_PUBLIC_DOMAIN;
+    delete process.env.RAILWAY_ENVIRONMENT;
+    delete process.env.RAILWAY_PROJECT_ID;
 
     db = initializeDatabase(':memory:');
     const broker = createMockBroker();
@@ -115,6 +121,15 @@ describe('Auth & Tunnel Hardening', () => {
 
     if (origWebhookSecret === undefined) delete process.env.WEBHOOK_SECRET;
     else process.env.WEBHOOK_SECRET = origWebhookSecret;
+
+    if (origRailwayPublicDomain === undefined) delete process.env.RAILWAY_PUBLIC_DOMAIN;
+    else process.env.RAILWAY_PUBLIC_DOMAIN = origRailwayPublicDomain;
+
+    if (origRailwayEnvironment === undefined) delete process.env.RAILWAY_ENVIRONMENT;
+    else process.env.RAILWAY_ENVIRONMENT = origRailwayEnvironment;
+
+    if (origRailwayProjectId === undefined) delete process.env.RAILWAY_PROJECT_ID;
+    else process.env.RAILWAY_PROJECT_ID = origRailwayProjectId;
   });
 
   async function invoke(
@@ -240,6 +255,58 @@ describe('Auth & Tunnel Hardening', () => {
       expect(allowed.next).toHaveBeenCalled();
       expect(allowed.res.statusCode).toBe(200);
       expect(allowed.res._headers['access-control-allow-headers']).toContain('X-Operator-Pin');
+    });
+
+    it('accepts RAILWAY_PUBLIC_DOMAIN fallback for Host and Origin checks', () => {
+      process.env.RAILWAY_PUBLIC_DOMAIN = 'tradeos-prod.up.railway.app';
+
+      const hostCheck = createMiddlewareReqRes({
+        url: '/api/state',
+        headers: { host: 'tradeos-prod.up.railway.app' },
+      });
+      validateHost(hostCheck.req, hostCheck.res, hostCheck.next);
+      expect(hostCheck.next).toHaveBeenCalled();
+
+      const originCheck = createMiddlewareReqRes({
+        method: 'POST',
+        url: '/api/orders',
+        headers: {
+          host: 'tradeos-prod.up.railway.app',
+          origin: 'https://tradeos-prod.up.railway.app',
+        },
+      });
+      validateOrigin(originCheck.req, originCheck.res, originCheck.next);
+      expect(originCheck.next).toHaveBeenCalled();
+      expect(originCheck.res.statusCode).toBe(200);
+    });
+
+    it('permits healthcheck.railway.app only on /api/health inside a Railway runtime', () => {
+      // Without Railway env vars, healthcheck.railway.app must be rejected
+      const outsideRailway = createMiddlewareReqRes({
+        url: '/api/health',
+        headers: { host: 'healthcheck.railway.app' },
+      });
+      validateHost(outsideRailway.req, outsideRailway.res, outsideRailway.next);
+      expect(outsideRailway.res.statusCode).toBe(403);
+      expect(outsideRailway.next).not.toHaveBeenCalled();
+
+      // Inside Railway runtime, /api/health passes while other endpoints remain blocked
+      process.env.RAILWAY_ENVIRONMENT = 'production';
+      const healthAllowed = createMiddlewareReqRes({
+        url: '/api/health',
+        headers: { host: 'healthcheck.railway.app' },
+      });
+      validateHost(healthAllowed.req, healthAllowed.res, healthAllowed.next);
+      expect(healthAllowed.next).toHaveBeenCalled();
+      expect(healthAllowed.res.statusCode).toBe(200);
+
+      const stateBlocked = createMiddlewareReqRes({
+        url: '/api/state',
+        headers: { host: 'healthcheck.railway.app' },
+      });
+      validateHost(stateBlocked.req, stateBlocked.res, stateBlocked.next);
+      expect(stateBlocked.res.statusCode).toBe(403);
+      expect(stateBlocked.next).not.toHaveBeenCalled();
     });
   });
 

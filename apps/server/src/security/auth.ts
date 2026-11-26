@@ -9,7 +9,7 @@ import {
 export const MAX_BODY_BYTES = 256 * 1024; // 256 KB limit
 
 function getNormalizedPublicDomainHostname(): string | null {
-  const raw = (process.env.PUBLIC_DOMAIN || '').trim().toLowerCase();
+  const raw = (process.env.PUBLIC_DOMAIN || process.env.RAILWAY_PUBLIC_DOMAIN || '').trim().toLowerCase();
   if (!raw) return null;
   try {
     if (raw.includes('://')) {
@@ -24,7 +24,8 @@ function getNormalizedPublicDomainHostname(): string | null {
 /**
  * Validates Host header against DNS rebinding attacks.
  * Strictly permits only 127.0.0.1 and localhost on the configured port,
- * or exact normalized hostname match against PUBLIC_DOMAIN.
+ * exact normalized hostname match against PUBLIC_DOMAIN / RAILWAY_PUBLIC_DOMAIN,
+ * or Railway's internal healthcheck probe strictly on /api/health.
  */
 export const validateHost: Middleware = (req: Request, res: Response, next: NextHandler) => {
   const rawHost = req.headers['host'];
@@ -39,10 +40,16 @@ export const validateHost: Middleware = (req: Request, res: Response, next: Next
   const host = rawHost.replace(/\.$/, '').toLowerCase();
   const hostWithoutPort = host.split(':')[0];
   const publicHostname = getNormalizedPublicDomainHostname();
+  const pathname = (req.url || '').split('?')[0];
+  const isRailwayHealthProbe =
+    Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PROJECT_ID) &&
+    hostWithoutPort === 'healthcheck.railway.app' &&
+    pathname === '/api/health';
 
   const isAllowed =
     ALLOWED_HOSTS.has(host) ||
-    (publicHostname !== null && hostWithoutPort === publicHostname);
+    (publicHostname !== null && hostWithoutPort === publicHostname) ||
+    isRailwayHealthProbe;
 
   if (!isAllowed) {
     res.statusCode = 403;

@@ -248,6 +248,21 @@ export class PropFirmRiskGuard {
     };
   }
 
+  /**
+   * When running on a sub-$25K Binance Demo wallet (e.g. $5,000), scale PnL & risk
+   * by 10x so $5K wallet trades behave identically to a $50K PropFirm simulation.
+   */
+  public getSimulationScale(liveWalletBalanceUsd?: number): number {
+    const wallet =
+      typeof liveWalletBalanceUsd === 'number' && Number.isFinite(liveWalletBalanceUsd)
+        ? liveWalletBalanceUsd
+        : this.lastLiveWalletBalanceUsd;
+    if (wallet > 0 && wallet < 25_000) {
+      return 10;
+    }
+    return 1;
+  }
+
   public clampEntryQuantity(params: ClampEntryQuantityParams): ClampEntryQuantityResult {
     const maxRiskQty = calculateUpcomersMaxQty(
       params.entryPrice,
@@ -289,6 +304,10 @@ export class PropFirmRiskGuard {
       this.lastLiveWalletBalanceUsd = params.liveWalletBalanceUsd;
     }
 
+    const scale = this.getSimulationScale(safeWallet);
+    const scaledRealized = round2(safeRealized * scale);
+    const scaledUnrealized = round2(safeUnrealized * scale);
+
     const cycle = this.getOrInitCycle(nowMs);
     this.realizedCyclePnlByCycleId.set(cycle.id, safeRealized);
 
@@ -306,18 +325,18 @@ export class PropFirmRiskGuard {
     // 1. Perform automatic 00:00 UTC rollover BEFORE evaluating current tick's PnL
     const snapshot = this.ensureDailyRollover(cycle, nowMs);
 
-    // 2. Compute challenge equity (always anchored to $50k + realized + unrealized cycle PnL)
+    // 2. Compute challenge equity (always anchored to $50k + scaled realized + scaled unrealized cycle PnL)
     const currentEquityUsd = this.computeChallengeEquityUsd(
       cycle,
-      safeRealized,
-      safeUnrealized
+      scaledRealized,
+      scaledUnrealized
     );
-    const positionOpen = params.hasOpenPosition ?? Math.abs(safeUnrealized) > 0;
+    const positionOpen = params.hasOpenPosition ?? Math.abs(scaledUnrealized) > 0;
     const safeCloseFee =
       positionOpen &&
       typeof params.estimatedCloseFeeUsd === 'number' &&
       Number.isFinite(params.estimatedCloseFeeUsd)
-        ? Math.max(0, params.estimatedCloseFeeUsd)
+        ? Math.max(0, params.estimatedCloseFeeUsd * scale)
         : 0;
 
     // 3. Monotonic High-Water Mark & Trailing Floors ($53k -> $50k permanent lock)

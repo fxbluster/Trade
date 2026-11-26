@@ -350,7 +350,7 @@ export const AutoPilotControls: React.FC = () => {
             <span>Margin Cap (Auto-Pilot):</span>
           </span>
           <div className="flex items-center space-x-1">
-            {[2.5, 5.0, 10.0].map((pct) => (
+            {[2.5, 5.0, 10.0, 15.0, 20.0].map((pct) => (
               <button
                 key={pct}
                 onClick={() => handleUpdateConfig({ marginAllocationPct: pct })}

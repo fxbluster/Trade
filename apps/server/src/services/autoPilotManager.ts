@@ -309,8 +309,8 @@ export class AutoPilotManager {
       );
     }
     if (partial.marginAllocationPct !== undefined) {
-      // Auto-Pilot is strictly clamped to max 10.0% margin
-      this.config.marginAllocationPct = Math.min(10.0, Math.max(1.0, partial.marginAllocationPct));
+      // Allow testing 1% to 20% margin allocation on the real wallet
+      this.config.marginAllocationPct = Math.min(20.0, Math.max(1.0, partial.marginAllocationPct));
     }
     if (partial.leverage !== undefined) {
       this.config.leverage = Math.max(1, Math.min(10, partial.leverage));
@@ -884,10 +884,9 @@ export class AutoPilotManager {
 
       const isPropFirmDemoActive =
         Boolean(this.propFirmRiskGuard) && this.broker.mode === 'BINANCE_DEMO';
-      const sizingBasisUsd =
-        isPropFirmDemoActive && this.propFirmRiskGuard
-          ? Math.max(balance, this.propFirmRiskGuard.getConfig().accountSizeUsd)
-          : balance;
+      // Always size orders against the real wallet balance (e.g. 10% of $5,000 = $500 margin);
+      // PropFirmRiskGuard scales the resulting PnL 10x into the $50K simulation.
+      const sizingBasisUsd = balance;
 
       const snapshot = this.getConfluenceForSymbol(symbol).getSnapshot(symbol);
       const score = snapshot?.compositeScore ?? 75;
@@ -897,7 +896,7 @@ export class AutoPilotManager {
           confluenceScore: score,
           walletBalance: balance,
           availableBalance: account.availableBalance,
-          sizingBasisBalance: isPropFirmDemoActive ? sizingBasisUsd : undefined,
+          sizingBasisBalance: undefined,
           leverage,
           atr14: atr,
           consecutiveLosses: this.consecutiveLosses,
@@ -940,8 +939,8 @@ export class AutoPilotManager {
         marginUsd = sizing.marginUsd;
         marginAllocationPct = Number((sizing.finalMarginPct * 100).toFixed(2));
       } else {
-        // Strictly enforce 10% maximum margin allocation (anchored to $50K PropFirm benchmark in BINANCE_DEMO while respecting 20% real wallet reserve)
-        const maxMarginPct = Math.min(10.0, this.config.marginAllocationPct);
+        // Size against real wallet balance (1%..20%) while respecting 20% real wallet reserve
+        const maxMarginPct = Math.min(20.0, this.config.marginAllocationPct);
         const targetMarginUsd = Number(((sizingBasisUsd * maxMarginPct) / 100).toFixed(2));
         const realWalletSpendable = isPropFirmDemoActive
           ? Math.max(0, Number((account.availableBalance - balance * 0.20).toFixed(2)))

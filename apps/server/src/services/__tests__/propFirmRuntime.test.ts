@@ -436,12 +436,12 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
 
     guard.recordTradeClosed({
       tradeId: 'c1_loss',
-      realizedNetPnlUsd: -150,
+      realizedNetPnlUsd: -15,
       liveWalletBalanceUsd: wallet,
     });
     guard.recordTradeClosed({
       tradeId: 'c1_win',
-      realizedNetPnlUsd: 2_650,
+      realizedNetPnlUsd: 265,
       liveWalletBalanceUsd: wallet,
     });
     expect(guard.getStatus(wallet).cycle.status).toBe('PASSED');
@@ -622,7 +622,7 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
     expect(afterDup.cycle.realizedPnlUsd).toBe(290);
   });
 
-  it('autoPilot_sizesFrom50kPropFirmBenchmarkOn5kTestnetWalletWithinRealReserve', async () => {
+  it('autoPilot_sizesFrom5kWalletAndScalesPropFirmRisk10x', async () => {
     const wallet5k = 5_000;
     mockBroker.account.walletBalance = wallet5k;
     mockBroker.account.equity = wallet5k;
@@ -630,15 +630,13 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
 
     setBuySnapshot(confluenceEngine);
     markPrice = 100;
-    // With getAtr() = 2.0 -> 1.5*ATR = 3.0 stop distance:
-    // Legacy 10% of $5,000 capped margin at $500 (50 qty). With $50,000 benchmark (10% = $5,000 capped to $4,000 reserve),
-    // $250 PropFirm risk limit allows 83.3333 qty = $8,333.33 notional = $833.33 margin (> $500 legacy cap!).
+    // On $5,000 wallet in 10x simulation mode:
+    // 10% of $5,000 = $500 margin (50 qty = $5,000 notional).
     await autoPilot.onTick('SOLUSDT', 100);
 
     expect(mockBroker.openOrderCalls).toHaveLength(1);
     const placed = mockBroker.openOrderCalls[0];
-    expect(placed.marginUsd).toBeGreaterThan(500);
-    expect(placed.marginUsd).toBeLessThanOrEqual(4_000); // Respects 20% real wallet reserve ($1,000)
-    expect(placed.quantity).toBeCloseTo(83.3333, 2); // Exact $250 risk at $3.00 stop distance
+    expect(placed.marginUsd).toBe(500);
+    expect(placed.quantity).toBeCloseTo(50, 2);
   });
 });

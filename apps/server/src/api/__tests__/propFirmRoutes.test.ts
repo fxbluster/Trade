@@ -208,7 +208,7 @@ describe('Prop Firm REST Routes (/api/propfirm/*)', () => {
 
   it('returns 200 with verdict, buffers, needsTopUp, and cycles on authenticated GET /api/propfirm/status', async () => {
     propFirmRiskGuard.recordTradeClosed({
-      realizedNetPnlUsd: 420.5,
+      realizedNetPnlUsd: 42.05,
       liveWalletBalanceUsd: walletBalance,
     });
 
@@ -304,7 +304,7 @@ describe('Prop Firm REST Routes (/api/propfirm/*)', () => {
 
     // 3. While Cycle #1 is HALTED_DAILY_BUFFER -> 409 CYCLE_STILL_ACTIVE
     propFirmRiskGuard.recordTradeClosed({
-      realizedNetPnlUsd: -1250,
+      realizedNetPnlUsd: -125,
       liveWalletBalanceUsd: walletBalance,
     });
     expect(propFirmRepo.getLatestCycle()?.status).toBe('HALTED_DAILY_BUFFER');

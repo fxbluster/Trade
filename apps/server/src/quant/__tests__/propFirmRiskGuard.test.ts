@@ -319,16 +319,16 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       const day3 = Date.UTC(2026, 10, 27, 12, 0, 0);
 
       // Day 1: -$1,000 realized (within -$1,250 daily)
-      guard.recordTradeClosed({ realizedNetPnlUsd: -1_000, liveWalletBalanceUsd: 4_606.01, nowMs: day1 });
+      guard.recordTradeClosed({ realizedNetPnlUsd: -1_000, liveWalletBalanceUsd: 50_000, nowMs: day1 });
       // Day 2: -$1,000 realized (cumulative -$2,000, daily -$1,000)
-      guard.recordTradeClosed({ realizedNetPnlUsd: -1_000, liveWalletBalanceUsd: 4_606.01, nowMs: day2 });
+      guard.recordTradeClosed({ realizedNetPnlUsd: -1_000, liveWalletBalanceUsd: 50_000, nowMs: day2 });
       expect(guard.canOpenTrade(day2 + 1000).allowed).toBe(true);
 
       // Day 3: -$500 floating loss -> cumulative -$2,500 (equity = $47,500 <= internal floor $47,500)
       const trailingHalt = guard.evaluateLiveEquity({
         realizedCyclePnlUsd: -2_000,
         unrealizedPnlUsd: -500,
-        liveWalletBalanceUsd: 4_606.01,
+        liveWalletBalanceUsd: 50_000,
         nowMs: day3,
       });
       expect(trailingHalt.emergencyExitReason).toBe('UPCOMERS_TRAILING_HALT');
@@ -353,7 +353,7 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       const halted = guard.evaluateLiveEquity({
         realizedCyclePnlUsd: -1_250,
         unrealizedPnlUsd: 0,
-        liveWalletBalanceUsd: 4_606.01,
+        liveWalletBalanceUsd: 50_000,
         nowMs: day1,
       });
       expect(halted.status.cycle.status).toBe('HALTED_DAILY_BUFFER');
@@ -363,7 +363,7 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       const canTradeDay2 = guard.canOpenTrade(day2);
       expect(canTradeDay2.allowed).toBe(true);
 
-      const statusDay2 = guard.getStatus(4_606.01, day2);
+      const statusDay2 = guard.getStatus(50_000, day2);
       expect(statusDay2.cycle.status).toBe('ACTIVE');
       expect(statusDay2.dailyBaselineEquityUsd).toBe(48_750);
       expect(statusDay2.dailyPnlUsd).toBe(0);
@@ -383,7 +383,7 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       const failed = guard.evaluateLiveEquity({
         realizedCyclePnlUsd: -1_550,
         unrealizedPnlUsd: 0,
-        liveWalletBalanceUsd: 4_606.01,
+        liveWalletBalanceUsd: 50_000,
         nowMs: day1,
       });
       expect(failed.status.cycle.status).toBe('FAILED_DAILY');
@@ -393,7 +393,7 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       const day2Check = guard.canOpenTrade(day2);
       expect(day2Check.allowed).toBe(false);
       expect(day2Check.reason).toBe('CYCLE_TERMINAL');
-      expect(guard.getStatus(4_606.01, day2).cycle.status).toBe('FAILED_DAILY');
+      expect(guard.getStatus(50_000, day2).cycle.status).toBe('FAILED_DAILY');
     });
   });
 
@@ -415,13 +415,13 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       expect(bootStatus.topUpMessage).toContain('50,000');
       expect(bootStatus.canTrade).toBe(true);
 
-      // Complete 5 consecutive winning cycles (+$2,500 each)
+      // Complete 5 consecutive winning cycles (+$250 real * 10x = +$2,500 simulated each)
       for (let i = 1; i <= 5; i++) {
         if (i > 1) {
           guard.startNewCycle(4_606.01, baseTime + i * 3_600_000);
         }
         const mid = guard.recordTradeClosed({
-          realizedNetPnlUsd: 1_200,
+          realizedNetPnlUsd: 120,
           liveWalletBalanceUsd: 4_606.01,
           nowMs: baseTime + i * 3_600_000 + 1000,
         });
@@ -430,7 +430,7 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
         expect(mid.targetProgressPct).toBe(48);
 
         const passed = guard.recordTradeClosed({
-          realizedNetPnlUsd: 1_300,
+          realizedNetPnlUsd: 130,
           liveWalletBalanceUsd: 4_606.01,
           nowMs: baseTime + i * 3_600_000 + 2000,
         });
@@ -855,9 +855,9 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       expect(status.topUpMessage).toContain('$50,000.00');
       expect(status.topUpMessage).not.toMatch(/top-up required|simulated PnL remains/i);
 
-      // Record a failed cycle (-$1,250.00) and then a passed cycle (+$2,510.00)
+      // Record a failed cycle (-$152 real * 10x = -$1,520.00) and then a passed cycle (+$251 real * 10x = +$2,510.00)
       guard.evaluateLiveEquity({
-        realizedCyclePnlUsd: -1_520,
+        realizedCyclePnlUsd: -152,
         unrealizedPnlUsd: 0,
         liveWalletBalanceUsd: 4_606.01,
         nowMs: t0 + 1_000,
@@ -865,7 +865,7 @@ describe('PropFirmRiskGuard — Upcomers $50K 1-Step Thunderbolt Risk Engine', (
       guard.startNewCycle(4_606.01, t0 + 2_000);
       guard.recordTradeClosed({
         tradeId: 't_win_md',
-        realizedNetPnlUsd: 2_510,
+        realizedNetPnlUsd: 251,
         liveWalletBalanceUsd: 4_606.01,
         nowMs: t0 + 3_000,
       });

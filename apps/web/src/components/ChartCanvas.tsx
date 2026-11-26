@@ -58,6 +58,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const lastFitSymbolRef = useRef<string | null>(null);
   const isInitializedRef = useRef<boolean>(false);
 
+  const [isFreePan, setIsFreePan] = React.useState(false);
+
   const symbol = useMarketStore((s) => s.symbol);
   const klines = useMarketStore((s) => s.klines);
   const candleInterval = useMarketStore((s) => s.candleInterval);
@@ -126,6 +128,24 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           top: 0.1,
           bottom: 0.2,
         },
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: {
+          time: true,
+          price: true,
+        },
+        axisDoubleClickReset: {
+          time: true,
+          price: true,
+        },
+        mouseWheel: true,
+        pinch: true,
       },
       timeScale: {
         borderColor: '#151d2c',
@@ -695,9 +715,27 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
             </span>
           </button>
 
+          {/* Free Vertical Pan Toggle */}
+          <button
+            onClick={() => {
+              const next = !isFreePan;
+              setIsFreePan(next);
+              chartRef.current?.priceScale('right').applyOptions({ autoScale: !next });
+            }}
+            title="Sıçanla yuxarı-aşağı sərbəst sürüşdürmə (Auto-Scale söndür/yandır)"
+            className={`px-2 py-1 text-xs font-mono rounded border transition-colors ${
+              isFreePan
+                ? 'bg-[#0ecb81]/20 text-[#0ecb81] border-[#0ecb81]/50 font-bold'
+                : 'bg-[#151d2c] text-[#7d8590] hover:text-[#e6edf3] border-[#151d2c]'
+            }`}
+          >
+            Free ↕
+          </button>
+
           {/* Fit / Reset Scale Button */}
           <button
             onClick={() => {
+              setIsFreePan(false);
               chartRef.current?.timeScale().fitContent();
               chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
             }}

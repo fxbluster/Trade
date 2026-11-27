@@ -150,15 +150,21 @@ export class AutoPilotManager {
     dailyDrawdownLimitPct: 2.0, // Default 2.0%
   };
 
+  private readonly maxConcurrentPositions = 3;
   private openTradeId: string | null = null;
+  private openTradeIds: Map<string, string> = new Map();
   private activeSymbol: string = 'SOLUSDT';
   private lastExitTime: number = 0;
+  private lastExitTimeBySymbol: Map<string, number> = new Map();
   private consecutiveLosses: number = 0;
   private cooldownUntil: number = 0;
   private oppositeConsensusTickCount: number = 0;
+  private oppositeConsensusBySymbol: Map<string, number> = new Map();
   private peakPriceByTrade: Map<string, number> = new Map();
   private recordedClosedTradeIds: Set<string> = new Set();
   private isManagingPosition: boolean = false;
+  private isManagingSymbol: Set<string> = new Set();
+  private isPlacingEntry: boolean = false;
   private cycleStartedAtMs: number = 0;
 
   constructor(options: AutoPilotManagerOptions) {
@@ -632,8 +638,30 @@ export class AutoPilotManager {
   }
 
   /**
+   * Synchronizes openTradeIds and openTradeId from SQLite active positions.
+   */
+  private syncOpenTradesFromDb(): TradeRecord[] {
+    const activeTrades: TradeRecord[] =
+      typeof (this.tradesRepo as any).getActivePositions === 'function'
+        ? (this.tradesRepo as any).getActivePositions(this.broker.mode)
+        : (() => {
+            const single = this.tradesRepo.getActivePosition(this.broker.mode);
+            return single ? [single] : [];
+          })();
+
+    this.openTradeIds.clear();
+    for (const t of activeTrades) {
+      if (t && t.symbol) {
+        this.openTradeIds.set(t.symbol.toUpperCase(), t.id);
+      }
+    }
+    this.openTradeId = activeTrades.length > 0 ? activeTrades[0].id : null;
+    return activeTrades;
+  }
+
+  /**
    * Main evaluation loop called on every price tick (<= 4Hz).
-   * Synchronously filters calls via state latch to prevent tick concurrency races.
+   * Supports up to 3 tiered concurrent positions across distinct symbols.
    */
   public async onTick(symbol: string, markPrice: number): Promise<void> {
     const sym = symbol.toUpperCase().trim();
@@ -642,7 +670,18 @@ export class AutoPilotManager {
     if (!this.config.enabled) return;
     if (this.isCooldownActive()) return;
     if (this.state === 'CLOSING') return;
-    if (!this.openTradeId && this.state === 'IDLE') {
+
+    const prevTradeIdForSym = this.openTradeIds.get(sym);
+    const activeTrades = this.syncOpenTradesFromDb();
+
+    // Detect external close (e.g. manual/exchange close) for the ticking symbol
+    if (prevTradeIdForSym && !activeTrades.some((t) => t.id === prevTradeIdForSym)) {
+      const closedTrade = this.tradesRepo.getById(prevTradeIdForSym);
+      this.handlePositionClosed(closedTrade);
+      return;
+    }
+
+    if (activeTrades.length === 0 && this.state === 'IDLE') {
       try {
         const riskCooldown = this.db
           .prepare('SELECT cooldown_until FROM risk_state WHERE broker_mode = ?')
@@ -655,63 +694,53 @@ export class AutoPilotManager {
       }
     }
 
-    // Cross-symbol guard: ignore ticks for other symbols while a position is open or LIMIT_CHASING
-    if (this.openTradeId) {
-      const openTrade = this.tradesRepo.getById(this.openTradeId);
-      if (openTrade && openTrade.symbol !== sym) {
-        return;
-      }
-    } else if (this.state !== 'IDLE') {
-      if (this.activeEntryContext && this.activeEntryContext.symbol !== sym) {
-        return;
-      }
-    }
-
-    // Position Management Branch: when position is open or while in LIMIT_CHASING
-    if (this.openTradeId) {
-      if (this.isManagingPosition) return;
-      this.isManagingPosition = true;
-      try {
-        await this.manageOpenPosition(sym, markPrice);
-      } finally {
-        this.isManagingPosition = false;
-      }
-      if (this.state === 'POSITION_OPEN' || (this.state as AutoPilotState) === 'CLOSING') {
-        return;
-      }
-    }
-
-    // Check if an active position already exists in SQLite for this symbol
-    const existing = this.tradesRepo.getActivePosition(this.broker.mode, sym);
-    if (existing) {
-      this.openTradeId = existing.id;
-      if (this.state !== 'LIMIT_CHASING') {
+    // Position Management Branch: manage the open trade for THIS symbol without blocking other symbols
+    const existingForSym = activeTrades.find((t) => t.symbol.toUpperCase() === sym);
+    if (existingForSym) {
+      if (this.state !== 'LIMIT_CHASING' && !this.isPlacingEntry) {
         this.state = 'POSITION_OPEN';
       }
-      if (this.isManagingPosition) return;
+      if (this.isManagingSymbol.has(sym)) return;
+      this.isManagingSymbol.add(sym);
       this.isManagingPosition = true;
       try {
-        await this.manageOpenPosition(sym, markPrice);
+        await this.manageOpenPosition(sym, markPrice, existingForSym.id);
       } finally {
-        this.isManagingPosition = false;
+        this.isManagingSymbol.delete(sym);
+        this.isManagingPosition = this.isManagingSymbol.size > 0;
       }
       return;
     }
 
-    // Synchronous state latch: only evaluate entries when strictly IDLE or recovering from cap block
-    if (this.state !== 'IDLE' && this.state !== 'BLOCKED_SESSION_TRADE_CAP') {
+    // Synchronous entry mutex: only 1 entry placement/chasing in flight at a time
+    if (this.isPlacingEntry || this.state === 'PLACING_ORDER' || this.state === 'LIMIT_CHASING') {
       return;
     }
 
-    // Global 1-position guard across all symbols
-    const anyActive = this.tradesRepo.getActivePosition(this.broker.mode);
-    if (anyActive) {
+    // Max concurrent positions cap (3 distinct symbols)
+    if (activeTrades.length >= this.maxConcurrentPositions) {
       return;
     }
 
-    // Re-entry lockout check (180s mandatory cooldown after position exit)
-    if (Date.now() - this.lastExitTime < 180_000) {
+    // Synchronous state latch: allow evaluation when IDLE, BLOCKED_SESSION_TRADE_CAP, or POSITION_OPEN (for Slot 2/3)
+    if (
+      this.state !== 'IDLE' &&
+      this.state !== 'BLOCKED_SESSION_TRADE_CAP' &&
+      this.state !== 'POSITION_OPEN'
+    ) {
       return;
+    }
+
+    // Re-entry lockout: global 180s when 0 positions open; per-symbol 180s when other symbols are open
+    if (activeTrades.length === 0) {
+      if (Date.now() - this.lastExitTime < 180_000) {
+        return;
+      }
+    } else {
+      const symLastExit = this.lastExitTimeBySymbol.get(sym) ?? 0;
+      if (Date.now() - symLastExit < 180_000) {
+        return;
+      }
     }
 
     // 0. Upcomers Prop Firm Challenge Risk Guard Pre-Entry Gate (BINANCE_DEMO only)
@@ -803,23 +832,60 @@ export class AutoPilotManager {
 
     if (!side) return;
 
-    // SYNCHRONOUS MUTEX LATCH: Immediately lock state to prevent 4Hz tick race conditions
+    // [ARCH-09] Tiered 3-Slot Concurrency Gate across distinct symbols
+    let slotMarginMultiplier = 1.0;
+    const activeCount = activeTrades.length;
+    const baseThreshold = this.config.consensusThreshold ?? 60;
+    const score = snapshot.compositeScore ?? 0;
+    if (activeCount === 1) {
+      const slot2MinScore = Math.max(baseThreshold + 12, 72);
+      if (score < slot2MinScore) {
+        return;
+      }
+      const hasProtected = activeTrades.some((t) => t.is_breakeven === 1 || t.trailing_stop_active === 1);
+      slotMarginMultiplier = hasProtected ? 0.75 : 0.5;
+    } else if (activeCount === 2) {
+      const slot3MinScore = Math.max(baseThreshold + 20, 80);
+      if (score < slot3MinScore) {
+        return;
+      }
+      const hasProtected = activeTrades.some((t) => t.is_breakeven === 1 || t.trailing_stop_active === 1);
+      if (!hasProtected) {
+        return;
+      }
+      slotMarginMultiplier = 0.35;
+    }
+
+    // SYNCHRONOUS MUTEX LATCH: Immediately lock entry placement to prevent 4Hz tick race conditions
+    this.isPlacingEntry = true;
     this.state = 'PLACING_ORDER';
     this.broadcastStatus();
 
     try {
-      await this.executeAutoEntry(sym, side, markPrice);
+      await this.executeAutoEntry(sym, side, markPrice, slotMarginMultiplier);
     } catch (err) {
-      this.state = 'IDLE';
-      this.openTradeId = null;
+      const remaining = this.syncOpenTradesFromDb();
+      this.state = remaining.length > 0 ? 'POSITION_OPEN' : 'IDLE';
       this.broadcastStatus();
+    } finally {
+      this.isPlacingEntry = false;
+      const remaining = this.syncOpenTradesFromDb();
+      if (remaining.length > 0 && this.state === 'IDLE') {
+        this.state = 'POSITION_OPEN';
+        this.broadcastStatus();
+      }
     }
   }
 
   /**
    * Executes algorithmic bracket entry with IOC marketable limit pricing or Maker Limit Chasing.
    */
-  private async executeAutoEntry(symbol: string, side: TradeSide, markPrice: number): Promise<void> {
+  private async executeAutoEntry(
+    symbol: string,
+    side: TradeSide,
+    markPrice: number,
+    slotMarginMultiplier: number = 1.0
+  ): Promise<void> {
     const leverage = this.config.leverage || 10;
     const atr = this.getAtrFn ? this.getAtrFn(symbol) : markPrice * 0.005;
     const limitPrice = Number(
@@ -829,10 +895,11 @@ export class AutoPilotManager {
     let marginAllocationPct = this.config.marginAllocationPct;
 
     try {
-      // Global 1-position guard (without symbol filter) before chasing / opening
-      const globalActive = this.tradesRepo.getActivePosition(this.broker.mode);
-      if (globalActive) {
-        this.state = 'IDLE';
+      // Per-symbol duplicate guard + global maxConcurrentPositions (3) guard
+      const sameSymbolActive = this.tradesRepo.getActivePosition(this.broker.mode, symbol);
+      const currentActive = this.syncOpenTradesFromDb();
+      if (sameSymbolActive || currentActive.length >= this.maxConcurrentPositions) {
+        this.state = currentActive.length > 0 ? 'POSITION_OPEN' : 'IDLE';
         this.broadcastStatus();
         this.onOrderDispatched?.({
           symbol,
@@ -842,7 +909,9 @@ export class AutoPilotManager {
           marginUsd: 0,
           leverage,
           atr,
-          errorMessage: `ERR_POSITION_EXISTS: Active position already open on ${globalActive.symbol}`,
+          errorMessage: sameSymbolActive
+            ? `ERR_POSITION_EXISTS: Active position already open on ${sameSymbolActive.symbol}`
+            : `ERR_MAX_CONCURRENT_POSITIONS: Already at ${currentActive.length}/${this.maxConcurrentPositions} slots`,
         });
         return;
       }
@@ -936,24 +1005,28 @@ export class AutoPilotManager {
         }
 
         if (sizing.finalMarginPct <= 0 || sizing.marginUsd < 5.0) {
-          this.state = 'IDLE';
+          this.state = this.openTradeIds.size > 0 ? 'POSITION_OPEN' : 'IDLE';
           return;
         }
 
-        marginUsd = sizing.marginUsd;
-        marginAllocationPct = Number((sizing.finalMarginPct * 100).toFixed(2));
+        marginUsd = Number((sizing.marginUsd * slotMarginMultiplier).toFixed(2));
+        marginAllocationPct = Number((sizing.finalMarginPct * 100 * slotMarginMultiplier).toFixed(2));
+        if (marginUsd < 5.0) {
+          this.state = this.openTradeIds.size > 0 ? 'POSITION_OPEN' : 'IDLE';
+          return;
+        }
       } else {
         // Size against real wallet balance (1%..20%) while respecting 20% real wallet reserve
         const maxMarginPct = Math.min(20.0, this.config.marginAllocationPct);
-        const targetMarginUsd = Number(((sizingBasisUsd * maxMarginPct) / 100).toFixed(2));
+        const targetMarginUsd = Number(((sizingBasisUsd * maxMarginPct * slotMarginMultiplier) / 100).toFixed(2));
         const realWalletSpendable = isPropFirmDemoActive
           ? Math.max(0, Number((account.availableBalance - balance * 0.20).toFixed(2)))
           : account.availableBalance;
         marginUsd = Math.min(targetMarginUsd, realWalletSpendable);
-        marginAllocationPct = maxMarginPct;
+        marginAllocationPct = Number((maxMarginPct * slotMarginMultiplier).toFixed(2));
 
         if (marginUsd < 5.0) {
-          this.state = 'IDLE';
+          this.state = this.openTradeIds.size > 0 ? 'POSITION_OPEN' : 'IDLE';
           return;
         }
       }
@@ -1224,11 +1297,12 @@ export class AutoPilotManager {
         const serializedChaseTelemetry = JSON.stringify(finalChasingTelemetry);
 
         if (finalStatus !== 'FILLED' || executedQty <= 0) {
-          this.state = 'IDLE';
-          this.openTradeId = null;
+          const remaining = this.syncOpenTradesFromDb();
+          const nextState: AutoPilotState = remaining.length > 0 ? 'POSITION_OPEN' : 'IDLE';
+          this.state = nextState;
           this.activeEntryContext = null;
           this.broadcastStatus();
-          this.emitStateTransition('IDLE');
+          this.emitStateTransition(nextState);
           this.onOrderDispatched?.({
             symbol,
             side,
@@ -1270,11 +1344,12 @@ export class AutoPilotManager {
           } catch (unwindErr) {
             console.warn('[AutoPilot] Micro-fill dust unwind failed:', unwindErr);
           }
-          this.state = 'IDLE';
-          this.openTradeId = null;
+          const remaining = this.syncOpenTradesFromDb();
+          const nextState: AutoPilotState = remaining.length > 0 ? 'POSITION_OPEN' : 'IDLE';
+          this.state = nextState;
           this.activeEntryContext = null;
           this.broadcastStatus();
-          this.emitStateTransition('IDLE');
+          this.emitStateTransition(nextState);
           this.onOrderDispatched?.({
             symbol,
             side,
@@ -1339,6 +1414,7 @@ export class AutoPilotManager {
         };
 
         this.tradesRepo.insert(tradeRecord);
+        this.openTradeIds.set(symbol.toUpperCase(), tradeId);
         this.openTradeId = tradeId;
 
         let slAlgoId: string | null = null;
@@ -1470,8 +1546,10 @@ export class AutoPilotManager {
           trailing_stop_active: 0,
         });
 
+        this.openTradeIds.set(symbol.toUpperCase(), trade.id);
         this.openTradeId = trade.id;
         this.state = 'POSITION_OPEN';
+        this.oppositeConsensusBySymbol.set(symbol.toUpperCase(), 0);
         this.oppositeConsensusTickCount = 0;
         this.broadcastStatus();
         this.emitStateTransition('POSITION_OPEN');
@@ -1541,11 +1619,13 @@ export class AutoPilotManager {
   /**
    * Monitors open position: evaluates dynamic breakeven and 2-tick opposite exit.
    */
-  private async manageOpenPosition(symbol: string, markPrice: number): Promise<void> {
+  private async manageOpenPosition(symbol: string, markPrice: number, tradeIdOverride?: string): Promise<void> {
     if (this.state === 'CLOSING') return;
-    if (!this.openTradeId) return;
+    const symUpper = symbol.toUpperCase();
+    const tradeId = tradeIdOverride ?? this.openTradeIds.get(symUpper) ?? this.openTradeId;
+    if (!tradeId) return;
 
-    const trade = this.tradesRepo.getById(this.openTradeId);
+    const trade = this.tradesRepo.getById(tradeId);
 
     // Case 1: Position is closed
     if (!trade || trade.status === 'CLOSED') {
@@ -1599,7 +1679,7 @@ export class AutoPilotManager {
             return;
           }
         }
-        const updated = this.tradesRepo.getById(this.openTradeId);
+        const updated = this.tradesRepo.getById(tradeId);
         if (!updated || updated.status === 'CLOSED') {
           this.handlePositionClosed(updated);
         }
@@ -1616,7 +1696,7 @@ export class AutoPilotManager {
         try {
           await this.tradeManager.closePosition(symbol, 'WATCHDOG_STOP_LOSS');
         } finally {
-          const updated = this.tradesRepo.getById(this.openTradeId);
+          const updated = this.tradesRepo.getById(tradeId);
           this.handlePositionClosed(updated);
         }
         return;
@@ -1629,7 +1709,7 @@ export class AutoPilotManager {
         try {
           await this.tradeManager.closePosition(symbol, 'WATCHDOG_STOP_LOSS');
         } finally {
-          const updated = this.tradesRepo.getById(this.openTradeId);
+          const updated = this.tradesRepo.getById(tradeId);
           this.handlePositionClosed(updated);
         }
         return;
@@ -1663,7 +1743,7 @@ export class AutoPilotManager {
         try {
           await this.tradeManager.closePosition(symbol, 'EVENT_BLACKOUT_UNWIND');
         } finally {
-          const updated = this.tradesRepo.getById(this.openTradeId);
+          const updated = this.tradesRepo.getById(tradeId);
           this.handlePositionClosed(updated);
         }
         return;
@@ -1739,7 +1819,7 @@ export class AutoPilotManager {
         try {
           await this.tradeManager.closePosition(symbol, 'TRAILING_GIVEBACK_HALF');
         } finally {
-          const updated = this.tradesRepo.getById(this.openTradeId);
+          const updated = this.tradesRepo.getById(tradeId);
           this.handlePositionClosed(updated);
         }
         return;
@@ -1804,20 +1884,23 @@ export class AutoPilotManager {
           (trade.side === 'SELL' && snapshot.consensusBias === 'BULLISH'));
 
       if (isOpposite) {
-        this.oppositeConsensusTickCount++;
-        if (this.oppositeConsensusTickCount >= 2) {
+        const nextCount = (this.oppositeConsensusBySymbol.get(symUpper) ?? 0) + 1;
+        this.oppositeConsensusBySymbol.set(symUpper, nextCount);
+        this.oppositeConsensusTickCount = nextCount;
+        if (nextCount >= 2) {
           // Trigger emergency early close
           this.state = 'CLOSING';
           this.broadcastStatus();
           try {
             await this.tradeManager.closePosition(symbol, 'OPPOSITE_CONFLUENCE_REVERSAL');
           } finally {
-            const updated = this.tradesRepo.getById(this.openTradeId);
+            const updated = this.tradesRepo.getById(tradeId);
             this.handlePositionClosed(updated);
           }
           return;
         }
       } else {
+        this.oppositeConsensusBySymbol.set(symUpper, 0);
         this.oppositeConsensusTickCount = 0;
       }
     }
@@ -1867,7 +1950,7 @@ export class AutoPilotManager {
       this.state = 'IDLE';
     }
 
-    const sym = trade?.symbol ?? this.activeEntryContext?.symbol ?? this.activeSymbol;
+    const sym = (trade?.symbol ?? this.activeEntryContext?.symbol ?? this.activeSymbol).toUpperCase();
     const exitPrice = trade?.exit_price ?? this.getMarkPriceFn(sym);
     const side = trade?.side ?? this.activeEntryContext?.side ?? 'NEUTRAL';
     const snap = this.activeEntryContext?.snapshot ?? this.getConfluenceForSymbol(sym).getSnapshot(sym);
@@ -1885,15 +1968,23 @@ export class AutoPilotManager {
 
     this.activeEntryContext = null;
     this.lastEmittedChaseKey = null;
-    this.lastExitTime = Date.now();
-    if (this.openTradeId) {
-      this.peakPriceByTrade.delete(this.openTradeId);
-    }
+    const nowMs = Date.now();
+    this.lastExitTime = nowMs;
+    this.lastExitTimeBySymbol.set(sym, nowMs);
+    this.openTradeIds.delete(sym);
+    this.oppositeConsensusBySymbol.delete(sym);
     if (trade?.id) {
       this.peakPriceByTrade.delete(trade.id);
     }
-    this.openTradeId = null;
+    const remainingTrades = this.syncOpenTradesFromDb().filter((t) => t.id !== trade?.id);
+    if (trade?.id) {
+      this.openTradeIds.delete(sym);
+      this.openTradeId = remainingTrades.length > 0 ? remainingTrades[0].id : null;
+    }
     this.oppositeConsensusTickCount = 0;
+    if (this.state !== 'COOLDOWN_ACTIVE') {
+      this.state = remainingTrades.length > 0 ? 'POSITION_OPEN' : 'IDLE';
+    }
     this.broadcastStatus();
     this.emitStateTransition(this.state);
   }

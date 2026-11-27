@@ -582,12 +582,15 @@ describe('PropFirm Runtime Integration (Task 3)', () => {
     const algoCall = (chasedBroker.createAlgoOrder as any).mock.calls[0][0];
     expect(algoCall.clientAlgoId.length).toBe(23);
 
-    // Case C: Global 1-pos guard blocks ETHUSDT entry when SOLUSDT is already open
+    // Case C: Slot 2 tiered guard blocks ETHUSDT with score 65 (< 72) when SOLUSDT is already open
+    setBuySnapshot(confluenceEngine);
+    const origSnap = confluenceEngine.getSnapshot('ETHUSDT')!;
+    confluenceEngine.getSnapshot = () => ({ ...origSnap, compositeScore: 65 });
     chasedAutoPilot.setActiveSymbol('ETHUSDT');
     (chasedAutoPilot as any).openTradeId = null;
     (chasedAutoPilot as any).state = 'IDLE';
     await chasedAutoPilot.onTick('ETHUSDT', 3000);
-    expect((chasedBroker.openOrder as any).mock.calls).toHaveLength(2); // No 3rd order
+    expect((chasedBroker.openOrder as any).mock.calls).toHaveLength(2); // No 3rd order below Slot 2 threshold
   });
 
   it('propFirmRiskGuard_hydratesRecordedTradeIdsOnRestart_and_scopesLocalPaperOut', async () => {

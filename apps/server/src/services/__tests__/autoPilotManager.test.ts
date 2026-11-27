@@ -648,7 +648,7 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
       neutralCount: 2,
       consensusBias: 'BULLISH',
       consensusMet: true,
-      compositeScore: 85,
+      compositeScore: 65, // Below Slot 2 threshold (72)
       recommendedAction: 'BUY',
     });
 
@@ -831,5 +831,103 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     expect(mockBroker.openOrderCalls.length).toBe(0);
     expect(multiAutoPilot.getState()).toBe('BLOCKED_SESSION_TRADE_CAP');
     expect(multiAutoPilot.getStatusPayload().filledToday).toBe(2);
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 11: [ARCH-09] Tiered 3-Slot Concurrency with Strict Risk Guards
+  // --------------------------------------------------------------------------
+  it('enforces tiered 3-slot concurrency: Slot 2 >= 72 @ 0.5x/0.75x, Slot 3 >= 80 + protected @ 0.35x, Slot 4 blocked', async () => {
+    const makeSnap = (symbol: string, score: number): ConfluenceSnapshot => ({
+      symbol,
+      pillars: [],
+      bullishCount: 5,
+      bearishCount: 0,
+      neutralCount: 2,
+      consensusBias: 'BULLISH',
+      consensusMet: true,
+      threshold: 4,
+      compositeScore: score,
+      recommendedAction: 'BUY',
+      macroVetoActive: false,
+      macroRegime: 'MACRO_BULLISH',
+      activeFvgs: [],
+      activeOrderBlocks: [],
+      latestSweep: null,
+    });
+
+    const scores: Record<string, number> = {
+      SOLUSDT: 65,
+      ETHUSDT: 68,
+      BTCUSDT: 82,
+      XRPUSDT: 85,
+    };
+
+    const makeCtx = (sym: string) => {
+      const eng = new ConfluenceEngine();
+      eng.getSnapshot = () => makeSnap(sym, scores[sym] ?? 50);
+      return { symbol: sym, confluenceEngine: eng };
+    };
+
+    const contexts = new Map([
+      ['SOLUSDT', makeCtx('SOLUSDT')],
+      ['ETHUSDT', makeCtx('ETHUSDT')],
+      ['BTCUSDT', makeCtx('BTCUSDT')],
+      ['XRPUSDT', makeCtx('XRPUSDT')],
+    ]);
+
+    const tieredAutoPilot = new AutoPilotManager({
+      db,
+      tradeManager,
+      broker: mockBroker,
+      confluenceEngine: contexts.get('SOLUSDT')!.confluenceEngine,
+      getMarkPrice: (sym: string) =>
+        sym === 'ETHUSDT' ? 3000 : sym === 'BTCUSDT' ? 60000 : sym === 'XRPUSDT' ? 1 : 100,
+      getAtr: (sym: string) => (sym === 'ETHUSDT' ? 30 : sym === 'BTCUSDT' ? 600 : 1.5),
+      getSymbolQuantContext: (sym: string) => contexts.get(sym.toUpperCase()),
+      forEachQuantContext: (cb) => contexts.forEach(cb),
+      watchlistSymbols: ['SOLUSDT', 'ETHUSDT', 'BTCUSDT', 'XRPUSDT'],
+      config: {
+        enabled: true,
+        consensusThreshold: 60,
+        marginAllocationPct: 10,
+        leverage: 10,
+        maxDailyTrades: 20,
+      },
+    });
+
+    // Slot 1: SOLUSDT opens at score 65 (>= 60) with 1.0x margin ($100 on $1000 wallet)
+    await tieredAutoPilot.onTick('SOLUSDT', 100);
+    expect(mockBroker.openOrderCalls).toHaveLength(1);
+    expect(mockBroker.openOrderCalls[0].symbol).toBe('SOLUSDT');
+    expect(mockBroker.openOrderCalls[0].marginUsd).toBe(100);
+
+    // Slot 2: ETHUSDT at score 68 (< 72) is blocked
+    await tieredAutoPilot.onTick('ETHUSDT', 3000);
+    expect(mockBroker.openOrderCalls).toHaveLength(1);
+
+    // Slot 2: ETHUSDT raised to 74 (>= 72), SOLUSDT unprotected -> opens at 0.50x margin ($50)
+    scores.ETHUSDT = 74;
+    await tieredAutoPilot.onTick('ETHUSDT', 3000);
+    expect(mockBroker.openOrderCalls).toHaveLength(2);
+    expect(mockBroker.openOrderCalls[1].symbol).toBe('ETHUSDT');
+    expect(mockBroker.openOrderCalls[1].marginUsd).toBe(50);
+
+    // Slot 3: BTCUSDT at score 82 (>= 80) is STILL blocked while neither open trade is protected
+    await tieredAutoPilot.onTick('BTCUSDT', 60000);
+    expect(mockBroker.openOrderCalls).toHaveLength(2);
+
+    // Protect SOLUSDT (is_breakeven = 1) -> Slot 3 now allowed at 0.35x margin ($35)
+    const tradesRepo = new TradesRepo(db);
+    const solTrade = tradesRepo.getActivePosition('BINANCE_DEMO', 'SOLUSDT')!;
+    tradesRepo.update(solTrade.id, { is_breakeven: 1 });
+    await tieredAutoPilot.onTick('BTCUSDT', 60000);
+    expect(mockBroker.openOrderCalls).toHaveLength(3);
+    expect(mockBroker.openOrderCalls[2].symbol).toBe('BTCUSDT');
+    expect(mockBroker.openOrderCalls[2].marginUsd).toBe(35);
+
+    // Slot 4: XRPUSDT at score 85 is strictly blocked (maxConcurrentPositions = 3)
+    await tieredAutoPilot.onTick('XRPUSDT', 1);
+    expect(mockBroker.openOrderCalls).toHaveLength(3);
+    expect(tieredAutoPilot.getState()).toBe('POSITION_OPEN');
   });
 });

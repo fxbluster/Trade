@@ -25,6 +25,7 @@ import {
   Cpu,
   Sliders,
   Zap,
+  FileText,
 } from 'lucide-react';
 
 const ARCHETYPE_LABELS: Record<QuantConvictionArchetype, string> = {
@@ -98,6 +99,8 @@ export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDock
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
   const [sideFilter, setSideFilter] = useState<'ALL' | 'BUY' | 'SELL'>('ALL');
+  const [auditSummary, setAuditSummary] = useState<any>(null);
+  const [auditExportStatus, setAuditExportStatus] = useState<'idle' | 'exporting' | 'success' | 'error'>('idle');
 
   const fetchTelemetry = useCallback(async () => {
     setIsLoading(true);
@@ -105,6 +108,9 @@ export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDock
     try {
       const resp = await apiClient.getDailyAudit('current');
       setTelemetryEvents(resp?.factor_telemetry_events ?? []);
+      if (resp?.summary) {
+        setAuditSummary(resp.summary);
+      }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMsg(msg || 'Failed to fetch telemetry events');
@@ -112,6 +118,19 @@ export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDock
       setIsLoading(false);
     }
   }, [setTelemetryEvents]);
+
+  const handleExportAudit = async () => {
+    if (auditExportStatus === 'exporting') return;
+    setAuditExportStatus('exporting');
+    try {
+      await apiClient.downloadDailyAudit('markdown');
+      setAuditExportStatus('success');
+      setTimeout(() => setAuditExportStatus('idle'), 3000);
+    } catch {
+      setAuditExportStatus('error');
+      setTimeout(() => setAuditExportStatus('idle'), 4000);
+    }
+  };
 
   // Bootstrap once on mount; real-time updates stream via FACTOR_TELEMETRY WebSocket frames
   useEffect(() => {
@@ -195,6 +214,26 @@ export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDock
             <span>Yenilə</span>
           </button>
 
+          {/* Merged Daily Audit Export */}
+          <button
+            data-testid="audit-export-btn"
+            onClick={handleExportAudit}
+            disabled={auditExportStatus === 'exporting'}
+            className="flex items-center space-x-1 px-2.5 py-1 rounded bg-[#020305] border border-[#151d2c] text-[#7d8590] hover:text-[#00f2fe] hover:border-[#00f2fe]/40 transition-colors disabled:opacity-50"
+            title="Gündəlik Decision Audit hesabatını (.md) yüklə"
+          >
+            <FileText className="w-3 h-3 text-[#00f2fe]" />
+            <span>
+              {auditExportStatus === 'exporting'
+                ? 'Yüklənir...'
+                : auditExportStatus === 'success'
+                ? 'Yükləndi!'
+                : auditExportStatus === 'error'
+                ? 'Xəta'
+                : 'Audit Yüklə'}
+            </span>
+          </button>
+
           {/* Docking & Expand Controls */}
           {isDockedRight ? (
             <button
@@ -238,6 +277,23 @@ export const AgentTelemetryPanel: React.FC<AgentTelemetryPanelProps> = ({ isDock
           )}
         </div>
       </div>
+
+      {auditSummary && (
+        <div className="mb-2 px-2 py-1 rounded bg-[#020305] border border-[#151d2c] text-[10px] text-[#7d8590] flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span>
+            Bloklanan Siqnal: <strong className="text-[#e6edf3]">{auditSummary.blocked_setups ?? 0}</strong>
+          </span>
+          <span>
+            Xilas Edilən: <strong className="text-[#0ecb81]">+${(auditSummary.capital_saved_usd ?? 0).toFixed(2)}</strong>
+          </span>
+          <span>
+            Qaçan Qazanc: <strong className="text-[#f0b90b]">${(auditSummary.missed_profit_usd ?? 0).toFixed(2)}</strong>
+          </span>
+          <span>
+            Maker Qənaəti: <strong className="text-[#00f2fe]">+${(auditSummary.maker_fee_savings_usd ?? 0).toFixed(2)}</strong>
+          </span>
+        </div>
+      )}
 
       {errorMsg && (
         <div className="mb-2 p-1.5 rounded bg-[#f6465d]/10 border border-[#f6465d]/30 text-[#f6465d] text-[11px] flex items-center space-x-1.5">

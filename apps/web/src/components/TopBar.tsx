@@ -121,20 +121,6 @@ export const TopBar: React.FC = () => {
   const formattedUptime = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
   const startTimeStr = bootTimeMs ? new Date(bootTimeMs).toLocaleTimeString() : 'N/A';
 
-  const handleExportAudit = async () => {
-    if (auditExportStatus === 'exporting') return;
-    setAuditExportStatus('exporting');
-    try {
-      await apiClient.downloadDailyAudit('markdown');
-      setAuditExportStatus('success');
-      setTimeout(() => setAuditExportStatus('idle'), 3000);
-    } catch (err: any) {
-      console.error('Audit export failed:', err);
-      setAuditExportStatus('error');
-      setTimeout(() => setAuditExportStatus('idle'), 4000);
-    }
-  };
-
   const handleBrokerToggle = async () => {
     const nextMode: BrokerMode = brokerMode === 'BINANCE_DEMO' ? 'LOCAL_PAPER' : 'BINANCE_DEMO';
     setIsSwitchingBroker(true);
@@ -265,44 +251,6 @@ export const TopBar: React.FC = () => {
         >
           <Layers className="w-3.5 h-3.5 text-[#00f2fe]" />
           <span className="hidden sm:inline">Pillar Matrix</span>
-        </button>
-
-        {/* Daily Decision Audit Export */}
-        <button
-          onClick={handleExportAudit}
-          disabled={auditExportStatus === 'exporting'}
-          data-testid="audit-export-btn"
-          className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-[#020305] border border-[#151d2c] text-[#7d8590] hover:text-[#00f2fe] hover:border-[#00f2fe]/40 transition-colors disabled:opacity-50 min-w-[108px] text-center justify-center"
-          title="Export Daily Decision Audit Trail (Markdown)"
-        >
-          <FileText
-            className={`w-3.5 h-3.5 transition-colors ${
-              auditExportStatus === 'exporting'
-                ? 'text-[#00f2fe] animate-pulse'
-                : auditExportStatus === 'success'
-                ? 'text-[#0ecb81]'
-                : auditExportStatus === 'error'
-                ? 'text-[#f6465d]'
-                : 'text-[#00f2fe]'
-            }`}
-          />
-          <span
-            className={`hidden sm:inline ${
-              auditExportStatus === 'success'
-                ? 'text-[#0ecb81] font-medium'
-                : auditExportStatus === 'error'
-                ? 'text-[#f6465d] font-medium'
-                : ''
-            }`}
-          >
-            {auditExportStatus === 'exporting'
-              ? 'Exporting...'
-              : auditExportStatus === 'success'
-              ? 'Exported!'
-              : auditExportStatus === 'error'
-              ? 'Failed'
-              : 'Daily Audit'}
-          </span>
         </button>
 
         {/* Background Engine Uptime / Session Live Timer */}

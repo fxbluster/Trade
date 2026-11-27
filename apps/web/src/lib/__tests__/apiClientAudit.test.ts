@@ -6,7 +6,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
 import { apiClient, downloadDailyAudit } from '../apiClient';
-import { TopBar } from '../../components/TopBar';
+import { AgentTelemetryPanel } from '../../components/AgentTelemetryPanel';
 
 describe('apiClient.downloadDailyAudit', () => {
   let createdAnchor: HTMLAnchorElement | null = null;
@@ -143,8 +143,9 @@ describe('apiClient.downloadDailyAudit', () => {
   });
 });
 
-describe('TopBar Daily Audit button', () => {
-  it('renders the Daily Audit export button and triggers downloadDailyAudit on click', async () => {
+describe('AgentTelemetryPanel Daily Audit button', () => {
+  it('renders the Audit export button inside AgentTelemetryPanel and triggers downloadDailyAudit on click', async () => {
+    vi.spyOn(apiClient, 'getDailyAudit').mockResolvedValue({ factor_telemetry_events: [] } as any);
     const downloadSpy = vi.spyOn(apiClient, 'downloadDailyAudit').mockResolvedValue();
 
     const container = document.createElement('div');
@@ -152,12 +153,12 @@ describe('TopBar Daily Audit button', () => {
     const root = createRoot(container);
 
     flushSync(() => {
-      root.render(React.createElement(TopBar));
+      root.render(React.createElement(AgentTelemetryPanel));
     });
 
     const exportBtn = container.querySelector<HTMLButtonElement>('[data-testid="audit-export-btn"]');
     expect(exportBtn).not.toBeNull();
-    expect(exportBtn?.textContent).toContain('Daily Audit');
+    expect(exportBtn?.textContent).toContain('Audit Yüklə');
 
     flushSync(() => {
       exportBtn?.click();

@@ -495,10 +495,14 @@ export class TradeManager {
         };
 
         // Gate 3: Risk Engine Gatekeeper (Cooldown, Margin Cap, Drawdown, Dead-SL Armor)
+        // Anti-gambling cooldown applies strictly to manual entries, never AutoPilot entries.
+        const effectiveRiskForValidation = (req as any).isAutoPilot
+          ? { ...currentRisk, cooldown_until: 0 }
+          : currentRisk;
         const riskValidation = validateOrderRisk(
           effectiveReq,
           account,
-          currentRisk,
+          effectiveRiskForValidation,
           markPrice,
           Date.now(),
           isPropFirmDemoActive && this.propFirmRiskGuard

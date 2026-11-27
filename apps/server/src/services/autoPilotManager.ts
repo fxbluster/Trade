@@ -681,18 +681,7 @@ export class AutoPilotManager {
       return;
     }
 
-    if (activeTrades.length === 0 && this.state === 'IDLE') {
-      try {
-        const riskCooldown = this.db
-          .prepare('SELECT cooldown_until FROM risk_state WHERE broker_mode = ?')
-          .get(this.broker.mode) as { cooldown_until?: number } | undefined;
-        if (riskCooldown && typeof riskCooldown.cooldown_until === 'number' && riskCooldown.cooldown_until > Date.now()) {
-          return;
-        }
-      } catch {
-        // Ignore if mock DB lacks risk_state table
-      }
-    }
+    // Anti-gambling risk_state cooldown applies strictly to manual entries, never AutoPilot.
 
     // Position Management Branch: manage the open trade for THIS symbol without blocking other symbols
     const existingForSym = activeTrades.find((t) => t.symbol.toUpperCase() === sym);

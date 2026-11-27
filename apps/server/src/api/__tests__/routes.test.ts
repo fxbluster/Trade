@@ -871,4 +871,170 @@ describe('TradeOS v2 16 REST Routes', () => {
     const rows = db.prepare('SELECT id, cycle_number FROM propfirm_challenge_cycles ORDER BY cycle_number ASC').all() as Array<{ id: string; cycle_number: number }>;
     expect(rows).toEqual([{ id: 'c-latest-2', cycle_number: 1 }]);
   });
+
+  it('GET /api/pnl/summary computes winCount, lossCount, winRate strictly over CLOSED trades (DEF-05)', async () => {
+    const tradesRepo = new TradesRepo(db);
+    const now = Date.now();
+    db.prepare('UPDATE risk_state SET session_started_at = ? WHERE broker_mode = ?').run(now - 3600_000, 'BINANCE_DEMO');
+
+    // 1 closed loss (-$7.82 net: -6.82 realized_pnl - 1.00 fees_usd)
+    tradesRepo.insert({
+      id: 'closed-loss-1',
+      symbol: 'SOLUSDT',
+      broker_mode: 'BINANCE_DEMO',
+      side: 'BUY',
+      status: 'CLOSED',
+      entry_price: 150,
+      exit_price: 145,
+      quantity: 1,
+      remaining_qty: 0,
+      leverage: 10,
+      margin_usd: 15,
+      stop_loss: 144,
+      tp1: null,
+      tp2: null,
+      be_price: null,
+      is_breakeven: 0,
+      peak_price: 150,
+      peak_mfe: 0,
+      trailing_stop_active: 0,
+      client_order_id: null,
+      client_sl_id: null,
+      client_tp1_id: null,
+      client_tp2_id: null,
+      entry_order_id: null,
+      sl_algo_id: null,
+      tp1_algo_id: null,
+      tp2_algo_id: null,
+      realized_pnl: -6.82,
+      fees_usd: 1.0,
+      exit_reason: 'STOP_LOSS',
+      opened_at: now - 120_000,
+      closed_at: now - 60_000,
+    });
+
+    // 1 open profit trade (must NOT count toward winCount or winRate)
+    tradesRepo.insert({
+      id: 'open-profit-1',
+      symbol: 'BTCUSDT',
+      broker_mode: 'BINANCE_DEMO',
+      side: 'BUY',
+      status: 'OPEN',
+      entry_price: 90000,
+      exit_price: null,
+      quantity: 0.01,
+      remaining_qty: 0.01,
+      leverage: 10,
+      margin_usd: 90,
+      stop_loss: 89000,
+      tp1: null,
+      tp2: null,
+      be_price: null,
+      is_breakeven: 0,
+      peak_price: 91000,
+      peak_mfe: 10,
+      trailing_stop_active: 0,
+      client_order_id: null,
+      client_sl_id: null,
+      client_tp1_id: null,
+      client_tp2_id: null,
+      entry_order_id: null,
+      sl_algo_id: null,
+      tp1_algo_id: null,
+      tp2_algo_id: null,
+      realized_pnl: 0,
+      fees_usd: 0,
+      exit_reason: null,
+      opened_at: now - 30_000,
+      closed_at: null,
+    });
+
+    const pnlApp = polka();
+    registerRoutes(pnlApp, {
+      ...ctx,
+      pnlService: {
+        getPnlSummary: vi.fn().mockResolvedValue({
+          live: { hasPosition: true, symbol: 'BTCUSDT', unrealizedPnl: 12.5 },
+          today: {
+            realizedPnl: -6.82,
+            unrealizedPnl: 12.5,
+            netPnl: 4.68,
+            commission: -1.0,
+            funding: 0,
+            tradeCount: 2,
+            winCount: 1,
+            lossCount: 1,
+            winRate: 100,
+          },
+          threeDays: {
+            realizedPnl: -6.82,
+            unrealizedPnl: 12.5,
+            netPnl: 4.68,
+            commission: -1.0,
+            funding: 0,
+            tradeCount: 2,
+            winCount: 1,
+            lossCount: 1,
+            winRate: 100,
+          },
+          weekly: {
+            realizedPnl: -6.82,
+            unrealizedPnl: 12.5,
+            netPnl: 4.68,
+            commission: -1.0,
+            funding: 0,
+            tradeCount: 2,
+            winCount: 1,
+            lossCount: 1,
+            winRate: 100,
+          },
+          account: { equity: 50004.68, walletBalance: 49992.18, availableBalance: 49900, currency: 'USDT' },
+          humanExplanation: '',
+          timestamp: now,
+        }),
+      } as unknown as NonNullable<AppContext['pnlService']>,
+    });
+
+    const res = await new Promise<{ status: number; body: any }>((resolve) => {
+      const emitter = new EventEmitter();
+      const req = Object.assign(emitter, {
+        method: 'GET',
+        url: '/api/pnl/summary',
+        path: '/api/pnl/summary',
+        headers: {
+          host: `127.0.0.1:${PORT}`,
+          authorization: `Bearer ${SESSION_TOKEN}`,
+        },
+        params: {},
+        query: {},
+        body: {},
+        socket: { remoteAddress: '127.0.0.1' },
+      }) as unknown as Request;
+
+      let statusCode = 200;
+      let responseBody = '';
+      const mockRes = {
+        statusCode: 200,
+        setHeader: vi.fn(),
+        getHeader: vi.fn(),
+        end(data?: string) {
+          if (data) responseBody = data;
+          resolve({ status: statusCode, body: responseBody ? JSON.parse(responseBody) : null });
+        },
+      } as unknown as Response;
+      Object.defineProperty(mockRes, 'statusCode', {
+        get: () => statusCode,
+        set: (val: number) => { statusCode = val; },
+      });
+      pnlApp.handler(req, mockRes, { pathname: '/api/pnl/summary', query: {} });
+    });
+
+    expect(res.status).toBe(200);
+    for (const period of ['today', 'threeDays', 'weekly'] as const) {
+      expect(res.body[period].tradeCount).toBe(1);
+      expect(res.body[period].winCount).toBe(0);
+      expect(res.body[period].lossCount).toBe(1);
+      expect(res.body[period].winRate).toBe(0);
+    }
+  });
 });

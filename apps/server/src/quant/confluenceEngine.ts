@@ -30,19 +30,18 @@ import { EconomicEventGuard, economicEventGuard } from './economicEventGuard.js'
 import type { AlphaRegistry, CompositeFactorEvaluation } from './alphaRegistry.js';
 
 /**
- * [ARCH-08b] Rebalanced 7-pillar Bayesian weights (strictly summing to 1.0)
- * calibrated from live ETHUSDT scorecard (n=2,493):
- * - Lifts strongest pillars CVD_ABSORPTION (55.4% hit rate: 20% -> 23%) and NATIVE_SMC (54.0%, best MFE/MAE: 5% -> 10%)
- * - Reduces weakest pillars LIQ_CLUSTERS (42.1% hit rate: 18% -> 11%) and SENTIMENT_MACRO (42.5% hit rate: 2% -> 1%)
+ * [ARCH-15] Recalibrated 7-pillar Bayesian weights (strictly summing to 1.0):
+ * - Reduces NATIVE_SMC from 25% to 17.5%
+ * - Redistributes +7.5% across MOMENTUM_RVOL (5% -> 9%) and LIQ_CLUSTERS (7.5% -> 11%)
  */
 export const CALIBRATED_CONFLUENCE_WEIGHTS: Record<ConfluencePillarId, number> = {
-  MACRO_REGIME: 0.22,
-  NATIVE_SMC: 0.10,
-  CVD_ABSORPTION: 0.23,
-  ORDER_FLOW_L2: 0.16,
+  MACRO_REGIME: 0.25,
+  NATIVE_SMC: 0.175,
+  CVD_ABSORPTION: 0.20,
+  ORDER_FLOW_L2: 0.15,
   LIQ_CLUSTERS: 0.11,
-  MOMENTUM_RVOL: 0.17,
-  SENTIMENT_MACRO: 0.01,
+  MOMENTUM_RVOL: 0.09,
+  SENTIMENT_MACRO: 0.025,
 };
 
 export interface ConfluenceMarketData {
@@ -252,6 +251,10 @@ export class ConfluenceEngine {
     }
 
     // Pre-consensus gates: Economic Event Blackout & Noise Band Filter
+    // Use 15m ATR(14) from mtfManager when available so 1m ATR never falsely triggers 15m breakout bypass.
+    const candles15mForNoise = this.mtfManager.getCandles(symbol, '15m');
+    const atr14ForNoiseBand =
+      this.compute15mAtr14(candles15mForNoise) ?? indicators?.atr14 ?? undefined;
     const gateCheck = this.checkPreTradeGates(
       symbol,
       currentPrice,
@@ -259,7 +262,7 @@ export class ConfluenceEngine {
       data.vwap,
       now,
       data.prevCandle15m,
-      indicators?.atr14 ?? undefined
+      atr14ForNoiseBand
     );
 
     const blockReason: BlockReason | null = gateCheck.blocked ? (gateCheck.reason ?? null) : null;
@@ -584,6 +587,23 @@ export class ConfluenceEngine {
       confirmed: false,
       updatedAt: now,
     };
+  }
+
+  private compute15mAtr14(candles: KlineCandle[]): number | undefined {
+    if (candles.length < 15) return undefined;
+    const slice = candles.slice(-15);
+    let trSum = 0;
+    for (let i = 1; i < slice.length; i++) {
+      const cur = slice[i]!;
+      const prev = slice[i - 1]!;
+      const tr = Math.max(
+        cur.high - cur.low,
+        Math.abs(cur.high - prev.close),
+        Math.abs(cur.low - prev.close)
+      );
+      trSum += tr;
+    }
+    return trSum / 14;
   }
 
   private resolveFactorCandles(symbol: string, explicitCandles?: KlineCandle[]): KlineCandle[] {

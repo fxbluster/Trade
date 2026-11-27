@@ -192,12 +192,12 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
     expect(snap.recommendedAction).toBe('WAIT');
   });
 
-  it('bypasses NoiseBand immediately when effectiveRange >= 1.5 * atr14 (sharp directional impulse)', () => {
-    const candles = generateMockCandles(96, 100, 10.0); // MTR = 10.0 -> threshold = 5.00
+  it('bypasses NoiseBand immediately when effectiveRange >= threshold and >= 1.5 * atr14 (sharp directional impulse)', () => {
+    const candles = generateMockCandles(96, 100, 4.0); // MTR = 4.0 -> threshold = 2.00, 0.5*thresh = 1.00
     const engine = new NoiseBandEngine(candles);
 
-    // Range = 3.0 (< threshold 5.00) and price is right at VWAP (dist = 0.2 < 2.50),
-    // but atr14 = 2.0 so effectiveRange (3.0) >= 1.5 * atr14 (3.0) -> impulse bypass clears NoiseBand.
+    // Range = 3.0 (>= threshold 2.00), but price is right at VWAP (dist = 0.2 < 1.00),
+    // and atr14 = 2.0 so effectiveRange (3.0) >= 1.5 * atr14 (3.0) -> impulse bypass clears VWAP proximity.
     const impulseCandle: KlineCandle = {
       time: 1795132800,
       open: 100,
@@ -207,7 +207,7 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
       volume: 5000,
     };
 
-    expect(engine.isNoise(impulseCandle, 99.0, 98.8)).toBe(true); // without atr14 -> blocked
+    expect(engine.isNoise(impulseCandle, 99.0, 98.8)).toBe(true); // without atr14 -> blocked by VWAP proximity
     expect(engine.isNoise(impulseCandle, 99.0, 98.8, undefined, 2.0)).toBe(false); // with atr14=2.0 -> bypassed
     expect(engine.getSnapshot(impulseCandle, 99.0, 98.8, undefined, 2.0).isNoise).toBe(false);
   });
@@ -231,8 +231,58 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
     expect(engine.isNoise(chopCandle, 95.0, 100.1, undefined, 0)).toBe(true);
   });
 
-  it('clears BLOCKED_NOISE_BAND in ConfluenceEngine when indicators.atr14 triggers breakout bypass', () => {
-    const candles = generateMockCandles(96, 100, 10.0); // threshold = 5.00
+  it('[DEF-02 / ARCH-14] never bypasses NoiseBand in dead chop when effectiveRange < threshold even with small atr14', () => {
+    // SOL-like MTR = 0.3934 -> threshold = 0.1967
+    const candles = generateMockCandles(96, 100, 0.3934);
+    const engine = new NoiseBandEngine(candles);
+
+    // Dead chop 15m candle: range = 0.15 (< 0.1967)
+    const chopCandle: KlineCandle = {
+      time: 1795132800,
+      open: 100,
+      high: 100.08,
+      low: 99.93,
+      close: 100.02,
+      volume: 400,
+    };
+
+    // Even if 1m atr14 = 0.06 (so 0.15 >= 1.5 * 0.06 = 0.09), sub-threshold chop MUST remain isNoise: true
+    expect(engine.isNoise(chopCandle, 99.0, 100.02, undefined, 0.06)).toBe(true);
+    const snap = engine.getSnapshot(chopCandle, 99.0, 100.02, undefined, 0.06);
+    expect(snap.isNoise).toBe(true);
+    expect(snap.currentRange).toBeCloseTo(0.15, 4);
+    expect(snap.noiseThreshold).toBeCloseTo(0.1967, 4);
+
+    const confluence = new ConfluenceEngine({ noiseBandEngine: engine });
+    const confSnap = confluence.evaluate({
+      symbol: 'SOLUSDT',
+      currentPrice: 100.02,
+      indicators: {
+        ema9: 100,
+        ema21: 100,
+        ema50: 100,
+        ema200: 100,
+        rsi14: 50,
+        atr14: 0.06,
+        macd: { macd: 0, signal: 0, histogram: 0 },
+        bollingerBands: { upper: 101, middle: 100, lower: 99 },
+        adx14: { adx: 15, pdi: 15, mdi: 15 },
+        support: 99,
+        resistance: 101,
+        volumeSma20: 1000,
+      },
+      cvd: null,
+      candle15m: chopCandle,
+      vwap: 99.0,
+    });
+    expect(confSnap.noiseBandActive).toBe(true);
+    expect(confSnap.noiseBand?.isNoise).toBe(true);
+    expect(confSnap.noiseBand?.active).toBe(true);
+    expect(confSnap.blockReason).toBe('BLOCKED_NOISE_BAND');
+  });
+
+  it('clears BLOCKED_NOISE_BAND in ConfluenceEngine when indicators.atr14 triggers breakout bypass above threshold', () => {
+    const candles = generateMockCandles(96, 100, 4.0); // threshold = 2.00
     const engine = new NoiseBandEngine(candles);
     const confluence = new ConfluenceEngine({ noiseBandEngine: engine });
 
@@ -245,7 +295,7 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
       volume: 8000,
     };
 
-    // effectiveRange = 3.0 >= 1.5 * atr14 (1.5 * 1.8 = 2.7) -> clears NoiseBand
+    // effectiveRange = 3.0 (>= threshold 2.00) and >= 1.5 * atr14 (1.5 * 1.8 = 2.7) -> clears NoiseBand
     const snapBypass = confluence.evaluate({
       symbol: 'SOLUSDT',
       currentPrice: 98.7,

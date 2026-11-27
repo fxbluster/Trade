@@ -1,6 +1,11 @@
 import type { TradeSide, ChasingOrderState, ChasingStatus } from '@tradeos/shared';
 import type { BrokerAdapter } from '../exchange/broker.js';
-import { BinanceApiError } from '../exchange/binanceClient.js';
+import {
+  BinanceApiError,
+  DEFAULT_SYMBOL_RULES,
+  snapPriceToTick,
+  snapQuantityToStep,
+} from '../exchange/binanceClient.js';
 
 export interface ChasingEngineOptions {
   /** Minimum ms between order amendments (default 250) */
@@ -78,6 +83,7 @@ export class ChasingExecutionEngine {
   private readonly timeoutMs: number;
   private readonly maxDeviationPct: number;
   private readonly tickSize: number;
+  private readonly hasExplicitTickSize: boolean;
   private readonly bucket: TokenBucket;
 
   private state: ChasingOrderState | null = null;
@@ -91,6 +97,7 @@ export class ChasingExecutionEngine {
     this.maxAmendments = options.maxAmendments ?? 10;
     this.timeoutMs = options.timeoutMs ?? 15_000;
     this.maxDeviationPct = options.maxDeviationPct ?? 0.002;
+    this.hasExplicitTickSize = options.tickSize !== undefined;
     this.tickSize = options.tickSize ?? 0.01;
     const ratePerSec = options.maxAmendPerSec ?? 5;
     this.bucket = new TokenBucket(ratePerSec, ratePerSec);
@@ -112,38 +119,80 @@ export class ChasingExecutionEngine {
   }
 
   /** Configured tick size for penny-jump distance calculations */
-  getTickSize(): number {
-    return this.tickSize;
+  getTickSize(symbol?: string): number {
+    return symbol ? this.resolveTickSize(symbol) : this.tickSize;
   }
 
   /**
-   * Compute penny-jump target price for a BUY order.
+   * Resolves the effective tickSize for a symbol:
+   * respects explicit constructor tickSize, otherwise checks broker exchangeInfo rules
+   * and falls back to DEFAULT_SYMBOL_RULES (e.g. BTCUSDT: 0.1, ETHUSDT/SOLUSDT: 0.01, XRPUSDT: 0.0001).
+   */
+  resolveTickSize(symbol: string): number {
+    if (this.hasExplicitTickSize) {
+      return this.tickSize;
+    }
+    const symUpper = symbol.toUpperCase();
+    const brokerClient = (this.broker as any)?.client;
+    if (brokerClient && typeof brokerClient.getSymbolRules === 'function') {
+      const rules = brokerClient.getSymbolRules(symUpper);
+      if (rules && Number.isFinite(rules.tickSize) && rules.tickSize > 0) {
+        return rules.tickSize;
+      }
+    }
+    return DEFAULT_SYMBOL_RULES[symUpper]?.tickSize ?? this.tickSize;
+  }
+
+  /**
+   * Resolves the effective stepSize for a symbol from broker exchangeInfo rules or defaults.
+   */
+  resolveStepSize(symbol: string): number {
+    const symUpper = symbol.toUpperCase();
+    const brokerClient = (this.broker as any)?.client;
+    if (brokerClient && typeof brokerClient.getSymbolRules === 'function') {
+      const rules = brokerClient.getSymbolRules(symUpper);
+      if (rules && Number.isFinite(rules.stepSize) && rules.stepSize > 0) {
+        return rules.stepSize;
+      }
+    }
+    return DEFAULT_SYMBOL_RULES[symUpper]?.stepSize ?? 0.001;
+  }
+
+  /**
+   * Compute penny-jump target price for a BUY order, snapped cleanly to tickSize.
    * BUY: if (bestAsk - bestBid > tick) min(bestBid + tick, bestAsk - tick); else bestBid.
    */
-  computeTargetBuy(bestBid: number, bestAsk: number): number {
+  computeTargetBuy(bestBid: number, bestAsk: number, tickSize: number = this.tickSize): number {
     const spread = bestAsk - bestBid;
-    if (spread > this.tickSize) {
-      return Math.min(bestBid + this.tickSize, bestAsk - this.tickSize);
-    }
-    return bestBid;
+    const raw =
+      spread > tickSize
+        ? Math.min(bestBid + tickSize, bestAsk - tickSize)
+        : bestBid;
+    return snapPriceToTick(raw, tickSize);
   }
 
   /**
-   * Compute penny-jump target price for a SELL order.
+   * Compute penny-jump target price for a SELL order, snapped cleanly to tickSize.
    * SELL: if (bestAsk - bestBid > tick) max(bestAsk - tick, bestBid + tick); else bestAsk.
    */
-  computeTargetSell(bestBid: number, bestAsk: number): number {
+  computeTargetSell(bestBid: number, bestAsk: number, tickSize: number = this.tickSize): number {
     const spread = bestAsk - bestBid;
-    if (spread > this.tickSize) {
-      return Math.max(bestAsk - this.tickSize, bestBid + this.tickSize);
-    }
-    return bestAsk;
+    const raw =
+      spread > tickSize
+        ? Math.max(bestAsk - tickSize, bestBid + tickSize)
+        : bestAsk;
+    return snapPriceToTick(raw, tickSize);
   }
 
-  private computeTarget(side: TradeSide, bestBid: number, bestAsk: number): number {
+  private computeTarget(
+    side: TradeSide,
+    bestBid: number,
+    bestAsk: number,
+    tickSize: number = this.tickSize
+  ): number {
     return side === 'BUY'
-      ? this.computeTargetBuy(bestBid, bestAsk)
-      : this.computeTargetSell(bestBid, bestAsk);
+      ? this.computeTargetBuy(bestBid, bestAsk, tickSize)
+      : this.computeTargetSell(bestBid, bestAsk, tickSize);
   }
 
   private emitState(): void {
@@ -182,10 +231,13 @@ export class ChasingExecutionEngine {
   }): Promise<ChasingResult> {
     const { symbol, side, quantity, anchorPrice } = params;
     const startTime = Date.now();
+    const tickSize = this.resolveTickSize(symbol);
+    const stepSize = this.resolveStepSize(symbol);
+    const snappedQty = snapQuantityToStep(quantity, stepSize);
 
     // Initial depth snapshot
     const initialDepth = await params.getDepth();
-    let initialPrice = this.computeTarget(side, initialDepth.bestBid, initialDepth.bestAsk);
+    let initialPrice = this.computeTarget(side, initialDepth.bestBid, initialDepth.bestAsk, tickSize);
 
     // Place initial GTX limit order (wrap in -5022 1-tick backoff retry)
     let orderId: string;
@@ -193,17 +245,19 @@ export class ChasingExecutionEngine {
       orderId = await params.placeOrder(initialPrice);
     } catch (err: any) {
       if (err instanceof BinanceApiError && err.code === -5022) {
-        const backedOffPrice =
-          side === 'BUY'
-            ? initialPrice - this.tickSize
-            : initialPrice + this.tickSize;
+        const backedOffPrice = snapPriceToTick(
+          side === 'BUY' ? initialPrice - tickSize : initialPrice + tickSize,
+          tickSize
+        );
         await sleep(250);
         const freshDepth = await params.getDepth();
-        const requotedPrice = this.computeTarget(side, freshDepth.bestBid, freshDepth.bestAsk);
-        const retryPrice =
+        const requotedPrice = this.computeTarget(side, freshDepth.bestBid, freshDepth.bestAsk, tickSize);
+        const retryPrice = snapPriceToTick(
           side === 'BUY'
             ? Math.min(backedOffPrice, requotedPrice)
-            : Math.max(backedOffPrice, requotedPrice);
+            : Math.max(backedOffPrice, requotedPrice),
+          tickSize
+        );
         initialPrice = retryPrice;
         orderId = await params.placeOrder(retryPrice);
       } else {
@@ -299,7 +353,7 @@ export class ChasingExecutionEngine {
 
       // 6. Fetch new depth
       const depth = await params.getDepth();
-      const newTargetPrice = this.computeTarget(side, depth.bestBid, depth.bestAsk);
+      const newTargetPrice = this.computeTarget(side, depth.bestBid, depth.bestAsk, tickSize);
 
       // 7. Toxic runaway guard: max 0.20% deviation from anchor
       const deviation = Math.abs(newTargetPrice - anchorPrice) / anchorPrice;
@@ -313,13 +367,13 @@ export class ChasingExecutionEngine {
       }
 
       // 8. Only amend if price actually changed
-      if (Math.abs(newTargetPrice - currentPrice) < this.tickSize * 0.5) {
+      if (Math.abs(newTargetPrice - currentPrice) < tickSize * 0.5) {
         continue;
       }
 
       // 9. Attempt amendment
       try {
-        await broker_modifyOrder(this.broker, symbol, orderId, newTargetPrice, quantity, side);
+        await broker_modifyOrder(this.broker, symbol, orderId, newTargetPrice, snappedQty, side);
         currentPrice = newTargetPrice;
         lastAmendTime = now;
         this.setState({
@@ -332,22 +386,24 @@ export class ChasingExecutionEngine {
       } catch (err: any) {
         // -5022: Post-Only would trigger as taker → back off 1 tick
         if (err instanceof BinanceApiError && err.code === -5022) {
-          const backedOffPrice =
-            side === 'BUY'
-              ? currentPrice - this.tickSize
-              : currentPrice + this.tickSize;
+          const backedOffPrice = snapPriceToTick(
+            side === 'BUY' ? currentPrice - tickSize : currentPrice + tickSize,
+            tickSize
+          );
 
           // Re-fetch depth and wait 250ms before re-quoting
           await sleep(250);
           const freshDepth = await params.getDepth();
-          const requeotedPrice = this.computeTarget(side, freshDepth.bestBid, freshDepth.bestAsk);
-          const retryPrice =
+          const requeotedPrice = this.computeTarget(side, freshDepth.bestBid, freshDepth.bestAsk, tickSize);
+          const retryPrice = snapPriceToTick(
             side === 'BUY'
               ? Math.min(backedOffPrice, requeotedPrice)
-              : Math.max(backedOffPrice, requeotedPrice);
+              : Math.max(backedOffPrice, requeotedPrice),
+            tickSize
+          );
 
           try {
-            await broker_modifyOrder(this.broker, symbol, orderId, retryPrice, quantity, side);
+            await broker_modifyOrder(this.broker, symbol, orderId, retryPrice, snappedQty, side);
             currentPrice = retryPrice;
             lastAmendTime = Date.now();
             this.setState({

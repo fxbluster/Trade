@@ -13,6 +13,12 @@ interface StrategyMilestone {
 
 const STRATEGY_MILESTONES: StrategyMilestone[] = [
   {
+    version: 'v2.7',
+    timestampMs: Date.parse('2026-11-27T13:20:00Z'),
+    timeLabel: '17:20',
+    summary: 'ARCH-13..15: BTC/SOL tickSize/precision düzəlişi, NoiseBand chop qoruması, OrderFlow clamp, SMC çəki kalibrasiyası',
+  },
+  {
     version: 'v2.6',
     timestampMs: Date.parse('2026-11-27T11:25:00Z'),
     timeLabel: '15:25',

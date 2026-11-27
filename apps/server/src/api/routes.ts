@@ -190,6 +190,31 @@ async function resolvePropFirmWalletBalance(ctx: AppContext): Promise<number> {
   return walletBalance;
 }
 
+function computeClosedTradeWinStats(
+  db: DatabaseSync,
+  brokerMode: BrokerMode,
+  startTime: number
+): { tradeCount: number; winCount: number; lossCount: number; winRate: number } {
+  const row = db
+    .prepare(
+      `SELECT
+        COUNT(*) as total,
+        SUM(CASE WHEN (COALESCE(realized_pnl, 0) - COALESCE(fees_usd, 0)) >= 0 THEN 1 ELSE 0 END) as wins,
+        SUM(CASE WHEN (COALESCE(realized_pnl, 0) - COALESCE(fees_usd, 0)) < 0 THEN 1 ELSE 0 END) as losses
+      FROM trades
+      WHERE broker_mode = ?
+        AND status = 'CLOSED'
+        AND COALESCE(closed_at, opened_at) >= ?`
+    )
+    .get(brokerMode, startTime) as { total?: number; wins?: number; losses?: number } | undefined;
+
+  const tradeCount = Number(row?.total || 0);
+  const winCount = Number(row?.wins || 0);
+  const lossCount = Number(row?.losses || 0);
+  const winRate = tradeCount > 0 ? Number(((winCount / tradeCount) * 100).toFixed(1)) : 0;
+  return { tradeCount, winCount, lossCount, winRate };
+}
+
 /**
  * Registers all 16 TradeOS v2 REST endpoints on the Polka application.
  */
@@ -921,6 +946,39 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       const query = (req.query || {}) as Record<string, string>;
       const symbol = (query.symbol || resolveActiveSymbol()).toUpperCase().trim();
       const summary = await ctx.pnlService.getPnlSummary(symbol);
+
+      if (summary && ctx.db) {
+        let sessionEpochMs = 0;
+        try {
+          const riskRow = ctx.db
+            .prepare('SELECT session_started_at FROM risk_state WHERE broker_mode = ?')
+            .get(ctx.broker.mode) as { session_started_at?: number } | undefined;
+          if (riskRow && typeof riskRow.session_started_at === 'number' && riskRow.session_started_at > 0) {
+            sessionEpochMs = riskRow.session_started_at;
+          }
+        } catch {
+          // Ignore if risk_state unavailable
+        }
+
+        const now = typeof summary.timestamp === 'number' ? summary.timestamp : Date.now();
+        const horizons: Array<['today' | 'threeDays' | 'weekly', number]> = [
+          ['today', Math.max(now - 24 * 3600 * 1000, sessionEpochMs)],
+          ['threeDays', Math.max(now - 3 * 24 * 3600 * 1000, sessionEpochMs)],
+          ['weekly', Math.max(now - 7 * 24 * 3600 * 1000, sessionEpochMs)],
+        ];
+
+        for (const [key, startTime] of horizons) {
+          const horizon = summary[key];
+          if (horizon) {
+            const stats = computeClosedTradeWinStats(ctx.db, ctx.broker.mode, startTime);
+            horizon.tradeCount = stats.tradeCount;
+            horizon.winCount = stats.winCount;
+            horizon.lossCount = stats.lossCount;
+            horizon.winRate = stats.winRate;
+          }
+        }
+      }
+
       sendJson(res, 200, summary);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

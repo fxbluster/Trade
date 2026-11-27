@@ -257,8 +257,13 @@ export class OrderFlowEngine {
       };
     }
 
-    const safeAsk = Math.max(1, totalAskPressure);
-    const safeBid = Math.max(1, totalBidPressure);
+    const MIN_NOTIONAL_DENOM = 100;
+    const MAX_IMBALANCE_PCT = 500;
+    const clampImbalancePct = (ratio: number): number =>
+      Math.min(MAX_IMBALANCE_PCT, Math.max(0, Math.round((ratio - 1) * 100)));
+
+    const safeAsk = Math.max(MIN_NOTIONAL_DENOM, totalAskPressure);
+    const safeBid = Math.max(MIN_NOTIONAL_DENOM, totalBidPressure);
 
     const buyRatio = totalBidPressure / safeAsk;
     const sellRatio = totalAskPressure / safeBid;
@@ -272,11 +277,9 @@ export class OrderFlowEngine {
     const hasFlow = rollingBuyVol > 0 || rollingSellVol > 0;
     const minFlowVol = Math.min(rollingBuyVol, rollingSellVol);
     const maxFlowVol = Math.max(rollingBuyVol, rollingSellVol);
-    const takerRatio = !hasFlow
-      ? 1.0
-      : minFlowVol > 0
-      ? maxFlowVol / minFlowVol
-      : maxFlowVol;
+    const totalFlowVol = rollingBuyVol + rollingSellVol;
+    const minFlowDenom = Math.max(minFlowVol, totalFlowVol * 0.05, 1e-9);
+    const takerRatio = !hasFlow ? 1.0 : maxFlowVol / minFlowDenom;
     const takerDominant = rollingBuyVol >= rollingSellVol ? 'Buy' : 'Sell';
     const flowTelemetry = hasFlow
       ? `Flow: ${takerRatio.toFixed(1)}x ${takerDominant} (60s) | `
@@ -284,7 +287,7 @@ export class OrderFlowEngine {
 
     // [DEF-02 / ARCH-02] Priority 1: Aggressive 60s taker flow surge (>= 3.0x) overrides passive L2 depth
     if (hasFlow && takerRatio >= 3.0) {
-      const imbalancePct = Math.round((takerRatio - 1) * 100);
+      const imbalancePct = clampImbalancePct(takerRatio);
       const score = Math.min(100, Math.round(75 + Math.min(25, (takerRatio - 1) * 5)));
       if (takerDominant === 'Buy') {
         return {
@@ -311,7 +314,7 @@ export class OrderFlowEngine {
     }
 
     if (buyRatio >= 3.0) {
-      const imbalancePct = Math.round((buyRatio - 1) * 100);
+      const imbalancePct = clampImbalancePct(buyRatio);
       const score = Math.min(100, Math.round(75 + Math.min(25, (buyRatio - 1) * 10)));
       return {
         id: pillarId,
@@ -326,7 +329,7 @@ export class OrderFlowEngine {
     }
 
     if (sellRatio >= 3.0) {
-      const imbalancePct = Math.round((sellRatio - 1) * 100);
+      const imbalancePct = clampImbalancePct(sellRatio);
       const score = Math.min(100, Math.round(75 + Math.min(25, (sellRatio - 1) * 10)));
       return {
         id: pillarId,

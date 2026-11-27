@@ -456,13 +456,16 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
       expect(snapFail.recommendedAction).toBe('WAIT');
     });
 
-    it('rebalances CALIBRATED_CONFLUENCE_WEIGHTS to sum to 1.0, lifting CVD_ABSORPTION & NATIVE_SMC and reducing LIQ_CLUSTERS & SENTIMENT_MACRO', () => {
+    it('[ARCH-15] recalibrates CALIBRATED_CONFLUENCE_WEIGHTS to sum to 1.0, reducing NATIVE_SMC (25% -> 17.5%) and lifting MOMENTUM_RVOL (5% -> 9%) & LIQ_CLUSTERS (7.5% -> 11%)', () => {
       const total = Object.values(CALIBRATED_CONFLUENCE_WEIGHTS).reduce((acc, w) => acc + w, 0);
       expect(total).toBeCloseTo(1.0, 10);
-      expect(CALIBRATED_CONFLUENCE_WEIGHTS.CVD_ABSORPTION).toBeCloseTo(0.23, 4);
-      expect(CALIBRATED_CONFLUENCE_WEIGHTS.NATIVE_SMC).toBeCloseTo(0.10, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.MACRO_REGIME).toBeCloseTo(0.25, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.NATIVE_SMC).toBeCloseTo(0.175, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.CVD_ABSORPTION).toBeCloseTo(0.20, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.ORDER_FLOW_L2).toBeCloseTo(0.15, 4);
       expect(CALIBRATED_CONFLUENCE_WEIGHTS.LIQ_CLUSTERS).toBeCloseTo(0.11, 4);
-      expect(CALIBRATED_CONFLUENCE_WEIGHTS.SENTIMENT_MACRO).toBeCloseTo(0.01, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.MOMENTUM_RVOL).toBeCloseTo(0.09, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.SENTIMENT_MACRO).toBeCloseTo(0.025, 4);
 
       const snap = engine.evaluate({
         symbol: 'SOLUSDT',

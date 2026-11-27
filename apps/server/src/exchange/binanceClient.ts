@@ -77,6 +77,60 @@ export interface RateLimitState {
   orderCount1m: number;
 }
 
+export interface SymbolFilterRules {
+  tickSize: number;
+  stepSize: number;
+}
+
+export const DEFAULT_SYMBOL_RULES: Record<string, SymbolFilterRules> = {
+  BTCUSDT: { tickSize: 0.1, stepSize: 0.001 },
+  ETHUSDT: { tickSize: 0.01, stepSize: 0.001 },
+  SOLUSDT: { tickSize: 0.01, stepSize: 0.01 },
+  XRPUSDT: { tickSize: 0.0001, stepSize: 0.1 },
+  BNBUSDT: { tickSize: 0.01, stepSize: 0.01 },
+  DOGEUSDT: { tickSize: 0.00001, stepSize: 1 },
+  ADAUSDT: { tickSize: 0.0001, stepSize: 1 },
+};
+
+/**
+ * Computes the number of decimal places represented by a step/tick size (handles scientific notation like 1e-5).
+ */
+export function getDecimalPrecision(step: number): number {
+  if (!Number.isFinite(step) || step <= 0) return 0;
+  const str = step.toString();
+  if (str.includes('e-')) {
+    const exp = parseInt(str.split('e-')[1], 10);
+    return Number.isFinite(exp) ? exp : 0;
+  }
+  const dotIdx = str.indexOf('.');
+  return dotIdx === -1 ? 0 : str.length - dotIdx - 1;
+}
+
+/**
+ * Snaps a price to the nearest valid multiple of `tickSize` without floating-point artifacts.
+ */
+export function snapPriceToTick(price: number, tickSize: number): number {
+  if (!Number.isFinite(price) || !Number.isFinite(tickSize) || tickSize <= 0) {
+    return price;
+  }
+  const precision = getDecimalPrecision(tickSize);
+  const ticks = Math.round(price / tickSize);
+  return Number((ticks * tickSize).toFixed(precision));
+}
+
+/**
+ * Floors a quantity to a valid multiple of `stepSize` without floating-point artifacts.
+ */
+export function snapQuantityToStep(quantity: number, stepSize: number): number {
+  if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(stepSize) || stepSize <= 0) {
+    return quantity;
+  }
+  const precision = getDecimalPrecision(stepSize);
+  const steps = Math.floor(quantity / stepSize + 1e-9);
+  const snapped = Number((steps * stepSize).toFixed(precision));
+  return snapped > 0 ? snapped : Number(stepSize.toFixed(precision));
+}
+
 /**
  * Binance Futures REST Client with HMAC-SHA256 signing, strict timeouts,
  * rate-limit prioritization (P1 execution vs P2 scanner), and HTTP 418 ban circuit-breaker.
@@ -96,6 +150,7 @@ export class BinanceClient {
   private bannedUntil: number = 0;
   private exchangeHealth: ExchangeHealth = 'HEALTHY';
   private exchangeInfoCache: { timestamp: number; data: unknown } | null = null;
+  private symbolRulesCache: Map<string, SymbolFilterRules> = new Map();
   public onIpBan?: (retryAfterSec: number, statusCode: number) => void;
 
   constructor(options: BinanceClientOptions = {}) {
@@ -358,12 +413,64 @@ export class BinanceClient {
   }
 
   /**
+   * Parses and caches PRICE_FILTER.tickSize and LOT_SIZE.stepSize from exchangeInfo payload.
+   */
+  private cacheExchangeInfoRules(data: any): void {
+    const symbols = data?.symbols;
+    if (!Array.isArray(symbols)) return;
+    for (const symInfo of symbols) {
+      const symName = typeof symInfo?.symbol === 'string' ? symInfo.symbol.toUpperCase() : '';
+      if (!symName) continue;
+      const filters = Array.isArray(symInfo.filters) ? symInfo.filters : [];
+      const priceFilter = filters.find((f: any) => f.filterType === 'PRICE_FILTER');
+      const lotFilter = filters.find((f: any) => f.filterType === 'LOT_SIZE');
+      const fallback = DEFAULT_SYMBOL_RULES[symName];
+
+      const parsedTick = priceFilter?.tickSize ? parseFloat(priceFilter.tickSize) : NaN;
+      const parsedStep = lotFilter?.stepSize ? parseFloat(lotFilter.stepSize) : NaN;
+      const tickSize =
+        Number.isFinite(parsedTick) && parsedTick > 0
+          ? parsedTick
+          : typeof symInfo.pricePrecision === 'number'
+            ? Math.pow(10, -symInfo.pricePrecision)
+            : (fallback?.tickSize ?? 0.01);
+      const stepSize =
+        Number.isFinite(parsedStep) && parsedStep > 0
+          ? parsedStep
+          : typeof symInfo.quantityPrecision === 'number'
+            ? Math.pow(10, -symInfo.quantityPrecision)
+            : (fallback?.stepSize ?? 0.001);
+
+      this.symbolRulesCache.set(symName, { tickSize, stepSize });
+    }
+  }
+
+  /**
+   * Returns cached exchangeInfo filter rules (tickSize, stepSize) for a symbol,
+   * falling back to known Binance Futures defaults.
+   */
+  getSymbolRules(symbol: string): SymbolFilterRules {
+    const symUpper = symbol.toUpperCase();
+    const cached = this.symbolRulesCache.get(symUpper);
+    if (cached) return cached;
+    if (this.exchangeInfoCache?.data) {
+      this.cacheExchangeInfoRules(this.exchangeInfoCache.data);
+      const fromExchangeInfo = this.symbolRulesCache.get(symUpper);
+      if (fromExchangeInfo) return fromExchangeInfo;
+    }
+    return DEFAULT_SYMBOL_RULES[symUpper] ?? { tickSize: 0.01, stepSize: 0.001 };
+  }
+
+  /**
    * Cached symbol and exchange rules query.
    */
   async getExchangeInfo(symbol?: string): Promise<any> {
     const now = Date.now();
     if (this.exchangeInfoCache && now - this.exchangeInfoCache.timestamp < 3600000) {
       const data: any = this.exchangeInfoCache.data;
+      if (this.symbolRulesCache.size === 0) {
+        this.cacheExchangeInfoRules(data);
+      }
       if (symbol) {
         const symUpper = symbol.toUpperCase();
         return {
@@ -380,6 +487,7 @@ export class BinanceClient {
       priority: 'P2',
     });
     this.exchangeInfoCache = { timestamp: now, data };
+    this.cacheExchangeInfoRules(data);
 
     if (symbol) {
       const symUpper = symbol.toUpperCase();
@@ -521,6 +629,13 @@ export class BinanceClient {
    */
   async createOrder(params: CreateOrderParams): Promise<any> {
     const sym = params.symbol.toUpperCase();
+    const rules = this.getSymbolRules(sym);
+    const snappedQty = snapQuantityToStep(params.quantity, rules.stepSize);
+    const snappedPrice =
+      params.price !== undefined ? snapPriceToTick(params.price, rules.tickSize) : undefined;
+    const snappedStopPrice =
+      params.stopPrice !== undefined ? snapPriceToTick(params.stopPrice, rules.tickSize) : undefined;
+
     try {
       return await this.request('/fapi/v1/order', {
         method: 'POST',
@@ -530,9 +645,9 @@ export class BinanceClient {
           symbol: sym,
           side: params.side,
           type: params.type,
-          quantity: params.quantity,
-          ...(params.price !== undefined ? { price: params.price } : {}),
-          ...(params.stopPrice !== undefined ? { stopPrice: params.stopPrice } : {}),
+          quantity: snappedQty,
+          ...(snappedPrice !== undefined ? { price: snappedPrice } : {}),
+          ...(snappedStopPrice !== undefined ? { stopPrice: snappedStopPrice } : {}),
           ...(params.reduceOnly !== undefined ? { reduceOnly: String(params.reduceOnly) } : {}),
           ...(params.newClientOrderId ? { newClientOrderId: params.newClientOrderId } : {}),
           ...(params.timeInForce ? { timeInForce: params.timeInForce } : {}),
@@ -559,8 +674,8 @@ export class BinanceClient {
             symbol: sym,
             side: params.side,
             type: algoType,
-            triggerPrice: params.stopPrice ?? params.price ?? 0,
-            quantity: params.quantity,
+            triggerPrice: snappedStopPrice ?? snappedPrice ?? 0,
+            quantity: snappedQty,
             reduceOnly: params.reduceOnly ?? true,
             clientAlgoId: params.newClientOrderId,
           });
@@ -574,16 +689,19 @@ export class BinanceClient {
    * Places server-side conditional algo order (/fapi/v1/algoOrder).
    */
   async createAlgoOrder(params: CreateAlgoOrderParams): Promise<any> {
+    const sym = params.symbol.toUpperCase();
+    const rules = this.getSymbolRules(sym);
+    const snappedTriggerPrice = snapPriceToTick(params.triggerPrice, rules.tickSize);
     const algoParams: Record<string, unknown> = {
       algoType: params.algoType || 'CONDITIONAL',
-      symbol: params.symbol.toUpperCase(),
+      symbol: sym,
       side: params.side,
       type: params.type,
-      triggerPrice: params.triggerPrice,
+      triggerPrice: snappedTriggerPrice,
       reduceOnly: params.reduceOnly !== undefined ? String(params.reduceOnly) : 'true',
     };
     if (params.quantity !== undefined && params.quantity > 0) {
-      algoParams.quantity = params.quantity;
+      algoParams.quantity = snapQuantityToStep(params.quantity, rules.stepSize);
     }
     if (params.clientAlgoId) {
       algoParams.clientAlgoId = params.clientAlgoId;
@@ -734,6 +852,9 @@ export class BinanceClient {
     side: TradeSide
   ): Promise<any> {
     const sym = symbol.toUpperCase();
+    const rules = this.getSymbolRules(sym);
+    const snappedPrice = snapPriceToTick(price, rules.tickSize);
+    const snappedQty = snapQuantityToStep(quantity, rules.stepSize);
     try {
       return await this.request<any>('/fapi/v1/order', {
         method: 'PUT',
@@ -743,8 +864,8 @@ export class BinanceClient {
           symbol: sym,
           orderId: String(orderId),
           side,
-          price,
-          quantity,
+          price: snappedPrice,
+          quantity: snappedQty,
         },
       });
     } catch (err: any) {

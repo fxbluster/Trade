@@ -96,8 +96,10 @@ export class NoiseBandEngine {
    * 1. Effective 15m candle range (max of current developing & previous closed 15m candle) < NoiseThreshold_h, OR
    * 2. Distance between mark price and rolling 15m VWAP < NoiseThreshold_h * 0.5.
    *
-   * Breakout bypass: if `atr14 > 0` and `effectiveRange >= 1.5 * atr14`, a sharp directional
-   * impulse clears the NoiseBand immediately instead of lagging through the first half of a move.
+   * Breakout bypass: when `effectiveRange >= threshold`, if `atr14 > 0` and
+   * `effectiveRange >= 1.5 * atr14`, a sharp directional impulse clears the VWAP
+   * proximity check immediately instead of lagging through the first half of a move.
+   * Sub-threshold dead chop (`effectiveRange < threshold`) is NEVER bypassed.
    */
   public isNoise(
     candle15m: KlineCandle,
@@ -113,6 +115,10 @@ export class NoiseBandEngine {
     const prevRange = prevClosedCandle15m ? prevClosedCandle15m.high - prevClosedCandle15m.low : 0;
     const effectiveRange = Math.max(currentRange, prevRange);
 
+    if (effectiveRange < threshold) {
+      return true;
+    }
+
     if (atr14 !== undefined && Number.isFinite(atr14) && atr14 > 0 && effectiveRange >= 1.5 * atr14) {
       return false;
     }
@@ -120,7 +126,7 @@ export class NoiseBandEngine {
     const price = markPrice ?? candle15m.close;
     const vwapDist = Math.abs(price - vwap);
 
-    return effectiveRange < threshold || vwapDist < threshold * 0.5;
+    return vwapDist < threshold * 0.5;
   }
 
   /**

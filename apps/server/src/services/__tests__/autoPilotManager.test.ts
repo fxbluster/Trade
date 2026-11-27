@@ -312,7 +312,7 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     await autoPilot.onTick('SOLUSDT', 100);
     expect(autoPilot.getState()).toBe('POSITION_OPEN');
 
-    // 2. Confluence flips to BEARISH
+    // 2. Confluence flips to BEARISH with high conviction (>= 75 required within first 180s)
     setConfluenceSnapshot({
       symbol: 'SOLUSDT',
       pillars: [],
@@ -322,7 +322,7 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
       consensusBias: 'BEARISH',
       consensusMet: true,
       threshold: 4,
-      compositeScore: 25,
+      compositeScore: 80,
       recommendedAction: 'SELL',
     });
 

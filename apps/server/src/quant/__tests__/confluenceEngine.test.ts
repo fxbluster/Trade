@@ -456,13 +456,13 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
       expect(snapFail.recommendedAction).toBe('WAIT');
     });
 
-    it('rebalances CALIBRATED_CONFLUENCE_WEIGHTS to sum to 1.0, lifting MOMENTUM_RVOL & LIQ_CLUSTERS', () => {
+    it('rebalances CALIBRATED_CONFLUENCE_WEIGHTS to sum to 1.0, lifting CVD_ABSORPTION & NATIVE_SMC and reducing LIQ_CLUSTERS & SENTIMENT_MACRO', () => {
       const total = Object.values(CALIBRATED_CONFLUENCE_WEIGHTS).reduce((acc, w) => acc + w, 0);
       expect(total).toBeCloseTo(1.0, 10);
-      expect(CALIBRATED_CONFLUENCE_WEIGHTS.MOMENTUM_RVOL).toBeGreaterThan(0.05);
-      expect(CALIBRATED_CONFLUENCE_WEIGHTS.LIQ_CLUSTERS).toBeGreaterThan(0.075);
-      expect(CALIBRATED_CONFLUENCE_WEIGHTS.NATIVE_SMC).toBeCloseTo(0.05, 4);
-      expect(CALIBRATED_CONFLUENCE_WEIGHTS.SENTIMENT_MACRO).toBeCloseTo(0.02, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.CVD_ABSORPTION).toBeCloseTo(0.23, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.NATIVE_SMC).toBeCloseTo(0.10, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.LIQ_CLUSTERS).toBeCloseTo(0.11, 4);
+      expect(CALIBRATED_CONFLUENCE_WEIGHTS.SENTIMENT_MACRO).toBeCloseTo(0.01, 4);
 
       const snap = engine.evaluate({
         symbol: 'SOLUSDT',
@@ -470,8 +470,12 @@ describe('ConfluenceEngine (Institutional 7-Pillar Confluence Engine)', () => {
         indicators: createMockIndicators(),
         cvd: createMockCvd(),
       });
+      const cvdFactor = snap.telemetryEvent?.activeFactors.find((f) => f.factorId === 'CVD_ABSORPTION');
+      const smcFactor = snap.telemetryEvent?.activeFactors.find((f) => f.factorId === 'NATIVE_SMC');
       const liqFactor = snap.telemetryEvent?.activeFactors.find((f) => f.factorId === 'LIQ_CLUSTERS');
       const momFactor = snap.telemetryEvent?.activeFactors.find((f) => f.factorId === 'MOMENTUM_RVOL');
+      expect(cvdFactor?.effectiveWeight).toBeCloseTo(CALIBRATED_CONFLUENCE_WEIGHTS.CVD_ABSORPTION, 4);
+      expect(smcFactor?.effectiveWeight).toBeCloseTo(CALIBRATED_CONFLUENCE_WEIGHTS.NATIVE_SMC, 4);
       expect(liqFactor?.effectiveWeight).toBeCloseTo(CALIBRATED_CONFLUENCE_WEIGHTS.LIQ_CLUSTERS, 4);
       expect(momFactor?.effectiveWeight).toBeCloseTo(CALIBRATED_CONFLUENCE_WEIGHTS.MOMENTUM_RVOL, 4);
     });

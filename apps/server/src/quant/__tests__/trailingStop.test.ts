@@ -208,20 +208,20 @@ describe('Giveback-Half Trailing Stop Engine [CUJ 1]', () => {
     expect(record.peak_mfe).toBe(4.00);
     expect(record.trailing_stop_active).toBe(1); // Activated!
 
-    // Floor price = peak_price - 0.50 * peak_mfe = 104.00 - 2.00 = 102.00
+    // Floor price = peak_price - 0.35 * peak_mfe = 104.00 - 1.40 = 102.60
     const trailingState = autoPilot.getTrailingStopState('SOLUSDT')!;
     expect(trailingState.active).toBe(true);
-    expect(trailingState.givebackFloorPrice).toBe(102.00);
+    expect(trailingState.givebackFloorPrice).toBe(102.60);
 
-    // 4. Minor pullback to 102.50 (pullback = 1.50 < 2.00 giveback threshold) -> Stays open
-    currentMarkPrice = 102.50;
+    // 4. Minor pullback to 103.00 (pullback = 1.00 < 1.40 giveback threshold) -> Stays open
+    currentMarkPrice = 103.00;
     await autoPilot.onTick('SOLUSDT', currentMarkPrice);
     expect(autoPilot.getState()).toBe('POSITION_OPEN');
     record = tradesRepo.getById(tradeId)!;
     expect(record.status).toBe('OPEN');
 
-    // 5. Deeper pullback to 101.90 (below floor 102.00) -> Triggers Giveback-Half Exit!
-    currentMarkPrice = 101.90;
+    // 5. Deeper pullback to 102.50 (below floor 102.60) -> Triggers Giveback Exit!
+    currentMarkPrice = 102.50;
     await autoPilot.onTick('SOLUSDT', currentMarkPrice);
 
     record = tradesRepo.getById(tradeId)!;
@@ -284,18 +284,18 @@ describe('Giveback-Half Trailing Stop Engine [CUJ 1]', () => {
     expect(record.peak_mfe).toBe(4.00);
     expect(record.trailing_stop_active).toBe(1);
 
-    // Floor price for Short = peak_price + 0.50 * peak_mfe = 96.00 + 2.00 = 98.00
+    // Floor price for Short = peak_price + 0.35 * peak_mfe = 96.00 + 1.40 = 97.40
     const trailingState = autoPilot.getTrailingStopState('SOLUSDT')!;
     expect(trailingState.active).toBe(true);
-    expect(trailingState.givebackFloorPrice).toBe(98.00);
+    expect(trailingState.givebackFloorPrice).toBe(97.40);
 
-    // Minor bounce to 97.50 (rebound = 1.50 < 2.00) -> Stays open
-    currentMarkPrice = 97.50;
+    // Minor bounce to 97.00 (rebound = 1.00 < 1.40) -> Stays open
+    currentMarkPrice = 97.00;
     await autoPilot.onTick('SOLUSDT', currentMarkPrice);
     expect(autoPilot.getState()).toBe('POSITION_OPEN');
 
-    // Rebound crosses 98.00 (reaches 98.10) -> Triggers Giveback-Half Exit!
-    currentMarkPrice = 98.10;
+    // Rebound crosses 97.40 (reaches 97.50) -> Triggers Giveback Exit!
+    currentMarkPrice = 97.50;
     await autoPilot.onTick('SOLUSDT', currentMarkPrice);
 
     record = tradesRepo.getById(tradeId)!;

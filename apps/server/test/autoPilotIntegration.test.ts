@@ -511,4 +511,240 @@ describe('AutoPilotManager Next-Gen Modular Integration', () => {
 
     auditService.dispose();
   });
+
+  describe('ARCH-05..08a Calibration', () => {
+    it('[ARCH-05] enforces 0.60% MFE trailing activation floor and 35% giveback trigger', async () => {
+      const tradesRepo = new TradesRepo(db);
+      const tradeId = 'arch05_trade_1';
+      tradesRepo.insert({
+        id: tradeId,
+        symbol: 'SOLUSDT',
+        broker_mode: 'BINANCE_DEMO',
+        side: 'BUY',
+        status: 'OPEN',
+        entry_price: 100,
+        exit_price: null,
+        quantity: 10,
+        remaining_qty: 10,
+        leverage: 10,
+        margin_usd: 100,
+        stop_loss: 97,
+        tp1: 104,
+        tp2: 108,
+        be_price: 100.15,
+        is_breakeven: 1,
+        peak_price: 100,
+        peak_mfe: 0,
+        trailing_stop_active: 0,
+        client_order_id: 'tos_arch05_ent',
+        client_sl_id: 'tos_arch05_sl',
+        client_tp1_id: 'tos_arch05_tp1',
+        client_tp2_id: null,
+        entry_order_id: 'ent_arch05',
+        sl_algo_id: 'sl_arch05',
+        tp1_algo_id: 'tp1_arch05',
+        tp2_algo_id: null,
+        realized_pnl: 0,
+        fees_usd: 0.2,
+        exit_reason: null,
+        opened_at: Date.now(),
+        closed_at: null,
+      });
+
+      // Use small ATR (0.1) so 0.60% floor (0.60) governs over 2.5 * ATR (0.25)
+      const localAutoPilot = new AutoPilotManager({
+        db,
+        tradeManager,
+        broker,
+        confluenceEngine,
+        getMarkPrice: () => currentMarkPrice,
+        getAtr: () => 0.1,
+        config: {
+          enabled: true,
+          consensusThreshold: 4,
+          marginAllocationPct: 10,
+          leverage: 10,
+          maxDailyTrades: 10,
+        },
+      });
+      (localAutoPilot as any).state = 'POSITION_OPEN';
+      (localAutoPilot as any).openTradeId = tradeId;
+
+      // 0.40% MFE (< 0.60% floor) -> trailing_stop_active stays 0
+      currentMarkPrice = 100.4;
+      await localAutoPilot.onTick('SOLUSDT', 100.4);
+      expect(tradesRepo.getById(tradeId)!.trailing_stop_active).toBe(0);
+
+      // 1.00% MFE (>= 0.60% floor) -> trailing_stop_active becomes 1
+      currentMarkPrice = 101.0;
+      await localAutoPilot.onTick('SOLUSDT', 101.0);
+      expect(tradesRepo.getById(tradeId)!.trailing_stop_active).toBe(1);
+
+      // 30% pullback (100.70, giveback 0.30 < 0.35) -> should NOT close
+      currentMarkPrice = 100.7;
+      await localAutoPilot.onTick('SOLUSDT', 100.7);
+      expect(broker.closePositionCalls.length).toBe(0);
+
+      // 35% pullback (100.65, giveback 0.35 >= 0.35 * 1.0) -> triggers TRAILING_GIVEBACK_HALF
+      const closeSpy = vi.spyOn(tradeManager, 'closePosition');
+      currentMarkPrice = 100.65;
+      await localAutoPilot.onTick('SOLUSDT', 100.65);
+      expect(closeSpy).toHaveBeenCalledWith('SOLUSDT', 'TRAILING_GIVEBACK_HALF');
+    });
+
+    it('[ARCH-06] recalculates SL/TP1/TP2 anchored on Maker Limit Chasing effectivePrice', async () => {
+      broker.account.walletBalance = 1000;
+      broker.account.availableBalance = 800;
+      setConfluenceSnapshot(75, 'BUY');
+
+      // Signal arrives at markPrice = 100, but Maker Limit Chasing fills at effectivePrice = 102
+      vi.spyOn(chasingEngine, 'chase').mockResolvedValue({
+        orderId: 'chase_fill_arch06',
+        status: 'FILLED',
+        fillPrice: 102,
+        fillQty: 7.5,
+        amendCount: 1,
+      });
+
+      const localAutoPilot = new AutoPilotManager({
+        db,
+        tradeManager,
+        broker,
+        confluenceEngine,
+        adaptiveSizingEngine,
+        chasingExecutionEngine: chasingEngine,
+        executionChaseLogsRepo: executionLogsRepo,
+        getMarkPrice: () => 100,
+        getAtr: () => 1.0,
+        config: {
+          enabled: true,
+          consensusThreshold: 4,
+          marginAllocationPct: 10,
+          leverage: 10,
+          maxDailyTrades: 10,
+        },
+      });
+
+      await localAutoPilot.onTick('SOLUSDT', 100);
+
+      const tradesRepo = new TradesRepo(db);
+      const active = tradesRepo.getActivePosition('BINANCE_DEMO', 'SOLUSDT');
+      expect(active).not.toBeNull();
+      expect(active!.entry_price).toBe(102);
+      // Anchored on 102 with ATR=1.0 -> minSlDist=1.5 -> SL=100.50 (not 98.50 from markPrice=100)
+      expect(active!.stop_loss).toBe(100.5);
+      const slAlgo = broker.createAlgoOrderCalls.find((c) => c.type === 'STOP_MARKET');
+      expect(slAlgo?.triggerPrice).toBe(100.5);
+      expect(active!.tp1).toBeGreaterThan(102);
+      expect(active!.tp2).toBeGreaterThan(active!.tp1!);
+    });
+
+    it('[ARCH-07] does not emit FAILED spam when calculated margin < 5.0 USD', async () => {
+      const dispatched: any[] = [];
+      broker.account.walletBalance = 20;
+      broker.account.availableBalance = 15;
+      setConfluenceSnapshot(75, 'BUY');
+
+      const localAutoPilot = new AutoPilotManager({
+        db,
+        tradeManager,
+        broker,
+        confluenceEngine,
+        adaptiveSizingEngine,
+        getMarkPrice: () => 100,
+        getAtr: () => 2.0,
+        onOrderDispatched: (ev) => dispatched.push(ev),
+        config: {
+          enabled: true,
+          consensusThreshold: 4,
+          marginAllocationPct: 10,
+          leverage: 10,
+          maxDailyTrades: 10,
+        },
+      });
+
+      await localAutoPilot.onTick('SOLUSDT', 100);
+      expect(localAutoPilot.getState()).toBe('IDLE');
+      expect(dispatched.filter((e) => e.action === 'FAILED')).toHaveLength(0);
+    });
+
+    it('[ARCH-08a] requires >= 75 opposite conviction during first 180s and >= 70 thereafter', async () => {
+      const tradesRepo = new TradesRepo(db);
+      const tradeId = 'arch08a_trade_1';
+      tradesRepo.insert({
+        id: tradeId,
+        symbol: 'SOLUSDT',
+        broker_mode: 'BINANCE_DEMO',
+        side: 'BUY',
+        status: 'OPEN',
+        entry_price: 100,
+        exit_price: null,
+        quantity: 10,
+        remaining_qty: 10,
+        leverage: 10,
+        margin_usd: 100,
+        stop_loss: 95,
+        tp1: 106,
+        tp2: 112,
+        be_price: 100.15,
+        is_breakeven: 0,
+        peak_price: 100,
+        peak_mfe: 0,
+        trailing_stop_active: 0,
+        client_order_id: 'tos_arch08a_ent',
+        client_sl_id: 'tos_arch08a_sl',
+        client_tp1_id: 'tos_arch08a_tp1',
+        client_tp2_id: null,
+        entry_order_id: 'ent_arch08a',
+        sl_algo_id: 'sl_arch08a',
+        tp1_algo_id: 'tp1_arch08a',
+        tp2_algo_id: null,
+        realized_pnl: 0,
+        fees_usd: 0.2,
+        exit_reason: null,
+        opened_at: Date.now(),
+        closed_at: null,
+      });
+
+      const localAutoPilot = new AutoPilotManager({
+        db,
+        tradeManager,
+        broker,
+        confluenceEngine,
+        getMarkPrice: () => 100,
+        getAtr: () => 2.0,
+        config: {
+          enabled: true,
+          consensusThreshold: 4,
+          marginAllocationPct: 10,
+          leverage: 10,
+          maxDailyTrades: 10,
+          oppositeExitEnabled: true,
+        },
+      });
+      (localAutoPilot as any).state = 'POSITION_OPEN';
+      (localAutoPilot as any).openTradeId = tradeId;
+
+      const closeSpy = vi.spyOn(tradeManager, 'closePosition');
+
+      // Within 180s: opposite conviction 72 (< 75) for 2 ticks -> must NOT close
+      setConfluenceSnapshot(72, 'SELL');
+      await localAutoPilot.onTick('SOLUSDT', 100);
+      await localAutoPilot.onTick('SOLUSDT', 100);
+      expect(closeSpy).not.toHaveBeenCalled();
+
+      // After 180s: opposite conviction 65 (< 70) for 2 ticks -> must NOT close
+      tradesRepo.update(tradeId, { opened_at: Date.now() - 200_000 });
+      setConfluenceSnapshot(65, 'SELL');
+      await localAutoPilot.onTick('SOLUSDT', 100);
+      await localAutoPilot.onTick('SOLUSDT', 100);
+      expect(closeSpy).not.toHaveBeenCalled();
+
+      // After 180s: opposite conviction 70 (>= 70) for 2 ticks -> closes with OPPOSITE_CONFLUENCE_REVERSAL
+      setConfluenceSnapshot(70, 'SELL');
+      await localAutoPilot.onTick('SOLUSDT', 100);
+      await localAutoPilot.onTick('SOLUSDT', 100);
+      expect(closeSpy).toHaveBeenCalledWith('SOLUSDT', 'OPPOSITE_CONFLUENCE_REVERSAL');
+    });
+  });
 });

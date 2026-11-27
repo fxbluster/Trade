@@ -30,18 +30,19 @@ import { EconomicEventGuard, economicEventGuard } from './economicEventGuard.js'
 import type { AlphaRegistry, CompositeFactorEvaluation } from './alphaRegistry.js';
 
 /**
- * Rebalanced 7-pillar Bayesian weights (strictly summing to 1.0):
- * - Lifts high-hit-rate pillars LIQ_CLUSTERS (86.3% hit rate: 11% -> 18%) and MOMENTUM_RVOL (81.4% hit rate: 9% -> 17%)
- * - Reduces low-hit-rate NATIVE_SMC (13.2% hit rate: 18% -> 5%) and tunes ORDER_FLOW_L2 (15% -> 16%) / MACRO_REGIME (25% -> 22%)
+ * [ARCH-08b] Rebalanced 7-pillar Bayesian weights (strictly summing to 1.0)
+ * calibrated from live ETHUSDT scorecard (n=2,493):
+ * - Lifts strongest pillars CVD_ABSORPTION (55.4% hit rate: 20% -> 23%) and NATIVE_SMC (54.0%, best MFE/MAE: 5% -> 10%)
+ * - Reduces weakest pillars LIQ_CLUSTERS (42.1% hit rate: 18% -> 11%) and SENTIMENT_MACRO (42.5% hit rate: 2% -> 1%)
  */
 export const CALIBRATED_CONFLUENCE_WEIGHTS: Record<ConfluencePillarId, number> = {
   MACRO_REGIME: 0.22,
-  NATIVE_SMC: 0.05,
-  CVD_ABSORPTION: 0.20,
+  NATIVE_SMC: 0.10,
+  CVD_ABSORPTION: 0.23,
   ORDER_FLOW_L2: 0.16,
-  LIQ_CLUSTERS: 0.18,
+  LIQ_CLUSTERS: 0.11,
   MOMENTUM_RVOL: 0.17,
-  SENTIMENT_MACRO: 0.02,
+  SENTIMENT_MACRO: 0.01,
 };
 
 export interface ConfluenceMarketData {

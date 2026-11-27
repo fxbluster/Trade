@@ -77,7 +77,7 @@ describe('AutoPilotManager onOrderDispatched hook', () => {
     );
   });
 
-  it('calls onOrderDispatched with FAILED when marginUsd < 5.0', async () => {
+  it('does not emit FAILED spam when marginUsd < 5.0', async () => {
     const db = initializeDatabase(':memory:');
     const onOrderDispatched = vi.fn();
     const manager = new AutoPilotManager({
@@ -102,18 +102,8 @@ describe('AutoPilotManager onOrderDispatched hook', () => {
 
     await (manager as any).executeAutoEntry('SOLUSDT', 'SELL', 100);
 
-    expect(onOrderDispatched).toHaveBeenCalledTimes(1);
-    expect(onOrderDispatched).toHaveBeenCalledWith(
-      expect.objectContaining({
-        symbol: 'SOLUSDT',
-        side: 'SELL',
-        action: 'FAILED',
-        price: 99.9, // 100 * 0.9990
-        marginUsd: 3,
-        leverage: 10,
-        errorMessage: expect.stringContaining('5.0'),
-      })
-    );
+    expect(onOrderDispatched).not.toHaveBeenCalled();
+    expect(manager.getState()).toBe('IDLE');
   });
 
   it('calls onOrderDispatched with FAILED and resets state when openPosition throws', async () => {

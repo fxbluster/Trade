@@ -434,17 +434,18 @@ export class AutoPilotManager {
     const peakPrice = active.peak_price ?? active.entry_price;
     const peakMfe = active.peak_mfe ?? 0;
     const activeFlag = active.trailing_stop_active === 1;
+    const activationMfeThreshold = Math.max(2.5 * atr, active.entry_price * 0.006);
     const floor =
       active.side === 'BUY'
-        ? peakPrice - 0.5 * peakMfe
-        : peakPrice + 0.5 * peakMfe;
+        ? peakPrice - 0.35 * peakMfe
+        : peakPrice + 0.35 * peakMfe;
 
     return {
       enabled: true,
       active: activeFlag,
       peakPrice,
       peakMfe,
-      activationMfeThreshold: 2.0 * atr,
+      activationMfeThreshold,
       givebackFloorPrice: Number(floor.toFixed(2)),
     };
   }
@@ -936,16 +937,6 @@ export class AutoPilotManager {
 
         if (sizing.finalMarginPct <= 0 || sizing.marginUsd < 5.0) {
           this.state = 'IDLE';
-          this.onOrderDispatched?.({
-            symbol,
-            side,
-            action: 'FAILED',
-            price: limitPrice,
-            marginUsd: sizing.marginUsd,
-            leverage,
-            atr,
-            errorMessage: `Calculated margin ${sizing.marginUsd} USD below minimum 5.0 USD threshold or sub-threshold score`,
-          });
           return;
         }
 
@@ -963,16 +954,6 @@ export class AutoPilotManager {
 
         if (marginUsd < 5.0) {
           this.state = 'IDLE';
-          this.onOrderDispatched?.({
-            symbol,
-            side,
-            action: 'FAILED',
-            price: limitPrice,
-            marginUsd,
-            leverage,
-            atr,
-            errorMessage: `Calculated margin ${marginUsd} USD below minimum 5.0 USD threshold`,
-          });
           return;
         }
       }
@@ -981,14 +962,13 @@ export class AutoPilotManager {
       let targetQty = Number((notionalUsd / markPrice).toFixed(4));
       const refPrice = markPrice;
 
-      // [ARCH-01] Dynamic price precision for sub-$10 pairs (e.g. XRPUSDT)
-      const priceDecimals = markPrice < 10 ? 4 : 2;
-      // [ARCH-02] Dead-SL Armor Clamping with minimum 0.30% SL distance so tiny 1m ATRs don't stop-hunt
-      const estLiq = calculateLiquidationPrice(side, refPrice, leverage, 0.005);
-      const minSlDist = Math.max(1.5 * atr, markPrice * 0.003);
-      const rawSl = side === 'BUY' ? markPrice - minSlDist : markPrice + minSlDist;
-      const stopLoss = Number(
-        (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(priceDecimals)
+      const { stopLoss, tp1, tp2 } = this.computeSlTpLevels(
+        refPrice,
+        side,
+        atr,
+        leverage,
+        symbol,
+        snapshot
       );
 
       // Upcomers $250/trade max risk quantity clamp (fail-closed if <= 0) in BINANCE_DEMO
@@ -1058,63 +1038,6 @@ export class AutoPilotManager {
       const serializedFactorTelemetry = JSON.stringify(signalConfirmedEvent.activeFactors);
       const serializedSizingBreakdown = JSON.stringify(sizingTelemetry);
       const noiseBandState = signalConfirmedEvent.noiseBandActive ? 1 : 0;
-
-      // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
-      const risk = Math.abs(refPrice - stopLoss);
-      const clusters = this.getConfluenceForSymbol(symbol).liquidationEngine.projectClusters(refPrice, 100_000_000);
-
-      let clusterTp1: number | null = null;
-      if (snapshot?.macroRegime) {
-        if (side === 'BUY') {
-          const shortClusters = clusters
-            .filter((c) => c.side === 'SHORT_LIQ' && c.price > refPrice)
-            .sort((a, b) => a.price - b.price);
-
-          for (const sc of shortClusters) {
-            const reward = sc.price - refPrice;
-            const distPct = reward / refPrice;
-            const rr = risk > 0 ? reward / risk : 0;
-            if (distPct >= 0.005 && rr >= 1.5) {
-              clusterTp1 = sc.price;
-              break;
-            }
-          }
-        } else {
-          const longClusters = clusters
-            .filter((c) => c.side === 'LONG_LIQ' && c.price < refPrice)
-            .sort((a, b) => b.price - a.price);
-
-          for (const lc of longClusters) {
-            const reward = refPrice - lc.price;
-            const distPct = reward / refPrice;
-            const rr = risk > 0 ? reward / risk : 0;
-            if (distPct >= 0.005 && rr >= 1.5) {
-              clusterTp1 = lc.price;
-              break;
-            }
-          }
-        }
-      }
-
-      let tp1: number;
-      if (clusterTp1 !== null) {
-        tp1 = Number(clusterTp1.toFixed(priceDecimals));
-      } else {
-        const fallbackReward = snapshot?.macroRegime
-          ? Math.max(2.0 * atr, risk * 1.5)
-          : markPrice * 0.025;
-        tp1 = Number(
-          (side === 'BUY' ? refPrice + fallbackReward : refPrice - fallbackReward).toFixed(priceDecimals)
-        );
-      }
-
-      // Dynamic TP2: +4.0x ATR or +5.0% baseline
-      const tp2Reward = snapshot?.macroRegime
-        ? Math.max(4.0 * atr, Math.abs(tp1 - markPrice) * 2)
-        : markPrice * 0.050;
-      const tp2 = Number(
-        (side === 'BUY' ? markPrice + tp2Reward : markPrice - tp2Reward).toFixed(priceDecimals)
-      );
 
       if (this.chasingExecutionEngine) {
         this.state = 'LIMIT_CHASING';
@@ -1373,6 +1296,13 @@ export class AutoPilotManager {
           return;
         }
 
+        // [ARCH-06] Re-anchor SL/TP1/TP2 on actual Maker Limit Chasing fill price (effectivePrice)
+        const {
+          stopLoss: anchoredStopLoss,
+          tp1: anchoredTp1,
+          tp2: anchoredTp2,
+        } = this.computeSlTpLevels(effectivePrice, side, atr, leverage, symbol, snapshot);
+
         const tradeRecord: TradeRecord = {
           id: tradeId,
           symbol,
@@ -1385,9 +1315,9 @@ export class AutoPilotManager {
           remaining_qty: executedQty,
           leverage,
           margin_usd: actualMarginUsd,
-          stop_loss: stopLoss,
-          tp1,
-          tp2,
+          stop_loss: anchoredStopLoss,
+          tp1: anchoredTp1,
+          tp2: anchoredTp2,
           be_price: bePrice,
           is_breakeven: 0,
           peak_price: effectivePrice,
@@ -1420,7 +1350,7 @@ export class AutoPilotManager {
             symbol,
             side: oppositeSide,
             type: 'STOP_MARKET',
-            triggerPrice: stopLoss,
+            triggerPrice: anchoredStopLoss,
             quantity: executedQty,
             clientAlgoId: `tos_${tradeId}_sl`,
             reduceOnly: true,
@@ -1457,7 +1387,7 @@ export class AutoPilotManager {
             symbol,
             side: oppositeSide,
             type: 'TAKE_PROFIT_MARKET',
-            triggerPrice: tp1,
+            triggerPrice: anchoredTp1,
             quantity: Number((executedQty * 0.5).toFixed(4)),
             clientAlgoId: `tos_${tradeId}_tp1`,
             reduceOnly: true,
@@ -1471,7 +1401,7 @@ export class AutoPilotManager {
             symbol,
             side: oppositeSide,
             type: 'TAKE_PROFIT_MARKET',
-            triggerPrice: tp2,
+            triggerPrice: anchoredTp2,
             quantity: Number((executedQty * 0.5).toFixed(4)),
             clientAlgoId: `tos_${tradeId}_tp2`,
             reduceOnly: true,
@@ -1774,10 +1704,9 @@ export class AutoPilotManager {
       }
     }
 
-    // Fee-aware activation threshold: require at least max(2.0x ATR, 3.0x round-trip fees = 0.21%)
-    // so TRAILING_GIVEBACK_HALF never closes below round-trip commission cost.
-    const roundTripFeePerUnit = trade.entry_price * 0.0007;
-    const minTrailActivationMfe = Math.max(2.0 * atr, roundTripFeePerUnit * 3.0);
+    // [ARCH-05] Trailing stop activation floor: require at least max(2.5x ATR, 0.60% MFE)
+    // and tighten giveback trigger to 35% pullback (locking in 65% of peak MFE).
+    const minTrailActivationMfe = Math.max(2.5 * atr, trade.entry_price * 0.006);
 
     if (!trailingActive && peakMfe >= minTrailActivationMfe) {
       trailingActive = true;
@@ -1795,9 +1724,9 @@ export class AutoPilotManager {
       trade.trailing_stop_active = trailingActive ? 1 : 0;
     }
 
-    // Giveback-Half Trigger: Pullback >= 50% MFE once activated above fee-aware floor
+    // Giveback Trigger: Pullback >= 35% MFE once activated above 2.5x ATR / 0.60% floor
     if (trailingActive && peakMfe >= minTrailActivationMfe) {
-      const givebackThreshold = 0.50 * peakMfe;
+      const givebackThreshold = 0.35 * peakMfe;
       const isGivebackTriggered =
         trade.side === 'BUY'
           ? markPrice <= peakPrice - givebackThreshold
@@ -1861,11 +1790,16 @@ export class AutoPilotManager {
     }
 
     // Case 3: Opposite-Confluence Exit (persisting for >= 2 consecutive ticks)
+    // [ARCH-08a] Require >= 70 opposite conviction, or >= 75 during the first 180s after entry.
     if (this.config.oppositeExitEnabled) {
       const snapshot = this.getConfluenceForSymbol(symbol).getSnapshot(symbol);
+      const tradeAgeMs = Date.now() - (trade.opened_at ?? 0);
+      const minOppositeConviction = tradeAgeMs < 180_000 ? 75 : 70;
+      const oppositeConviction = snapshot?.compositeScore ?? 0;
       const isOpposite =
         snapshot &&
         snapshot.consensusMet &&
+        oppositeConviction >= minOppositeConviction &&
         ((trade.side === 'BUY' && snapshot.consensusBias === 'BEARISH') ||
           (trade.side === 'SELL' && snapshot.consensusBias === 'BULLISH'));
 
@@ -1962,5 +1896,86 @@ export class AutoPilotManager {
     this.oppositeConsensusTickCount = 0;
     this.broadcastStatus();
     this.emitStateTransition(this.state);
+  }
+
+  /**
+   * Computes Dead-SL armor clamped stop-loss and dynamic TP1/TP2 anchored on a given price.
+   */
+  private computeSlTpLevels(
+    anchorPrice: number,
+    side: TradeSide,
+    atr: number,
+    leverage: number,
+    symbol: string,
+    snapshot?: ConfluenceSnapshot | null
+  ): { stopLoss: number; tp1: number; tp2: number } {
+    // [ARCH-01] Dynamic price precision for sub-$10 pairs (e.g. XRPUSDT)
+    const priceDecimals = anchorPrice < 10 ? 4 : 2;
+    // [ARCH-02] Dead-SL Armor Clamping with minimum 0.30% SL distance so tiny 1m ATRs don't stop-hunt
+    const estLiq = calculateLiquidationPrice(side, anchorPrice, leverage, 0.005);
+    const minSlDist = Math.max(1.5 * atr, anchorPrice * 0.003);
+    const rawSl = side === 'BUY' ? anchorPrice - minSlDist : anchorPrice + minSlDist;
+    const stopLoss = Number(
+      (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(priceDecimals)
+    );
+
+    // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
+    const risk = Math.abs(anchorPrice - stopLoss);
+    const clusters = this.getConfluenceForSymbol(symbol).liquidationEngine.projectClusters(anchorPrice, 100_000_000);
+
+    let clusterTp1: number | null = null;
+    if (snapshot?.macroRegime) {
+      if (side === 'BUY') {
+        const shortClusters = clusters
+          .filter((c) => c.side === 'SHORT_LIQ' && c.price > anchorPrice)
+          .sort((a, b) => a.price - b.price);
+
+        for (const sc of shortClusters) {
+          const reward = sc.price - anchorPrice;
+          const distPct = reward / anchorPrice;
+          const rr = risk > 0 ? reward / risk : 0;
+          if (distPct >= 0.005 && rr >= 1.5) {
+            clusterTp1 = sc.price;
+            break;
+          }
+        }
+      } else {
+        const longClusters = clusters
+          .filter((c) => c.side === 'LONG_LIQ' && c.price < anchorPrice)
+          .sort((a, b) => b.price - a.price);
+
+        for (const lc of longClusters) {
+          const reward = anchorPrice - lc.price;
+          const distPct = reward / anchorPrice;
+          const rr = risk > 0 ? reward / risk : 0;
+          if (distPct >= 0.005 && rr >= 1.5) {
+            clusterTp1 = lc.price;
+            break;
+          }
+        }
+      }
+    }
+
+    let tp1: number;
+    if (clusterTp1 !== null) {
+      tp1 = Number(clusterTp1.toFixed(priceDecimals));
+    } else {
+      const fallbackReward = snapshot?.macroRegime
+        ? Math.max(2.0 * atr, risk * 1.5)
+        : anchorPrice * 0.025;
+      tp1 = Number(
+        (side === 'BUY' ? anchorPrice + fallbackReward : anchorPrice - fallbackReward).toFixed(priceDecimals)
+      );
+    }
+
+    // Dynamic TP2: +4.0x ATR or +5.0% baseline
+    const tp2Reward = snapshot?.macroRegime
+      ? Math.max(4.0 * atr, Math.abs(tp1 - anchorPrice) * 2)
+      : anchorPrice * 0.050;
+    const tp2 = Number(
+      (side === 'BUY' ? anchorPrice + tp2Reward : anchorPrice - tp2Reward).toFixed(priceDecimals)
+    );
+
+    return { stopLoss, tp1, tp2 };
   }
 }

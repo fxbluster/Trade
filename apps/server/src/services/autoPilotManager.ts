@@ -160,6 +160,8 @@ export class AutoPilotManager {
   private cooldownUntil: number = 0;
   private oppositeConsensusTickCount: number = 0;
   private oppositeConsensusBySymbol: Map<string, number> = new Map();
+  private oppositeFirstSeenAtBySymbol: Map<string, number> = new Map();
+  private readonly oppositePersistenceMs = 30_000;
   private peakPriceByTrade: Map<string, number> = new Map();
   private recordedClosedTradeIds: Set<string> = new Set();
   private isManagingPosition: boolean = false;
@@ -1177,7 +1179,9 @@ export class AutoPilotManager {
             return { status: 'TERMINAL', reason: orderStatus };
           }
 
-          if (orderStatus === 'PARTIALLY_FILLED' && order.executedQty >= targetQty * 0.1) {
+          // [ARCH-12] Align partial-fill acceptance with dust guard: accept >= 30% targetQty or >= $50 margin
+          const partialMarginUsd = order.avgPrice > 0 ? (order.executedQty * order.avgPrice) / leverage : 0;
+          if (orderStatus === 'PARTIALLY_FILLED' && (order.executedQty >= targetQty * 0.30 || partialMarginUsd >= 50)) {
             await this.broker.cancelOrder(symbol, orderId, false).catch(() => {});
             return {
               status: 'FILLED',
@@ -1186,7 +1190,7 @@ export class AutoPilotManager {
             };
           }
 
-          // While PARTIALLY_FILLED (< 10% filled) or NEW, keep chasing so the full targetQty can fill;
+          // While PARTIALLY_FILLED (< 30% filled and < $50 margin) or NEW, keep chasing so the full targetQty can fill;
           // if chase() later hits timeout/maxAmendments/deviation, cancelAndCheckPartialFill adopts executedQty.
           return null;
         };
@@ -1323,16 +1327,19 @@ export class AutoPilotManager {
             ? Number(((executedQty * effectivePrice) / leverage).toFixed(2))
             : marginUsd;
 
-        // [ARCH-04] Micro-fill dust unwind guard: avoid bleeding commissions on tiny partial fills (< $50 margin & < 25% targetQty)
+        // [ARCH-04 / ARCH-10] Micro-fill dust unwind guard: avoid bleeding commissions on tiny partial fills (< $50 margin & < 25% targetQty)
         if (actualMarginUsd < 50 && executedQty < targetQty * 0.25) {
           console.warn(
             `[AutoPilot] Micro-fill dust guard triggered on ${symbol}: actualMarginUsd=$${actualMarginUsd}, executedQty=${executedQty} < 25% of targetQty=${targetQty}. Unwinding cleanly.`
           );
           try {
-            await this.broker.closePosition(symbol, executedQty);
+            // Close full symbol remainder (omit qty) so rounding dust like 0.02 SOL is not left behind
+            await this.broker.closePosition(symbol);
           } catch (unwindErr) {
             console.warn('[AutoPilot] Micro-fill dust unwind failed:', unwindErr);
           }
+          // [ARCH-10] 5-minute per-symbol cooldown (180s base + 120s offset = 300s) to stop rapid dust churn
+          this.lastExitTimeBySymbol.set(symbol.toUpperCase(), Date.now() + 120_000);
           const remaining = this.syncOpenTradesFromDb();
           const nextState: AutoPilotState = remaining.length > 0 ? 'POSITION_OPEN' : 'IDLE';
           this.state = nextState;
@@ -1858,14 +1865,16 @@ export class AutoPilotManager {
       }
     }
 
-    // Case 3: Opposite-Confluence Exit (persisting for >= 2 consecutive ticks)
+    // Case 3: Opposite-Confluence Exit (persisting for >= 2 consecutive ticks AND >= 30s sustained)
     // Minimum 120s hold guard so brief orderbook/tick flickers right after fill don't burn commissions;
     // SL remains active on the exchange during the first 120s.
-    // [ARCH-08a] Require >= 70 opposite conviction, or >= 75 during 120s..180s after entry.
+    // [ARCH-08a / ARCH-11] Require >= 70 opposite conviction (>= 75 during 120s..180s) sustained for >= 30s.
     if (this.config.oppositeExitEnabled) {
-      const tradeAgeMs = Date.now() - (trade.opened_at ?? 0);
+      const nowMs = Date.now();
+      const tradeAgeMs = nowMs - (trade.opened_at ?? 0);
       if (tradeAgeMs < 120_000) {
         this.oppositeConsensusBySymbol.set(symUpper, 0);
+        this.oppositeFirstSeenAtBySymbol.delete(symUpper);
         this.oppositeConsensusTickCount = 0;
         return;
       }
@@ -1882,8 +1891,10 @@ export class AutoPilotManager {
       if (isOpposite) {
         const nextCount = (this.oppositeConsensusBySymbol.get(symUpper) ?? 0) + 1;
         this.oppositeConsensusBySymbol.set(symUpper, nextCount);
+        const firstSeenAt = this.oppositeFirstSeenAtBySymbol.get(symUpper) ?? nowMs;
+        this.oppositeFirstSeenAtBySymbol.set(symUpper, firstSeenAt);
         this.oppositeConsensusTickCount = nextCount;
-        if (nextCount >= 2) {
+        if (nextCount >= 2 && nowMs - firstSeenAt >= this.oppositePersistenceMs) {
           // Trigger emergency early close
           this.state = 'CLOSING';
           this.broadcastStatus();
@@ -1897,6 +1908,7 @@ export class AutoPilotManager {
         }
       } else {
         this.oppositeConsensusBySymbol.set(symUpper, 0);
+        this.oppositeFirstSeenAtBySymbol.delete(symUpper);
         this.oppositeConsensusTickCount = 0;
       }
     }
@@ -1969,6 +1981,7 @@ export class AutoPilotManager {
     this.lastExitTimeBySymbol.set(sym, nowMs);
     this.openTradeIds.delete(sym);
     this.oppositeConsensusBySymbol.delete(sym);
+    this.oppositeFirstSeenAtBySymbol.delete(sym);
     if (trade?.id) {
       this.peakPriceByTrade.delete(trade.id);
     }

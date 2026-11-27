@@ -740,9 +740,10 @@ describe('AutoPilotManager Next-Gen Modular Integration', () => {
       await localAutoPilot.onTick('SOLUSDT', 100);
       expect(closeSpy).not.toHaveBeenCalled();
 
-      // After 180s: opposite conviction 70 (>= 70) for 2 ticks -> closes with OPPOSITE_CONFLUENCE_REVERSAL
+      // After 180s: opposite conviction 70 (>= 70) sustained >= 30s -> closes with OPPOSITE_CONFLUENCE_REVERSAL
       setConfluenceSnapshot(70, 'SELL');
       await localAutoPilot.onTick('SOLUSDT', 100);
+      (localAutoPilot as any).oppositeFirstSeenAtBySymbol.set('SOLUSDT', Date.now() - 35_000);
       await localAutoPilot.onTick('SOLUSDT', 100);
       expect(closeSpy).toHaveBeenCalledWith('SOLUSDT', 'OPPOSITE_CONFLUENCE_REVERSAL');
     });

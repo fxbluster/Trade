@@ -4,6 +4,52 @@ import { formatUsd } from '../lib/formatters';
 import type { JournalSummary, TradeRecord } from '@tradeos/shared';
 import { BookOpen, RefreshCw, TrendingUp, TrendingDown, Award, PieChart, Shield } from 'lucide-react';
 
+interface StrategyMilestone {
+  version: string;
+  timestampMs: number;
+  timeLabel: string;
+  summary: string;
+}
+
+const STRATEGY_MILESTONES: StrategyMilestone[] = [
+  {
+    version: 'v2.6',
+    timestampMs: Date.parse('2026-11-27T11:25:00Z'),
+    timeLabel: '15:25',
+    summary: 'ARCH-10..12: 30% partial fill, 5 dəq dust kilidi, 30s əks siqnal təsdiqi',
+  },
+  {
+    version: 'v2.5',
+    timestampMs: Date.parse('2026-11-27T11:08:37Z'),
+    timeLabel: '15:08',
+    summary: 'İlk 120s əks çıxış bloku + Manual-only Cooldown',
+  },
+  {
+    version: 'v2.4',
+    timestampMs: Date.parse('2026-11-27T10:50:12Z'),
+    timeLabel: '14:50',
+    summary: 'ARCH-09: 3-Slot paralel mövqe (72%+ / 80%+ + risk kilidi)',
+  },
+  {
+    version: 'v2.3',
+    timestampMs: Date.parse('2026-11-27T10:15:00Z'),
+    timeLabel: '14:15',
+    summary: 'ARCH-05..08: Trailing 0.60% MFE / 35% giveback, post-fill SL/TP, sütun çəkiləri',
+  },
+  {
+    version: 'v2.2',
+    timestampMs: Date.parse('2026-11-26T23:12:58Z'),
+    timeLabel: '03:13',
+    summary: 'ARCH-01..04: 4 onluq SL/TP, min 0.30% SL, simmetrik SHORT, dust qoruması',
+  },
+  {
+    version: 'v2.1',
+    timestampMs: Date.parse('2026-11-26T21:28:00Z'),
+    timeLabel: '01:28',
+    summary: 'Fee-aware Trailing Stop (0.21% MFE) + 10x PropFirm sinxronizasiyası',
+  },
+];
+
 export const TradeJournalPanel: React.FC = () => {
   const [journal, setJournal] = useState<JournalSummary | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -165,44 +211,80 @@ export const TradeJournalPanel: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-[#151d2c]/40">
-              {trades.map((t) => {
-                const isLong = t.side === 'BUY';
-                const isWin = t.realized_pnl >= 0;
-                const fee = t.fees_usd || 0;
-                const netPnl = (t.realized_pnl || 0) - fee;
-                const isNetWin = netPnl >= 0;
-                const priceDecimals = t.entry_price < 10 ? 4 : 2;
-                const dateStr = t.closed_at
-                  ? new Date(t.closed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-                  : '--';
+              {(() => {
+                let milestoneIdx = 0;
+                const rows: React.ReactNode[] = [];
+                for (const t of trades) {
+                  const tradeTs = t.opened_at || t.closed_at || 0;
+                  while (
+                    milestoneIdx < STRATEGY_MILESTONES.length &&
+                    STRATEGY_MILESTONES[milestoneIdx].timestampMs >= tradeTs
+                  ) {
+                    const m = STRATEGY_MILESTONES[milestoneIdx];
+                    rows.push(
+                      <tr
+                        key={`milestone-${m.version}`}
+                        data-testid="strategy-milestone-row"
+                        className="bg-[#2962ff]/10 border-y border-[#2962ff]/30"
+                      >
+                        <td colSpan={10} className="py-1.5 px-2 text-[10px]">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center space-x-2">
+                              <span className="px-1.5 py-0.5 rounded bg-[#2962ff]/25 text-[#60a5fa] font-bold border border-[#2962ff]/40">
+                                {m.version}
+                              </span>
+                              <span className="text-[#7d8590]">{m.timeLabel}</span>
+                              <span className="text-[#e6edf3] font-semibold">{m.summary}</span>
+                            </div>
+                            <span className="text-[#60a5fa] font-semibold">
+                              ▲ Yuxarıdakılar bu yeniləmədən sonradır
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                    milestoneIdx++;
+                  }
 
-                return (
-                  <tr key={t.id} className="hover:bg-[#151d2c]/30 transition-colors">
-                    <td className="py-2 px-2 text-[#7d8590]">{dateStr}</td>
-                    <td className="py-2 px-2 font-semibold text-[#e6edf3]">{t.symbol}</td>
-                    <td className="py-2 px-2">
-                      <span className={`font-bold ${isLong ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
-                        {t.side}
-                      </span>
-                    </td>
-                    <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.entry_price.toFixed(priceDecimals)}</td>
-                    <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.exit_price ? t.exit_price.toFixed(priceDecimals) : '--'}</td>
-                    <td className="py-2 px-2 text-[#7d8590] text-right tabular-nums font-mono">{Number(t.quantity.toFixed(4))}</td>
-                    <td className={`py-2 px-2 font-bold text-right tabular-nums font-mono ${isWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
-                      {formatUsd(t.realized_pnl, true)}
-                    </td>
-                    <td className="py-2 px-2 text-[#f0b90b] text-right tabular-nums font-mono">{`-$${fee.toFixed(2)}`}</td>
-                    <td className={`py-2 px-2 font-bold text-right tabular-nums font-mono ${isNetWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
-                      {formatUsd(netPnl, true)}
-                    </td>
-                    <td className="py-2 px-2">
-                      <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#151d2c] text-[#7d8590]">
-                        {t.exit_reason || 'NORMAL'}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
+                  const isLong = t.side === 'BUY';
+                  const isWin = t.realized_pnl >= 0;
+                  const fee = t.fees_usd || 0;
+                  const netPnl = (t.realized_pnl || 0) - fee;
+                  const isNetWin = netPnl >= 0;
+                  const priceDecimals = t.entry_price < 10 ? 4 : 2;
+                  const dateStr = t.closed_at
+                    ? new Date(t.closed_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                    : '--';
+
+                  rows.push(
+                    <tr key={t.id} className="hover:bg-[#151d2c]/30 transition-colors">
+                      <td className="py-2 px-2 text-[#7d8590]">{dateStr}</td>
+                      <td className="py-2 px-2 font-semibold text-[#e6edf3]">{t.symbol}</td>
+                      <td className="py-2 px-2">
+                        <span className={`font-bold ${isLong ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                          {t.side}
+                        </span>
+                      </td>
+                      <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.entry_price.toFixed(priceDecimals)}</td>
+                      <td className="py-2 px-2 text-[#e6edf3] text-right tabular-nums font-mono">{t.exit_price ? t.exit_price.toFixed(priceDecimals) : '--'}</td>
+                      <td className="py-2 px-2 text-[#7d8590] text-right tabular-nums font-mono">{Number(t.quantity.toFixed(4))}</td>
+                      <td className={`py-2 px-2 font-bold text-right tabular-nums font-mono ${isWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                        {formatUsd(t.realized_pnl, true)}
+                      </td>
+                      <td className="py-2 px-2 text-[#f0b90b] text-right tabular-nums font-mono">{`-$${fee.toFixed(2)}`}</td>
+                      <td className={`py-2 px-2 font-bold text-right tabular-nums font-mono ${isNetWin ? 'text-[#0ecb81]' : 'text-[#f6465d]'}`}>
+                        {formatUsd(netPnl, true)}
+                      </td>
+                      <td className="py-2 px-2">
+                        <span className="px-1.5 py-0.5 rounded text-[10px] bg-[#151d2c] text-[#7d8590]">
+                          {t.exit_reason || 'NORMAL'}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                }
+                return rows;
+              })()}
             </tbody>
           </table>
         </div>

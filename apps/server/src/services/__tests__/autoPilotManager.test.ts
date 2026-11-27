@@ -336,12 +336,16 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     const tradesRepo = new TradesRepo(db);
     tradesRepo.update(autoPilot.getOpenTradeId()!, { opened_at: Date.now() - 130_000 });
 
-    // Tick 1 of opposite consensus after 120s -> Position should remain open (monitoring)
+    // Tick 1 & Tick 2 within < 30s persistence window -> Position should remain open
     await autoPilot.onTick('SOLUSDT', 100);
+    await autoPilot.onTick('SOLUSDT', 99.9);
     expect(autoPilot.getState()).toBe('POSITION_OPEN');
     expect(mockBroker.closePositionCalls.length).toBe(0);
 
-    // Tick 2 of opposite consensus -> Must trigger emergency early exit!
+    // Advance sustained opposite signal past 30s persistence window
+    (autoPilot as any).oppositeFirstSeenAtBySymbol.set('SOLUSDT', Date.now() - 35_000);
+
+    // Next opposite tick >= 30s -> Must trigger emergency early exit!
     await autoPilot.onTick('SOLUSDT', 99.8);
     expect(mockBroker.closePositionCalls.length).toBe(1);
     expect(mockBroker.closePositionCalls[0].symbol).toBe('SOLUSDT');

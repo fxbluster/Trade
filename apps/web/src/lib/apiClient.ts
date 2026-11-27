@@ -66,11 +66,27 @@ function notifyPinRequired(): void {
 }
 
 export function getOperatorPin(): string | null {
+  if (typeof localStorage !== 'undefined') {
+    try {
+      const stored = localStorage.getItem(OPERATOR_PIN_STORAGE_KEY);
+      if (stored) {
+        operatorPin = stored;
+        return operatorPin;
+      }
+    } catch {
+      // Ignore storage read errors
+    }
+  }
   if (typeof sessionStorage !== 'undefined') {
     try {
       const stored = sessionStorage.getItem(OPERATOR_PIN_STORAGE_KEY);
       if (stored) {
         operatorPin = stored;
+        if (typeof localStorage !== 'undefined') {
+          try {
+            localStorage.setItem(OPERATOR_PIN_STORAGE_KEY, stored);
+          } catch {}
+        }
         return operatorPin;
       }
     } catch {
@@ -83,6 +99,17 @@ export function getOperatorPin(): string | null {
 export function setOperatorPin(pin: string): void {
   const trimmed = pin.trim();
   operatorPin = trimmed || null;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      if (operatorPin) {
+        localStorage.setItem(OPERATOR_PIN_STORAGE_KEY, operatorPin);
+      } else {
+        localStorage.removeItem(OPERATOR_PIN_STORAGE_KEY);
+      }
+    } catch {
+      // Ignore storage write errors
+    }
+  }
   if (typeof sessionStorage !== 'undefined') {
     try {
       if (operatorPin) {
@@ -99,6 +126,13 @@ export function setOperatorPin(pin: string): void {
 
 export function clearOperatorPin(): void {
   operatorPin = null;
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.removeItem(OPERATOR_PIN_STORAGE_KEY);
+    } catch {
+      // Ignore storage remove errors
+    }
+  }
   if (typeof sessionStorage !== 'undefined') {
     try {
       sessionStorage.removeItem(OPERATOR_PIN_STORAGE_KEY);

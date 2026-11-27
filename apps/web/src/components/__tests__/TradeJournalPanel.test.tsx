@@ -8,6 +8,31 @@ import type { JournalSummary, TradeRecord } from '@tradeos/shared';
 import { TradeJournalPanel } from '../TradeJournalPanel';
 import { apiClient } from '../../lib/apiClient';
 
+const mockReplaySeries = {
+  setData: vi.fn(),
+  createPriceLine: vi.fn(() => ({})),
+  setMarkers: vi.fn(),
+};
+const mockReplayChart = {
+  applyOptions: vi.fn(),
+  addCandlestickSeries: vi.fn(() => mockReplaySeries),
+  addHistogramSeries: vi.fn(() => mockReplaySeries),
+  priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
+  timeScale: vi.fn(() => ({
+    fitContent: vi.fn(),
+    subscribeVisibleLogicalRangeChange: vi.fn(),
+    unsubscribeVisibleLogicalRangeChange: vi.fn(),
+  })),
+  remove: vi.fn(),
+};
+
+vi.mock('lightweight-charts', () => ({
+  createChart: vi.fn(() => mockReplayChart),
+  ColorType: { Solid: 'solid' },
+  LineStyle: { Solid: 0, Dotted: 1, Dashed: 2, LargeDashed: 3 },
+  CrosshairMode: { Normal: 0 },
+}));
+
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function makeTrade(overrides: Partial<TradeRecord> = {}): TradeRecord {
@@ -154,5 +179,58 @@ describe('TradeJournalPanel', () => {
     expect(milestoneRows[0].textContent).toContain('ARCH-10..12');
     expect(milestoneRows[0].textContent).toContain('ARCH-13..15');
     expect(milestoneRows[0].textContent).toContain('ARCH-16..18');
+  });
+
+  it('opens TradeReplayModal with historical candles when clicking trade-replay-btn', async () => {
+    const trade = makeTrade({
+      id: 'replay-1',
+      symbol: 'ETHUSDT',
+      side: 'SELL',
+      entry_price: 1660.66,
+      exit_price: 1670.89,
+      opened_at: 1795792500000,
+      closed_at: 1795793200000,
+    });
+    vi.spyOn(apiClient, 'getJournal').mockResolvedValue({
+      trades: [trade],
+      totalTrades: 1,
+      winRate: 0,
+      profitFactor: 0,
+      maxDrawdown: 0,
+      maxDrawdownUsd: 0,
+      kellyCriterion: 0,
+    });
+    const getKlinesSpy = vi.spyOn(apiClient, 'getKlines').mockResolvedValue([
+      { time: 1795792440, open: 1660, high: 1665, low: 1658, close: 1661, volume: 100 },
+      { time: 1795792500, open: 1661, high: 1672, low: 1660, close: 1671, volume: 150 },
+    ]);
+
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(React.createElement(TradeJournalPanel));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const btn = container.querySelector('[data-testid="trade-replay-btn"]') as HTMLElement;
+    expect(btn).not.toBeNull();
+    await act(async () => {
+      btn.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const modal = container.querySelector('[data-testid="trade-replay-modal"]');
+    expect(modal).not.toBeNull();
+    expect(modal?.textContent).toContain('ETHUSDT');
+    expect(getKlinesSpy).toHaveBeenCalled();
+
+    const closeBtn = container.querySelector('[data-testid="trade-replay-close-btn"]') as HTMLElement;
+    await act(async () => {
+      closeBtn.click();
+    });
+    expect(container.querySelector('[data-testid="trade-replay-modal"]')).toBeNull();
   });
 });

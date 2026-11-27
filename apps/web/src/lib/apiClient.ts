@@ -279,9 +279,13 @@ export const apiClient = {
     symbol: string,
     interval: '5s' | '15s' | '1m' | '5m' | '15m' | '1h' = '1m',
     limit: number = 500,
-    endTimeMs?: number
+    endTimeMs?: number,
+    startTimeMs?: number
   ): Promise<KlineCandle[]> {
     let url = `/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
+    if (typeof startTimeMs === 'number' && Number.isFinite(startTimeMs) && startTimeMs > 0) {
+      url += `&startTime=${Math.floor(startTimeMs)}`;
+    }
     if (typeof endTimeMs === 'number' && Number.isFinite(endTimeMs) && endTimeMs > 0) {
       url += `&endTime=${Math.floor(endTimeMs)}`;
     }

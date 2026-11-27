@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { apiClient } from '../lib/apiClient';
 import { formatUsd } from '../lib/formatters';
 import type { JournalSummary, TradeRecord } from '@tradeos/shared';
-import { BookOpen, RefreshCw, TrendingUp, TrendingDown, Award, PieChart, Shield, ChevronDown, ChevronUp } from 'lucide-react';
+import { BookOpen, RefreshCw, TrendingUp, TrendingDown, Award, PieChart, Shield, ChevronDown, ChevronUp, CandlestickChart } from 'lucide-react';
+import { TradeReplayModal } from './TradeReplayModal';
 
 interface StrategyMilestone {
   version: string;
@@ -67,6 +68,7 @@ export const TradeJournalPanel: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [expandedMilestoneGroups, setExpandedMilestoneGroups] = useState<Record<string, boolean>>({});
+  const [replayTrade, setReplayTrade] = useState<TradeRecord | null>(null);
 
   const fetchJournal = async () => {
     setIsLoading(true);
@@ -221,6 +223,7 @@ export const TradeJournalPanel: React.FC = () => {
                 <th className="py-1.5 px-2 text-right tabular-nums font-mono">Komissiya</th>
                 <th className="py-1.5 px-2 text-right tabular-nums font-mono">Xalis (Net)</th>
                 <th className="py-1.5 px-2">Reason</th>
+                <th className="py-1.5 px-2 text-right">Qrafik</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#151d2c]/40">
@@ -262,7 +265,7 @@ export const TradeJournalPanel: React.FC = () => {
                         }
                         className="bg-[#2962ff]/10 border-y border-[#2962ff]/30 cursor-pointer hover:bg-[#2962ff]/15 transition-colors"
                       >
-                        <td colSpan={10} className="py-1.5 px-2 text-[10px]">
+                        <td colSpan={11} className="py-1.5 px-2 text-[10px]">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="flex items-center space-x-2">
                               <span className="px-1.5 py-0.5 rounded bg-[#2962ff]/25 text-[#60a5fa] font-bold border border-[#2962ff]/40">
@@ -331,6 +334,18 @@ export const TradeJournalPanel: React.FC = () => {
                           {t.exit_reason || 'NORMAL'}
                         </span>
                       </td>
+                      <td className="py-2 px-2 text-right">
+                        <button
+                          type="button"
+                          data-testid="trade-replay-btn"
+                          onClick={() => setReplayTrade(t)}
+                          title="Əməliyyatın tarixi qrafikinə bax"
+                          className="inline-flex items-center space-x-1 px-2 py-0.5 rounded bg-[#2962ff]/15 hover:bg-[#2962ff]/30 text-[#60a5fa] border border-[#2962ff]/30 text-[10px] font-semibold transition-colors"
+                        >
+                          <CandlestickChart className="w-3 h-3" />
+                          <span>Bax</span>
+                        </button>
+                      </td>
                     </tr>
                   );
                 }
@@ -339,6 +354,10 @@ export const TradeJournalPanel: React.FC = () => {
             </tbody>
           </table>
         </div>
+      )}
+
+      {replayTrade && (
+        <TradeReplayModal trade={replayTrade} onClose={() => setReplayTrade(null)} />
       )}
     </div>
   );

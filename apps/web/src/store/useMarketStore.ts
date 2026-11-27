@@ -68,8 +68,8 @@ export interface MarketStoreState {
   wsStatus: WsStatus;
   klines: KlineCandle[];
   klinesSymbol: string | null;
-  klinesInterval: '1m' | '5m' | '15m' | '1h' | null;
-  candleInterval: '1m' | '5m' | '15m' | '1h';
+  klinesInterval: '5s' | '15s' | '1m' | '5m' | '15m' | '1h' | null;
+  candleInterval: '5s' | '15s' | '1m' | '5m' | '15m' | '1h';
   isLoadingKlines: boolean;
   isLoadingOlderKlines: boolean;
   hasMoreOlderKlines: boolean;
@@ -95,7 +95,7 @@ export interface MarketStoreState {
 
   // Actions
   setSymbol: (symbol: string) => Promise<void>;
-  setCandleInterval: (interval: '1m' | '5m' | '15m' | '1h') => Promise<void>;
+  setCandleInterval: (interval: '5s' | '15s' | '1m' | '5m' | '15m' | '1h') => Promise<void>;
   setKlines: (klines: KlineCandle[]) => void;
   applySnapshot: (snapshot: CockpitState) => void;
   applyTick: (tick: TickData) => void;
@@ -241,7 +241,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     }
   },
 
-  setCandleInterval: async (interval: '1m' | '5m' | '15m' | '1h') => {
+  setCandleInterval: async (interval: '5s' | '15s' | '1m' | '5m' | '15m' | '1h') => {
     set({
       candleInterval: interval,
       klines: [],

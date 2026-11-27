@@ -418,4 +418,32 @@ describe('ChartCanvas & Price Line Logic', () => {
     expect(updated.map((k) => k.time)).toEqual([1795100880, 1795100940, 1795101000, 1795101060]);
     getKlinesSpy.mockRestore();
   });
+
+  it('formats sub-minute timestamps with seconds and renders 5s/15s interval buttons cleanly', () => {
+    const withSec = formatLocalTime(1795101045, true);
+    expect(withSec).toMatch(/19:10:45/);
+
+    useMarketStore.setState({
+      symbol: 'ETHUSDT',
+      candleInterval: '5s',
+      klinesSymbol: 'ETHUSDT',
+      klinesInterval: '5s',
+      klines: [
+        { time: 1795101040, open: 1720, high: 1721, low: 1719, close: 1720.5, volume: 10 },
+        { time: 1795101045, open: 1720.5, high: 1722, low: 1720, close: 1721.5, volume: 12 },
+      ],
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ChartCanvas));
+    });
+
+    expect(container.textContent).toContain('5s');
+    expect(container.textContent).toContain('15s');
+    root.unmount();
+    container.remove();
+  });
 });

@@ -24,12 +24,13 @@ export interface ChartCanvasProps {
 /**
  * Formats a UTC epoch seconds timestamp into local Baku (UTC+4) time.
  */
-export function formatLocalTime(timestampSec: number): string {
+export function formatLocalTime(timestampSec: number, withSeconds = false): string {
   const date = new Date(timestampSec * 1000);
   return date.toLocaleTimeString('az-AZ', {
     timeZone: 'Asia/Baku',
     hour: '2-digit',
     minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' } : {}),
     hour12: false,
   });
 }
@@ -51,6 +52,10 @@ export function updateCandleWithTick(
 
 export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const slZoneRef = useRef<HTMLDivElement>(null);
+  const tp1ZoneRef = useRef<HTMLDivElement>(null);
+  const tp2ZoneRef = useRef<HTMLDivElement>(null);
+  const updatePositionZonesRef = useRef<() => void>(() => {});
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
@@ -196,6 +201,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         const pos = activePosRef.current;
         const curSym = useMarketStore.getState().symbol;
         if (!res || !res.priceRange || !pos || pos.status === 'CLOSED' || pos.symbol.toUpperCase() !== curSym.toUpperCase()) return res;
+        const range = chartRef.current?.timeScale().getVisibleLogicalRange?.();
+        const visibleBars = range ? range.to - range.from : 150;
+        if (visibleBars < 60) return res;
         let { minValue, maxValue } = res.priceRange;
         if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return res;
         if (pos.stop_loss && Number.isFinite(pos.stop_loss) && pos.stop_loss > 0) {
@@ -206,7 +214,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           minValue = Math.min(minValue, pos.tp1);
           maxValue = Math.max(maxValue, pos.tp1);
         }
-        if (pos.tp2 && Number.isFinite(pos.tp2) && pos.tp2 > 0) {
+        if (visibleBars >= 110 && pos.tp2 && Number.isFinite(pos.tp2) && pos.tp2 > 0) {
           minValue = Math.min(minValue, pos.tp2);
           maxValue = Math.max(maxValue, pos.tp2);
         }
@@ -238,6 +246,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
     // Direct 60fps tick callback bypassing React component state
     const INTERVAL_SEC: Record<string, number> = {
+      '5s': 5,
+      '15s': 15,
       '1m': 60,
       '5m': 300,
       '15m': 900,
@@ -248,10 +258,55 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       const storeState = useMarketStore.getState();
       if (tick.symbol !== storeState.symbol) return;
 
+      const intervalSec = INTERVAL_SEC[storeState.candleInterval] ?? 60;
       const c = tick.candle;
+      if (intervalSec < 60 && tick.markPrice > 0) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const bucketTime = Math.floor(nowSec / intervalSec) * intervalSec;
+        const prev = lastBarRef.current;
+        if (prev && bucketTime < prev.time) return;
+        const p = tick.markPrice;
+        const nextBar =
+          prev && bucketTime === prev.time
+            ? {
+                time: bucketTime,
+                open: prev.open,
+                high: Math.max(prev.high, p),
+                low: Math.min(prev.low, p),
+                close: p,
+                volume: prev.volume,
+              }
+            : {
+                time: bucketTime,
+                open: p,
+                high: p,
+                low: p,
+                close: p,
+                volume: 0,
+              };
+        lastBarRef.current = nextBar;
+        try {
+          candleSeriesRef.current.update({
+            time: nextBar.time as UTCTimestamp,
+            open: nextBar.open,
+            high: nextBar.high,
+            low: nextBar.low,
+            close: nextBar.close,
+          });
+          volumeSeriesRef.current.update({
+            time: nextBar.time as UTCTimestamp,
+            value: nextBar.volume,
+            color: nextBar.close >= nextBar.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
+          });
+          requestAnimationFrame(() => updatePositionZonesRef.current());
+        } catch (err) {
+          console.warn('Lightweight charts update tick suppressed error:', err);
+        }
+        return;
+      }
+
       if (c && c.time) {
         const liveCandle = tick.markPrice > 0 ? updateCandleWithTick(c, tick.markPrice) : c;
-        const intervalSec = INTERVAL_SEC[storeState.candleInterval] ?? 300;
         const bucketTime = Math.floor(liveCandle.time / intervalSec) * intervalSec;
         const prev = lastBarRef.current;
 
@@ -293,6 +348,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
             value: nextBar.volume,
             color: nextBar.close >= nextBar.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
           });
+          requestAnimationFrame(() => updatePositionZonesRef.current());
         } catch (err) {
           console.warn('Lightweight charts update tick suppressed error:', err);
         }
@@ -317,6 +373,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           if (wasZero) {
             chartRef.current.timeScale().fitContent();
           }
+          requestAnimationFrame(() => updatePositionZonesRef.current());
         }
       });
       resizeObserver.observe(containerRef.current);
@@ -324,6 +381,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
     // Lazy-load older historical candles when scrolling near the left edge
     const handleRangeChange = (range: { from: number; to: number } | null) => {
+      updatePositionZonesRef.current();
       if (range && range.from < 25 && isInitializedRef.current) {
         void useMarketStore.getState().loadOlderKlines();
       }
@@ -358,6 +416,20 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       lastSizeRef.current = { w: 0, h: 0 };
     };
   }, []);
+
+    // Update seconds visibility for sub-minute intervals
+  useEffect(() => {
+    const isSubMin = candleInterval === '5s' || candleInterval === '15s';
+    chartRef.current?.applyOptions({
+      localization: {
+        timeFormatter: (timestamp: number) => formatLocalTime(timestamp, isSubMin),
+      },
+      timeScale: {
+        secondsVisible: isSubMin,
+        tickMarkFormatter: (time: number) => formatLocalTime(time, isSubMin),
+      },
+    });
+  }, [candleInterval]);
 
   // Purge series immediately on symbol or interval switch to prevent cross-symbol/interval candle pollution
   const prevSymbolRef = useRef<string>(symbol);
@@ -485,6 +557,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       earliestBarTimeRef.current = sortedKlines[0].time;
       barCountRef.current = sortedKlines.length;
       isInitializedRef.current = true;
+      requestAnimationFrame(() => updatePositionZonesRef.current());
     } catch (err) {
       console.warn('Lightweight charts setData suppressed error:', err);
     }
@@ -769,6 +842,50 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       }
       (candleSeries as any).setMarkers(markers);
     }
+
+    const updateZones = () => {
+      const series = candleSeriesRef.current as any;
+      const priceToY = typeof series?.priceToCoordinate === 'function'
+        ? series.priceToCoordinate.bind(series)
+        : null;
+
+      const setBand = (el: HTMLDivElement | null, p1?: number | null, p2?: number | null) => {
+        if (!el) return;
+        if (
+          !priceToY ||
+          !activePosition ||
+          activePosition.status === 'CLOSED' ||
+          activePosition.symbol.toUpperCase() !== symbol.toUpperCase() ||
+          !p1 ||
+          !p2 ||
+          p1 <= 0 ||
+          p2 <= 0
+        ) {
+          el.style.display = 'none';
+          return;
+        }
+        const y1 = priceToY(p1);
+        const y2 = priceToY(p2);
+        if (typeof y1 !== 'number' || typeof y2 !== 'number' || !Number.isFinite(y1) || !Number.isFinite(y2)) {
+          el.style.display = 'none';
+          return;
+        }
+        el.style.display = 'block';
+        el.style.top = `${Math.min(y1, y2)}px`;
+        el.style.height = `${Math.max(1, Math.abs(y2 - y1))}px`;
+      };
+
+      setBand(slZoneRef.current, activePosition?.entry_price, activePosition?.stop_loss);
+      setBand(tp1ZoneRef.current, activePosition?.entry_price, activePosition?.tp1);
+      setBand(
+        tp2ZoneRef.current,
+        activePosition?.tp1 && activePosition.tp1 > 0 ? activePosition.tp1 : activePosition?.entry_price,
+        activePosition?.tp2
+      );
+    };
+
+    updatePositionZonesRef.current = updateZones;
+    updateZones();
   }, [
     activePosition,
     orderDraft,
@@ -779,6 +896,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     activeFvgs,
     activeOrderBlocks,
     latestSweep,
+    symbol,
+    klines,
   ]);
 
   return (
@@ -887,11 +1006,11 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
           {/* Interval Selector */}
           <div className="flex items-center space-x-1 bg-[#020305] p-0.5 rounded border border-[#151d2c]">
-            {(['1m', '5m', '15m', '1h'] as const).map((int) => (
+            {(['5s', '15s', '1m', '5m', '15m', '1h'] as const).map((int) => (
               <button
                 key={int}
                 onClick={() => setCandleInterval(int)}
-                className={`px-2.5 py-1 text-xs font-mono rounded transition-colors ${
+                className={`px-2 py-1 text-xs font-mono rounded transition-colors ${
                   candleInterval === int
                     ? 'bg-[#151d2c] text-[#0ecb81] font-bold shadow-sm'
                     : 'text-[#7d8590] hover:text-[#e6edf3]'
@@ -904,8 +1023,15 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         </div>
       </div>
 
-      {/* Lightweight Charts Canvas Root */}
-      <div ref={containerRef} className="flex-1 w-full min-h-0" />
+      {/* Lightweight Charts Canvas Root + SL/TP Zone Shading Overlay */}
+      <div className="relative flex-1 w-full min-h-0">
+        <div className="pointer-events-none absolute inset-0 overflow-hidden z-[1]">
+          <div ref={slZoneRef} style={{ display: 'none' }} className="absolute left-0 right-0 bg-[#f6465d]/10" />
+          <div ref={tp1ZoneRef} style={{ display: 'none' }} className="absolute left-0 right-0 bg-[#0ecb81]/10" />
+          <div ref={tp2ZoneRef} style={{ display: 'none' }} className="absolute left-0 right-0 bg-[#0ecb81]/5" />
+        </div>
+        <div ref={containerRef} className="w-full h-full" />
+      </div>
     </div>
   );
 };

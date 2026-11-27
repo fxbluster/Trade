@@ -851,4 +851,24 @@ describe('TradeOS v2 16 REST Routes', () => {
       }
     }
   });
+
+  it('POST /api/admin/propfirm/purge-test-cycles keeps only the latest cycle renumbered to 1', async () => {
+    const insertCycle = db.prepare(`
+      INSERT INTO propfirm_challenge_cycles (
+        id, cycle_number, status, starting_balance_usd, current_equity_usd, high_water_mark_usd,
+        contractual_trailing_floor_usd, internal_trailing_floor_usd, is_floor_locked, profit_target_usd,
+        net_pnl_usd, net_pnl_pct, max_drawdown_usd, started_at
+      ) VALUES (?, ?, 'ACTIVE', 50000, ?, 50000, 47500, 47600, 0, 52500, ?, ?, 0, ?)
+    `);
+    const now = Date.now();
+    insertCycle.run('c-old-1', 1, 49746.8, -253.2, -0.5, now - 86400000);
+    insertCycle.run('c-latest-2', 2, 49975.0, -25.0, -0.05, now);
+
+    const res = await invokeRoute('POST', '/api/admin/propfirm/purge-test-cycles', {});
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+
+    const rows = db.prepare('SELECT id, cycle_number FROM propfirm_challenge_cycles ORDER BY cycle_number ASC').all() as Array<{ id: string; cycle_number: number }>;
+    expect(rows).toEqual([{ id: 'c-latest-2', cycle_number: 1 }]);
+  });
 });

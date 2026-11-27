@@ -95,6 +95,38 @@ export interface AppContext {
 
 export type RouteOptions = AppContext;
 
+export function aggregateTradesToKlines(
+  trades: Array<{ p: string | number; q: string | number; T: number }>,
+  stepSec: number
+): KlineCandle[] {
+  const buckets = new Map<number, KlineCandle>();
+  const sorted = [...trades].sort((a, b) => Number(a.T) - Number(b.T));
+  for (const t of sorted) {
+    const tsMs = Number(t.T);
+    const price = Number(t.p);
+    const qty = Number(t.q);
+    if (!Number.isFinite(tsMs) || !Number.isFinite(price) || price <= 0) continue;
+    const bucket = Math.floor(tsMs / 1000 / stepSec) * stepSec;
+    const existing = buckets.get(bucket);
+    if (!existing) {
+      buckets.set(bucket, {
+        time: bucket,
+        open: price,
+        high: price,
+        low: price,
+        close: price,
+        volume: Number.isFinite(qty) ? qty : 0,
+      });
+    } else {
+      existing.high = Math.max(existing.high, price);
+      existing.low = Math.min(existing.low, price);
+      existing.close = price;
+      if (Number.isFinite(qty)) existing.volume += qty;
+    }
+  }
+  return Array.from(buckets.values()).sort((a, b) => a.time - b.time);
+}
+
 function sendJson(res: Response, statusCode: number, data: unknown): void {
   res.statusCode = statusCode;
   res.setHeader('Content-Type', 'application/json');
@@ -309,6 +341,19 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       const parsedEnd = query.endTime !== undefined ? Number(query.endTime) : undefined;
       const startTime = typeof parsedStart === 'number' && Number.isFinite(parsedStart) && parsedStart > 0 ? Math.floor(parsedStart) : undefined;
       const endTime = typeof parsedEnd === 'number' && Number.isFinite(parsedEnd) && parsedEnd > 0 ? Math.floor(parsedEnd) : undefined;
+
+      if (interval === '5s' || interval === '15s') {
+        const stepSec = interval === '5s' ? 5 : 15;
+        let aggUrl = `https://fapi.binance.com/fapi/v1/aggTrades?symbol=${encodeURIComponent(symbol)}&limit=1000`;
+        if (endTime !== undefined) aggUrl += `&endTime=${endTime}`;
+        const aggRes = await fetch(aggUrl, { signal: AbortSignal.timeout(5000) });
+        if (!aggRes.ok) {
+          return sendJson(res, aggRes.status, { error: 'Failed to fetch aggTrades from exchange' });
+        }
+        const rawTrades = (await aggRes.json()) as Array<{ p: string | number; q: string | number; T: number }>;
+        const klines = aggregateTradesToKlines(Array.isArray(rawTrades) ? rawTrades : [], stepSec);
+        return sendJson(res, 200, { symbol, interval, klines });
+      }
 
       if (ctx.getKlines) {
         const klines = await ctx.getKlines(symbol, interval, limit, startTime, endTime);
@@ -998,7 +1043,8 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
         'decision_logs',
         'execution_chase_logs',
         'pillar_telemetry',
-        'propfirm_cycles',
+        'propfirm_daily_snapshots',
+        'propfirm_challenge_cycles',
       ];
       for (const tbl of tables) {
         try {
@@ -1042,6 +1088,35 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       sendJson(res, 500, { error: `Clean slate failed: ${msg}` });
+    }
+  });
+
+  // 28. POST /api/admin/propfirm/purge-test-cycles — Keep only latest cycle renumbered to #1
+  app.post('/api/admin/propfirm/purge-test-cycles', async (_req: Request, res: Response) => {
+    try {
+      const latest = ctx.db
+        .prepare('SELECT id FROM propfirm_challenge_cycles ORDER BY cycle_number DESC LIMIT 1')
+        .get() as { id: string } | undefined;
+
+      if (latest?.id) {
+        ctx.db.prepare('DELETE FROM propfirm_daily_snapshots WHERE cycle_id != ?').run(latest.id);
+        ctx.db.prepare('DELETE FROM propfirm_challenge_cycles WHERE id != ?').run(latest.id);
+        ctx.db.prepare('UPDATE propfirm_challenge_cycles SET cycle_number = 1 WHERE id = ?').run(latest.id);
+      }
+
+      let propFirmStatus = null;
+      if (ctx.propFirmRiskGuard) {
+        const walletBalance = await resolvePropFirmWalletBalance(ctx);
+        propFirmStatus = ctx.propFirmRiskGuard.getStatus(walletBalance);
+      }
+
+      sendJson(res, 200, {
+        ok: true,
+        propFirmStatus,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: `Purge test cycles failed: ${msg}` });
     }
   });
 

@@ -41,6 +41,8 @@ export const ActivePositionPanel: React.FC = () => {
     }
   };
 
+  const fmtPrice = (p: number) => p.toFixed(p < 10 ? 4 : 2);
+
   const renderOtherPositionsStrip = () => {
     if (otherTrackedPositions.length === 0 && untrackedExchangePositions.length === 0) {
       return null;
@@ -52,6 +54,10 @@ export const ActivePositionPanel: React.FC = () => {
             (ep) => ep.symbol.toUpperCase() === pos.symbol.toUpperCase()
           );
           const livePnl = exPos?.unRealizedProfit;
+          const curMark = exPos && exPos.markPrice > 0 ? exPos.markPrice : 0;
+          const isFavorable =
+            curMark > 0 &&
+            (pos.side === 'BUY' ? curMark >= pos.entry_price : curMark <= pos.entry_price);
           return (
             <div
               key={pos.id}
@@ -78,7 +84,21 @@ export const ActivePositionPanel: React.FC = () => {
                   </span>
                 )}
                 <span className="text-[#8b949e]">
-                  Qty: {pos.remaining_qty} @ {pos.entry_price.toFixed(pos.entry_price < 10 ? 4 : 2)}
+                  Marja: <span className="text-[#e6edf3]">${pos.margin_usd.toFixed(2)}</span>
+                </span>
+                <span className="text-[#8b949e]">
+                  Giriş: <span className="text-[#e6edf3]">${fmtPrice(pos.entry_price)}</span>
+                </span>
+                {curMark > 0 && (
+                  <span className="text-[#8b949e]">
+                    Cari:{' '}
+                    <span className={isFavorable ? 'text-[#0ecb81]' : 'text-[#f6465d]'}>
+                      ${fmtPrice(curMark)}
+                    </span>
+                  </span>
+                )}
+                <span className="text-[#7d8590]">
+                  Qty: {pos.remaining_qty}
                 </span>
               </div>
               <button
@@ -93,6 +113,8 @@ export const ActivePositionPanel: React.FC = () => {
 
         {untrackedExchangePositions.map((ep) => {
           const isLong = ep.positionAmt > 0;
+          const estMargin = (Math.abs(ep.positionAmt) * ep.entryPrice) / Math.max(1, ep.leverage);
+          const isFavorable = isLong ? ep.markPrice >= ep.entryPrice : ep.markPrice <= ep.entryPrice;
           return (
             <div
               key={ep.symbol}
@@ -112,6 +134,18 @@ export const ActivePositionPanel: React.FC = () => {
                 </span>
                 <span className={ep.unRealizedProfit >= 0 ? 'text-[#0ecb81]' : 'text-[#f6465d]'}>
                   {ep.unRealizedProfit >= 0 ? '+' : ''}${ep.unRealizedProfit.toFixed(2)}
+                </span>
+                <span className="text-[#8b949e]">
+                  Marja: <span className="text-[#e6edf3]">${estMargin.toFixed(2)}</span>
+                </span>
+                <span className="text-[#8b949e]">
+                  Giriş: <span className="text-[#e6edf3]">${fmtPrice(ep.entryPrice)}</span>
+                </span>
+                <span className="text-[#8b949e]">
+                  Cari:{' '}
+                  <span className={isFavorable ? 'text-[#0ecb81]' : 'text-[#f6465d]'}>
+                    ${fmtPrice(ep.markPrice)}
+                  </span>
                 </span>
               </div>
               <button

@@ -277,7 +277,7 @@ export const apiClient = {
 
   async getKlines(
     symbol: string,
-    interval: '1m' | '5m' | '15m' | '1h' = '1m',
+    interval: '5s' | '15s' | '1m' | '5m' | '15m' | '1h' = '1m',
     limit: number = 500,
     endTimeMs?: number
   ): Promise<KlineCandle[]> {

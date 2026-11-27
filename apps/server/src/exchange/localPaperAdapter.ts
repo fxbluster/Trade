@@ -256,6 +256,7 @@ export class LocalPaperAdapter implements BrokerAdapter {
     const { balance, currency } = this.getBalanceRecord();
 
     let totalUnrealizedPnl = 0;
+    let totalUsedMargin = 0;
     for (const [sym, pos] of this.positions.entries()) {
       const currentPrice = this.markPrices.get(sym) || pos.entryPrice;
       const pnl =
@@ -263,13 +264,15 @@ export class LocalPaperAdapter implements BrokerAdapter {
           ? (currentPrice - pos.entryPrice) * pos.quantity
           : (pos.entryPrice - currentPrice) * pos.quantity;
       totalUnrealizedPnl += pnl;
+      totalUsedMargin += pos.marginUsd || 0;
     }
 
     const equity = balance + totalUnrealizedPnl;
+    const availableBalance = Math.max(0, equity - totalUsedMargin);
     return {
       walletBalance: balance,
       equity: Number(equity.toFixed(4)),
-      availableBalance: balance,
+      availableBalance: Number(availableBalance.toFixed(4)),
       unrealizedPnl: Number(totalUnrealizedPnl.toFixed(4)),
       currency,
     };

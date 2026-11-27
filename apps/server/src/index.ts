@@ -621,24 +621,29 @@ export async function bootstrapServer(): Promise<{
   const lastTickTelemetryAt = new Map<string, number>();
 
   // 9. Wire Stream Events to TradeManager, CvdEngine, and WsHub
+  const lastPriceMap = new Map<string, number>();
   streamsManager.onMarkPrice((event) => {
     const sym = event.symbol.toUpperCase();
     if (!watchlistSet.has(sym) && sym !== activeSymbol) return;
-    markPriceMap.set(sym, event.markPrice);
+    const effectivePrice =
+      activeBroker.mode === 'LOCAL_PAPER'
+        ? (lastPriceMap.get(sym) || event.markPrice)
+        : event.markPrice;
+    markPriceMap.set(sym, effectivePrice);
     fundingRateMap.set(sym, {
       rate: event.fundingRate,
       nextTime: event.nextFundingTime,
     });
 
     if (activeBroker.mode === 'LOCAL_PAPER' && 'onMarkPriceTick' in activeBroker) {
-      (activeBroker as any).onMarkPriceTick(sym, event.markPrice);
+      (activeBroker as any).onMarkPriceTick(sym, effectivePrice);
     }
 
     // Throttled tick broadcast (<= 4Hz)
     const candles = candleHistoryMap.get(sym) || [];
     let latestCandle = candles[candles.length - 1];
     if (latestCandle) {
-      const p = event.markPrice;
+      const p = effectivePrice;
       latestCandle = {
         ...latestCandle,
         high: Math.max(latestCandle.high, p),
@@ -649,10 +654,10 @@ export async function bootstrapServer(): Promise<{
     } else {
       latestCandle = {
         time: Math.floor(event.time / 1000),
-        open: event.markPrice,
-        high: event.markPrice,
-        low: event.markPrice,
-        close: event.markPrice,
+        open: effectivePrice,
+        high: effectivePrice,
+        low: effectivePrice,
+        close: effectivePrice,
         volume: 0,
       };
       candleHistoryMap.set(sym, [latestCandle]);
@@ -667,13 +672,13 @@ export async function bootstrapServer(): Promise<{
       if (activePos && activePos.remaining_qty > 0) {
         uPnl =
           activePos.side === 'BUY'
-            ? (event.markPrice - activePos.entry_price) * activePos.remaining_qty
-            : (activePos.entry_price - event.markPrice) * activePos.remaining_qty;
+            ? (effectivePrice - activePos.entry_price) * activePos.remaining_qty
+            : (activePos.entry_price - effectivePrice) * activePos.remaining_qty;
       }
 
       createdWsHub.broadcastTick({
         symbol: sym,
-        markPrice: event.markPrice,
+        markPrice: effectivePrice,
         candle: latestCandle,
         cvd: cvdSnap.cvd,
         unrealizedPnl: Number(uPnl.toFixed(4)),
@@ -882,6 +887,13 @@ export async function bootstrapServer(): Promise<{
   streamsManager.onAggTrade((event) => {
     const sym = event.symbol.toUpperCase();
     if (!watchlistSet.has(sym) && sym !== activeSymbol) return;
+    if (event.price > 0) {
+      lastPriceMap.set(sym, event.price);
+      if (activeBroker.mode === 'LOCAL_PAPER' && 'onMarkPriceTick' in activeBroker) {
+        markPriceMap.set(sym, event.price);
+        (activeBroker as any).onMarkPriceTick(sym, event.price);
+      }
+    }
     const ctx = symbolQuantRegistry.getOrCreate(sym);
     ctx.cvdEngine.processTrade({
       p: event.price,

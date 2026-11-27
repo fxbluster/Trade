@@ -1870,10 +1870,17 @@ export class AutoPilotManager {
     }
 
     // Case 3: Opposite-Confluence Exit (persisting for >= 2 consecutive ticks)
-    // [ARCH-08a] Require >= 70 opposite conviction, or >= 75 during the first 180s after entry.
+    // Minimum 120s hold guard so brief orderbook/tick flickers right after fill don't burn commissions;
+    // SL remains active on the exchange during the first 120s.
+    // [ARCH-08a] Require >= 70 opposite conviction, or >= 75 during 120s..180s after entry.
     if (this.config.oppositeExitEnabled) {
-      const snapshot = this.getConfluenceForSymbol(symbol).getSnapshot(symbol);
       const tradeAgeMs = Date.now() - (trade.opened_at ?? 0);
+      if (tradeAgeMs < 120_000) {
+        this.oppositeConsensusBySymbol.set(symUpper, 0);
+        this.oppositeConsensusTickCount = 0;
+        return;
+      }
+      const snapshot = this.getConfluenceForSymbol(symbol).getSnapshot(symbol);
       const minOppositeConviction = tradeAgeMs < 180_000 ? 75 : 70;
       const oppositeConviction = snapshot?.compositeScore ?? 0;
       const isOpposite =

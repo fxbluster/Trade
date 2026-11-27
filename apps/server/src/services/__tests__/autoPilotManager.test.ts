@@ -326,7 +326,17 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
       recommendedAction: 'SELL',
     });
 
-    // Tick 1 of opposite consensus -> Position should remain open (monitoring)
+    // Within first 120s: opposite ticks must NOT close the position (minimum hold guard)
+    await autoPilot.onTick('SOLUSDT', 100);
+    await autoPilot.onTick('SOLUSDT', 99.9);
+    expect(autoPilot.getState()).toBe('POSITION_OPEN');
+    expect(mockBroker.closePositionCalls.length).toBe(0);
+
+    // Advance past 120s hold guard
+    const tradesRepo = new TradesRepo(db);
+    tradesRepo.update(autoPilot.getOpenTradeId()!, { opened_at: Date.now() - 130_000 });
+
+    // Tick 1 of opposite consensus after 120s -> Position should remain open (monitoring)
     await autoPilot.onTick('SOLUSDT', 100);
     expect(autoPilot.getState()).toBe('POSITION_OPEN');
     expect(mockBroker.closePositionCalls.length).toBe(0);

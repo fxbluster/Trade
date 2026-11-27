@@ -14,6 +14,12 @@ interface StrategyMilestone {
 
 const STRATEGY_MILESTONES: StrategyMilestone[] = [
   {
+    version: 'v2.9',
+    timestampMs: Date.parse('2026-11-27T20:12:48Z'),
+    timeLabel: '00:13',
+    summary: 'DEF-01..06: 2-tick GTX offset + IOC fallback, 1-pozisiya kilidi, komissiya-şüurlu BE + ATR TP1, MGS işarə/IR/XRP scaling, 90s PnL cache',
+  },
+  {
     version: 'v2.8',
     timestampMs: Date.parse('2026-11-27T14:40:00Z'),
     timeLabel: '18:40',

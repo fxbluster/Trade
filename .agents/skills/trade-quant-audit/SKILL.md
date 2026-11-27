@@ -90,6 +90,7 @@ Analizin sonunda istifadəçiyə texniki icra üçün bu cür aydın rapor ver:
   1. [ARCH-XX]: Dinamik marja bölgüsü, yeni faktorların əlavəsi və ya icra optimizasiyası.
 * **Texniki Mühəndisə / Swarm-a Tapşırıqlar:**
   - Konkret fayl və xidmətlər üzrə təlimatlar.
+  - **Məcburi (Yalnız Məntiq Dəyişiklikləri Üçün):** Audit nəticəsində treyding/strategiya/icra/risk məntiqi dəyişib deploy olunanda `apps/web/src/components/TradeJournalPanel.tsx` içindəki `STRATEGY_MILESTONES` siyahısına yeni versiya (`v2.X`) əlavə edilməlidir (UI/düymə dəyişiklikləri yazılmır).
 ```
 
 ---

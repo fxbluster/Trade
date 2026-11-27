@@ -168,7 +168,7 @@ describe('TradeJournalPanel', () => {
     const milestoneRows = container.querySelectorAll('[data-testid="strategy-milestone-row"]');
     expect(milestoneRows.length).toBe(1);
     expect(milestoneRows[0].textContent).toContain('v2.1–v2.9');
-    expect(milestoneRows[0].textContent).toContain('9 sistem dəyişikliyi');
+    expect(milestoneRows[0].textContent).toContain('10 sistem dəyişikliyi');
     expect(milestoneRows[0].textContent).not.toContain('Fee-aware Trailing Stop');
 
     await act(async () => {

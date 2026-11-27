@@ -20,6 +20,12 @@ const STRATEGY_MILESTONES: StrategyMilestone[] = [
     summary: 'DEF-01..06: 2-tick GTX offset + IOC fallback, 1-pozisiya kilidi, komissiya-şüurlu BE + ATR TP1, MGS işarə/IR/XRP scaling, 90s PnL cache',
   },
   {
+    version: 'v2.8.1',
+    timestampMs: Date.parse('2026-11-27T15:55:00Z'),
+    timeLabel: '19:55',
+    summary: 'LOCAL_PAPER Mainnet parity (0.02% GTX, -5022, OCO SL/TP) + aggTrade Last Price SL/TP & Watchdog sinxronizasiyası',
+  },
+  {
     version: 'v2.8',
     timestampMs: Date.parse('2026-11-27T14:40:00Z'),
     timeLabel: '18:40',

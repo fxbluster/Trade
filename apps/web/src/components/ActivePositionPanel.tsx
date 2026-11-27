@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useMarketStore } from '../store/useMarketStore';
 import { useUiStore } from '../store/useUiStore';
 import { apiClient } from '../lib/apiClient';
@@ -25,6 +25,15 @@ export const ActivePositionPanel: React.FC = () => {
     (p) => p.symbol.toUpperCase() !== symbol.toUpperCase() && p.status !== 'CLOSED'
   );
   const untrackedExchangePositions = exchangePositions.filter((ep) => !ep.tracked);
+  const hasOtherPositions = otherTrackedPositions.length > 0 || untrackedExchangePositions.length > 0;
+
+  useEffect(() => {
+    if (!hasOtherPositions) return;
+    const id = setInterval(() => {
+      void useMarketStore.getState().refreshState();
+    }, 2000);
+    return () => clearInterval(id);
+  }, [hasOtherPositions]);
 
   const handleCloseUntracked = async (sym: string) => {
     if (!window.confirm(`Close untracked ${sym} position on exchange at Market?`)) return;

@@ -169,7 +169,7 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   brokerMode: 'BINANCE_DEMO',
   wsStatus: 'CONNECTING',
   klines: [],
-  candleInterval: '5m',
+  candleInterval: '1m',
   isLoadingKlines: false,
 
   // New Confluence & Auto-Pilot state

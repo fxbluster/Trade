@@ -668,4 +668,69 @@ describe('TradeManager — Atomic Orchestration & Fail-Closed Execution', () => 
     });
     expect(tradesRepo.getActivePositionCached('BINANCE_DEMO', 'ETHUSDT')).toBeNull();
   });
+
+  // --------------------------------------------------------------------------
+  // Test 10: PropFirmRiskGuard parity in LOCAL_PAPER mode
+  // --------------------------------------------------------------------------
+  it('enforces PropFirmRiskGuard 1-position limit and daily halt in LOCAL_PAPER mode', async () => {
+    const paperBroker = new MockBrokerAdapter();
+    (paperBroker as unknown as { mode: BrokerMode }).mode = 'LOCAL_PAPER';
+    paperBroker.account = {
+      walletBalance: 5_000,
+      equity: 5_000,
+      availableBalance: 5_000,
+      unrealizedPnl: 0,
+      currency: 'USDT',
+    };
+
+    const propFirmRepo = new PropFirmRepo(db);
+    const guard = new PropFirmRiskGuard(propFirmRepo);
+    const paperTm = new TradeManager({
+      db,
+      broker: paperBroker,
+      brokerMode: 'LOCAL_PAPER',
+      getMarkPrice: () => 100,
+      propFirmRiskGuard: guard,
+    });
+
+    const t1 = await paperTm.openPosition({
+      symbol: 'SOLUSDT',
+      side: 'BUY',
+      orderType: 'MARKET',
+      marginUsd: 200,
+      leverage: 10,
+      stopLoss: 95,
+    });
+    expect(t1.broker_mode).toBe('LOCAL_PAPER');
+
+    await expect(
+      paperTm.openPosition({
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'MARKET',
+        marginUsd: 200,
+        leverage: 10,
+        stopLoss: 95,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: 'ERR_POSITION_EXISTS' });
+
+    await paperTm.closePosition('SOLUSDT', 'MANUAL_CLOSE');
+    guard.evaluateLiveEquity({
+      realizedCyclePnlUsd: -130,
+      unrealizedPnlUsd: 0,
+      liveWalletBalanceUsd: 5_000,
+      hasOpenPosition: false,
+    });
+
+    await expect(
+      paperTm.openPosition({
+        symbol: 'SOLUSDT',
+        side: 'BUY',
+        orderType: 'MARKET',
+        marginUsd: 200,
+        leverage: 10,
+        stopLoss: 95,
+      })
+    ).rejects.toMatchObject({ statusCode: 403, code: 'UPCOMERS_DAILY_HALT' });
+  });
 });

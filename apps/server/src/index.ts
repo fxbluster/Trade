@@ -24,6 +24,7 @@ import {
   initializeDatabase,
   TradesRepo,
   RiskStateRepo,
+  SettingsRepo,
   DecisionLogsRepo,
   PillarTelemetryRepo,
   FactorTelemetryRepo,
@@ -35,7 +36,8 @@ import { DecisionAuditService, computeSpearmanIC } from './services/decisionAudi
 import { PillarAttributionService } from './services/pillarAttributionService.js';
 import { BinanceClient } from './exchange/binanceClient.js';
 import { BinanceStreamsManager } from './exchange/binanceStreams.js';
-import { BrokerFactory } from './exchange/broker.js';
+import { BrokerFactory, type BrokerAdapter } from './exchange/broker.js';
+import { LocalPaperAdapter, type PaperAlgoTriggerEvent } from './exchange/localPaperAdapter.js';
 import { CvdEngine } from './quant/cvd.js';
 import { calculateIndicators } from './quant/indicators.js';
 import { generateMentorBrief } from './quant/sokratMentor.js';
@@ -155,7 +157,20 @@ export async function bootstrapServer(): Promise<{
     logger.error({ err }, 'Failed to recover downtime pillar gaps');
   });
 
-  const broker = BrokerFactory.getAdapter('BINANCE_DEMO', { client, db });
+  const settingsRepo = new SettingsRepo(db);
+  const persistedBrokerMode = settingsRepo.get<{ mode?: BrokerMode } | BrokerMode>('broker_mode');
+  const savedBrokerMode =
+    typeof persistedBrokerMode === 'string'
+      ? persistedBrokerMode
+      : persistedBrokerMode?.mode;
+  const initialBrokerMode: BrokerMode =
+    savedBrokerMode === 'LOCAL_PAPER' || savedBrokerMode === 'BINANCE_DEMO'
+      ? savedBrokerMode
+      : process.env.BROKER_MODE === 'LOCAL_PAPER'
+      ? 'LOCAL_PAPER'
+      : 'BINANCE_DEMO';
+
+  const broker = BrokerFactory.getAdapter(initialBrokerMode, { client, db });
   let activeBroker = broker;
 
   // Remove legacy 2026-11-26 orphan backfill rows if present so clean-slate resets stay clean
@@ -517,6 +532,65 @@ export async function bootstrapServer(): Promise<{
   });
   autoPilotManagerRef = autoPilotManager;
 
+  const wirePaperAdapterCallbacks = (adapter: BrokerAdapter): void => {
+    if (
+      adapter.mode !== 'LOCAL_PAPER' ||
+      typeof (adapter as LocalPaperAdapter).setOnAlgoTrigger !== 'function'
+    ) {
+      return;
+    }
+
+    (adapter as LocalPaperAdapter).setOnAlgoTrigger(async (ev: PaperAlgoTriggerEvent) => {
+      const activeTrade = tradesRepo.getActivePositionCached('LOCAL_PAPER', ev.symbol);
+      let leg: 'sl' | 'tp1' | 'tp2' = 'sl';
+      if (ev.orderType === 'TAKE_PROFIT_MARKET') {
+        if (activeTrade?.tp2_algo_id === ev.algoId || ev.clientAlgoId?.endsWith('_tp2')) {
+          leg = 'tp2';
+        } else {
+          leg = 'tp1';
+        }
+      }
+
+      const clientOrderId =
+        ev.clientAlgoId || (activeTrade ? `tos_${activeTrade.id}_${leg}` : '');
+
+      if (typeof (tradeManager as any).processOcoFill === 'function') {
+        await (tradeManager as any).processOcoFill({
+          symbol: ev.symbol,
+          leg,
+          algoId: ev.algoId,
+          clientAlgoId: clientOrderId,
+          side: ev.side,
+          fillPrice: ev.fillPrice,
+          executedQty: ev.executedQty,
+        });
+      } else {
+        await tradeManager.handleOrderTradeUpdate({
+          symbol: ev.symbol,
+          clientOrderId,
+          orderId: ev.algoId,
+          algoId: ev.algoId,
+          tradeId: `paper_algo_${ev.algoId}_${Date.now()}`,
+          lastFilledPrice: ev.fillPrice,
+          lastFilledQty: ev.executedQty,
+          side: ev.side,
+          commission: Number((ev.fillPrice * ev.executedQty * 0.0005).toFixed(4)),
+          commissionAsset: 'USDT',
+          tradeTime: Date.now(),
+        });
+      }
+
+      if (activeTrade) {
+        const updatedTrade = tradesRepo.getById(activeTrade.id);
+        if (updatedTrade && updatedTrade.status === 'CLOSED') {
+          (autoPilotManager as any).handlePositionClosed?.(updatedTrade);
+        }
+      }
+    });
+  };
+
+  wirePaperAdapterCallbacks(activeBroker);
+
   if (process.env.AUTOPILOT_AUTO_START === 'true') {
     const currentCfg = autoPilotManager.getConfig();
     autoPilotManager.updateConfig({
@@ -848,6 +922,7 @@ export async function bootstrapServer(): Promise<{
     },
     onBrokerModeChange: (newAdapter) => {
       activeBroker = newAdapter;
+      wirePaperAdapterCallbacks(newAdapter);
       tradesRepo.invalidateActiveCache();
       autoPilotManager.setBroker(newAdapter);
       newAdapter

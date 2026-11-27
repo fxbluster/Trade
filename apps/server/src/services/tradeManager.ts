@@ -401,8 +401,7 @@ export class TradeManager {
   public async openPosition(req: OpenOrderRequest): Promise<TradeRecord> {
     const runOpen = () =>
       this.withSymbolMutex(req.symbol, async () => {
-        const isPropFirmDemoActive =
-          Boolean(this.propFirmRiskGuard) && this.brokerMode === 'BINANCE_DEMO';
+        const isPropFirmDemoActive = Boolean(this.propFirmRiskGuard);
 
         if (isPropFirmDemoActive && this.propFirmRiskGuard) {
           const guardCheck = this.propFirmRiskGuard.canOpenTrade();
@@ -739,7 +738,7 @@ export class TradeManager {
         return tradeRecord;
       });
 
-    if (this.propFirmRiskGuard && this.brokerMode === 'BINANCE_DEMO') {
+    if (this.propFirmRiskGuard) {
       return this.withGlobalPreTradeMutex(runOpen);
     }
     return runOpen();
@@ -830,7 +829,7 @@ export class TradeManager {
           };
 
           const riskBenchmarkBalance =
-            this.propFirmRiskGuard && this.brokerMode === 'BINANCE_DEMO'
+            this.propFirmRiskGuard
               ? Math.max(account.walletBalance, this.propFirmRiskGuard.getConfig().accountSizeUsd)
               : account.walletBalance;
 

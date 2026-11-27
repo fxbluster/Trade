@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import polka, { type Request, type Response } from 'polka';
-import { initializeDatabase, TradesRepo } from '../../db/sqlite.js';
+import { initializeDatabase, TradesRepo, SettingsRepo } from '../../db/sqlite.js';
 import { TradeManager } from '../../services/tradeManager.js';
 import { registerRoutes, type AppContext } from '../routes.js';
 import { SESSION_TOKEN, PORT } from '../../config.js';
@@ -1036,5 +1036,68 @@ describe('TradeOS v2 16 REST Routes', () => {
       expect(res.body[period].lossCount).toBe(1);
       expect(res.body[period].winRate).toBe(0);
     }
+  });
+
+  it('POST /api/broker/mode persists broker_mode in SettingsRepo and POST /api/admin/clean-slate resets LOCAL_PAPER balance to 5000', async () => {
+    const settingsRepo = new SettingsRepo(db);
+    settingsRepo.set('paper_wallet_balance', { balance: 4321.5, currency: 'USDT' });
+
+    const resetCleanSlate = vi.fn((walletBalance: number) => ({ walletBalance }));
+    const localCtx: AppContext = {
+      ...ctx,
+      propFirmRiskGuard: {
+        resetCleanSlate,
+      } as unknown as PropFirmRiskGuard,
+    };
+    const localApp = polka();
+    registerRoutes(localApp, localCtx);
+
+    const callLocal = (method: string, url: string, body?: unknown) =>
+      new Promise<{ status: number; body: any }>((resolve) => {
+        const emitter = new EventEmitter();
+        const req = Object.assign(emitter, {
+          method,
+          url,
+          path: url,
+          headers: {
+            host: `127.0.0.1:${PORT}`,
+            authorization: `Bearer ${SESSION_TOKEN}`,
+          },
+          params: {},
+          query: {},
+          body: {},
+          socket: { remoteAddress: '127.0.0.1' },
+        }) as unknown as Request;
+
+        let statusCode = 200;
+        let responseBody = '';
+        const res = {
+          statusCode: 200,
+          setHeader: vi.fn(),
+          getHeader: vi.fn(),
+          end(data?: string) {
+            if (data) responseBody = data;
+            resolve({ status: statusCode, body: responseBody ? JSON.parse(responseBody) : null });
+          },
+        } as unknown as Response;
+        Object.defineProperty(res, 'statusCode', {
+          get: () => statusCode,
+          set: (val: number) => { statusCode = val; },
+        });
+        localApp.handler(req, res, { pathname: url, query: {} });
+        process.nextTick(() => {
+          if (body !== undefined) emitter.emit('data', Buffer.from(JSON.stringify(body)));
+          emitter.emit('end');
+        });
+      });
+
+    const switchRes = await callLocal('POST', '/api/broker/mode', { mode: 'LOCAL_PAPER' });
+    expect(switchRes.status).toBe(200);
+    expect(settingsRepo.get('broker_mode')).toBe('LOCAL_PAPER');
+
+    const cleanRes = await callLocal('POST', '/api/admin/clean-slate', {});
+    expect(cleanRes.status).toBe(200);
+    expect(settingsRepo.get('paper_wallet_balance')).toEqual({ balance: 5000, currency: 'USDT' });
+    expect(resetCleanSlate).toHaveBeenCalledWith(5000);
   });
 });

@@ -23,6 +23,17 @@ export interface LocalPaperAdapterOptions {
   initialBalance?: number;
 }
 
+export interface PaperAlgoTriggerEvent {
+  symbol: string;
+  algoId: string;
+  clientAlgoId?: string;
+  side: 'BUY' | 'SELL';
+  orderType: string;
+  triggerPrice: number;
+  fillPrice: number;
+  executedQty: number;
+}
+
 interface PaperPosition {
   symbol: string;
   side: 'BUY' | 'SELL';
@@ -59,9 +70,11 @@ export class LocalPaperAdapter implements BrokerAdapter {
   public readonly mode: BrokerMode = 'LOCAL_PAPER';
   public readonly SLIPPAGE_BPS = 0.0003; // 3 basis points (0.03%)
   public readonly FEE_RATE = 0.0005;     // 0.05% taker fee
+  public readonly MAKER_FEE_RATE = 0.0002; // 0.02% maker fee
 
   private settingsRepo: SettingsRepo;
   private defaultBalance: number;
+  private onAlgoTrigger?: (event: PaperAlgoTriggerEvent) => void | Promise<void>;
 
   private positions: Map<string, PaperPosition> = new Map();
   private openOrders: Map<string, PaperOrder> = new Map();
@@ -71,8 +84,14 @@ export class LocalPaperAdapter implements BrokerAdapter {
 
   constructor(options: LocalPaperAdapterOptions) {
     this.settingsRepo = new SettingsRepo(options.db);
-    this.defaultBalance = options.initialBalance ?? 10000.0;
+    this.defaultBalance = options.initialBalance ?? 5000.0;
     this.ensureInitialized();
+  }
+
+  public setOnAlgoTrigger(
+    cb: ((event: PaperAlgoTriggerEvent) => void | Promise<void>) | undefined
+  ): void {
+    this.onAlgoTrigger = cb;
   }
 
   private ensureInitialized(): void {
@@ -130,7 +149,7 @@ export class LocalPaperAdapter implements BrokerAdapter {
       if (crossed) {
         this.openOrders.delete(orderId);
         const execPrice = ord.price;
-        const fee = execPrice * ord.quantity * this.FEE_RATE;
+        const fee = execPrice * ord.quantity * this.MAKER_FEE_RATE;
         const { balance } = this.getBalanceRecord();
         this.updateBalance(balance - fee);
 
@@ -196,9 +215,38 @@ export class LocalPaperAdapter implements BrokerAdapter {
 
       if (triggered) {
         this.openOrders.delete(orderId);
-        this.closePosition(symUpper, order.quantity).catch((err) => {
-          console.error(`[PAPER] Failed to trigger paper algo close on ${symUpper}:`, err);
-        });
+        const slippageMultiplier =
+          pos.side === 'BUY' ? 1 - this.SLIPPAGE_BPS : 1 + this.SLIPPAGE_BPS;
+        const fillPrice = Number((price * slippageMultiplier).toFixed(4));
+        const execQty =
+          order.quantity > 0 ? Math.min(order.quantity, pos.quantity) : pos.quantity;
+        const triggerEvent: PaperAlgoTriggerEvent = {
+          symbol: symUpper,
+          algoId: orderId,
+          clientAlgoId: order.clientOrderId,
+          side: order.side,
+          orderType: order.type,
+          triggerPrice: order.triggerPrice,
+          fillPrice,
+          executedQty: execQty,
+        };
+        this.closePosition(symUpper, order.quantity)
+          .then((closeRes) => {
+            if (closeRes.avgPrice && closeRes.avgPrice > 0) {
+              triggerEvent.fillPrice = closeRes.avgPrice;
+            }
+            if (closeRes.executedQty && closeRes.executedQty > 0) {
+              triggerEvent.executedQty = closeRes.executedQty;
+            }
+            if (this.onAlgoTrigger) {
+              void Promise.resolve(this.onAlgoTrigger(triggerEvent)).catch((err) => {
+                console.error(`[PAPER] onAlgoTrigger callback failed on ${symUpper}:`, err);
+              });
+            }
+          })
+          .catch((err) => {
+            console.error(`[PAPER] Failed to trigger paper algo close on ${symUpper}:`, err);
+          });
         break;
       }
     }
@@ -285,7 +333,7 @@ export class LocalPaperAdapter implements BrokerAdapter {
           req.side === 'BUY' ? limitPrice >= knownMark : limitPrice <= knownMark;
         if (crosses) {
           throw new BinanceApiError(
-            'Post Only order would immediately trigger as taker order.',
+            'Post Only order would immediately match and take.',
             400,
             -5022
           );
@@ -418,7 +466,10 @@ export class LocalPaperAdapter implements BrokerAdapter {
     return this.createAlgoOrder(params);
   }
 
-  async closePosition(symbol: string, qty?: number): Promise<{ orderId: string; status: string }> {
+  async closePosition(
+    symbol: string,
+    qty?: number
+  ): Promise<{ orderId: string; status: string; executedQty?: number; avgPrice?: number }> {
     const symUpper = symbol.toUpperCase();
     const pos = this.positions.get(symUpper);
     if (!pos || pos.quantity <= 0) {
@@ -475,7 +526,12 @@ export class LocalPaperAdapter implements BrokerAdapter {
       commission_asset: 'USDT',
       filled_at: filledAt,
     });
-    return { orderId, status: 'FILLED' };
+    return {
+      orderId,
+      status: 'FILLED',
+      executedQty: closeQty,
+      avgPrice: exitPrice,
+    };
   }
 
   async cancelOrder(_symbol: string, orderId: string, _isAlgo?: boolean): Promise<boolean> {

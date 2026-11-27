@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import type { DatabaseSync } from 'node:sqlite';
-import { initializeDatabase, TradesRepo, SettingsRepo } from '../../db/sqlite.js';
+import { initializeDatabase, TradesRepo, SettingsRepo, PropFirmRepo } from '../../db/sqlite.js';
+import { PropFirmRiskGuard } from '../../quant/propFirmRiskGuard.js';
 import { TradeManager } from '../tradeManager.js';
 import { AutoPilotManager } from '../autoPilotManager.js';
 import { ConfluenceEngine } from '../../quant/confluenceEngine.js';
@@ -943,5 +944,52 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     await tieredAutoPilot.onTick('XRPUSDT', 1);
     expect(mockBroker.openOrderCalls).toHaveLength(3);
     expect(tieredAutoPilot.getState()).toBe('POSITION_OPEN');
+  });
+
+  it('enforces PropFirmRiskGuard pre-entry gate in LOCAL_PAPER mode', async () => {
+    const paperBroker = new MockBroker();
+    (paperBroker as unknown as { mode: BrokerMode }).mode = 'LOCAL_PAPER';
+    paperBroker.account = {
+      walletBalance: 5000,
+      equity: 5000,
+      availableBalance: 5000,
+      unrealizedPnl: 0,
+      currency: 'USDT',
+    };
+
+    const propFirmRepo = new PropFirmRepo(db);
+    const guard = new PropFirmRiskGuard(propFirmRepo);
+    guard.evaluateLiveEquity({
+      realizedCyclePnlUsd: -130,
+      unrealizedPnlUsd: 0,
+      liveWalletBalanceUsd: 5000,
+      hasOpenPosition: false,
+    });
+
+    const paperTm = new TradeManager({
+      db,
+      broker: paperBroker,
+      brokerMode: 'LOCAL_PAPER',
+      getMarkPrice: () => 100,
+      propFirmRiskGuard: guard,
+    });
+
+    const paperAutoPilot = new AutoPilotManager({
+      db,
+      tradeManager: paperTm,
+      broker: paperBroker,
+      confluenceEngine,
+      getMarkPrice: () => 100,
+      getAtr: () => 1.5,
+      propFirmRiskGuard: guard,
+      config: {
+        enabled: true,
+        consensusThreshold: 4,
+      },
+    });
+
+    await paperAutoPilot.onTick('SOLUSDT', 100);
+    expect(paperBroker.openOrderCalls).toHaveLength(0);
+    expect(paperAutoPilot.getStatusPayload().blockReason).toBe('UPCOMERS_DAILY_HALT');
   });
 });

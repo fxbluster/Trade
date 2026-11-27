@@ -167,6 +167,18 @@ export function isUnproxiedLoopback(req: Request): boolean {
 
 async function resolvePropFirmWalletBalance(ctx: AppContext): Promise<number> {
   let walletBalance = 0;
+
+  if (ctx.broker?.mode === 'LOCAL_PAPER' && typeof ctx.broker?.getAccount === 'function') {
+    try {
+      const account = await ctx.broker.getAccount();
+      if (account && Number.isFinite(account.walletBalance) && account.walletBalance > 0) {
+        return account.walletBalance;
+      }
+    } catch {
+      // Tolerate transient errors and fall back to cached balance
+    }
+  }
+
   try {
     const cached = ctx.getPropFirmWalletBalance?.();
     if (typeof cached === 'number' && Number.isFinite(cached) && cached > 0) {
@@ -503,6 +515,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       ctx.tradeManager.setBrokerMode(mode);
       (ctx.autoPilotManager as { setBroker?: (b: BrokerAdapter) => void } | undefined)?.setBroker?.(newAdapter);
       (tradesRepo as { invalidateActiveCache?: () => void }).invalidateActiveCache?.();
+      settingsRepo.set('broker_mode', mode);
       if (ctx.onBrokerModeChange) {
         ctx.onBrokerModeChange(newAdapter);
       }
@@ -661,7 +674,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
 
     const cachedWallet = ctx.getPropFirmWalletBalance?.();
     const initialEquity =
-      ctx.propFirmRiskGuard && ctx.broker.mode === 'BINANCE_DEMO'
+      ctx.propFirmRiskGuard
         ? 50_000
         : cachedWallet && Number.isFinite(cachedWallet) && cachedWallet > 0
           ? cachedWallet
@@ -1134,6 +1147,23 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
         // Ignore
       }
 
+      let paperPositionWarning: string | undefined;
+      if (ctx.broker.mode === 'LOCAL_PAPER') {
+        const existingPaperBalance = settingsRepo.get<{ balance: number; currency: string }>('paper_wallet_balance');
+        if (existingPaperBalance !== null) {
+          settingsRepo.set('paper_wallet_balance', { balance: 5000, currency: 'USDT' });
+        }
+        const resettableAdapter = ctx.broker as unknown as { reset?: () => void };
+        if (typeof resettableAdapter.reset === 'function') {
+          resettableAdapter.reset();
+        } else if (typeof ctx.broker.getAllPositions === 'function') {
+          const paperPositions = await ctx.broker.getAllPositions().catch(() => []);
+          if (paperPositions.some((p) => Math.abs(p.positionAmt) > 0)) {
+            paperPositionWarning = 'In-memory paper positions remain open because adapter has no reset() method';
+          }
+        }
+      }
+
       tradesRepo.invalidateActiveCache();
       ctx.autoPilotManager?.resetCooldown();
       ctx.autoPilotManager?.clearPropFirmBlock();
@@ -1148,6 +1178,7 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
         ok: true,
         message: 'Clean slate completed',
         propFirmStatus,
+        ...(paperPositionWarning ? { warning: paperPositionWarning } : {}),
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

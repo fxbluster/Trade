@@ -751,8 +751,8 @@ export class AutoPilotManager {
       }
     }
 
-    // 0. Upcomers Prop Firm Challenge Risk Guard Pre-Entry Gate (BINANCE_DEMO only)
-    if (this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO') {
+    // 0. Upcomers Prop Firm Challenge Risk Guard Pre-Entry Gate
+    if (this.propFirmRiskGuard) {
       const guardCheck = this.propFirmRiskGuard.canOpenTrade();
       if (!guardCheck.allowed) {
         const nextBlockReason: BlockReason =
@@ -804,8 +804,8 @@ export class AutoPilotManager {
     }
 
     // 2. Proactive Daily Mark-to-Market Drawdown Ceiling (Synchronous Pre-Check) [CUJ 5 / DEF-13]
-    // Skipped when PropFirmRiskGuard is active in BINANCE_DEMO (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
-    if (!(this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO')) {
+    // Skipped when PropFirmRiskGuard is active (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
+    if (!this.propFirmRiskGuard) {
       const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
       const balance = this.cachedBalance > 0 ? this.cachedBalance : 1000;
       const drawdownLimitPct = (this.config.dailyDrawdownLimitPct ?? 2.0) / 100;
@@ -944,8 +944,8 @@ export class AutoPilotManager {
       }
 
       // Daily Mark-to-Market Drawdown Ceiling: Hard halt if session net loss >= dailyDrawdownLimitPct of wallet equity [CUJ 5 / DEF-13]
-      // Skipped when PropFirmRiskGuard is active in BINANCE_DEMO (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
-      if (!(this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO')) {
+      // Skipped when PropFirmRiskGuard is active (Upcomers -$1,250 / -$2,500 buffers govern drawdown).
+      if (!this.propFirmRiskGuard) {
         const nowUtc = new Date();
         const startOfUtcDay = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
         const dailyStats = this.tradesRepo.getDailyRealizedPnl(this.broker.mode, startOfUtcDay);
@@ -973,8 +973,7 @@ export class AutoPilotManager {
         }
       }
 
-      const isPropFirmDemoActive =
-        Boolean(this.propFirmRiskGuard) && this.broker.mode === 'BINANCE_DEMO';
+      const isPropFirmDemoActive = Boolean(this.propFirmRiskGuard);
       // Always size orders against the real wallet balance (e.g. 10% of $5,000 = $500 margin);
       // PropFirmRiskGuard scales the resulting PnL 10x into the $50K simulation.
       const sizingBasisUsd = balance;
@@ -1052,8 +1051,8 @@ export class AutoPilotManager {
         snapshot
       );
 
-      // Upcomers $250/trade max risk quantity clamp (fail-closed if <= 0) in BINANCE_DEMO
-      if (this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO') {
+      // Upcomers $250/trade max risk quantity clamp (fail-closed if <= 0)
+      if (this.propFirmRiskGuard) {
         const clamped = this.propFirmRiskGuard.clampEntryQuantity({
           desiredQty: targetQty,
           entryPrice: refPrice,
@@ -1646,8 +1645,8 @@ export class AutoPilotManager {
       return;
     }
 
-    // Case 1b: Upcomers Intra-Tick Floating Drawdown & Target Watchdog ($1,250 Daily / $2,500 Trailing / +$2,500 Target) in BINANCE_DEMO
-    if (this.propFirmRiskGuard && this.broker.mode === 'BINANCE_DEMO') {
+    // Case 1b: Upcomers Intra-Tick Floating Drawdown & Target Watchdog ($1,250 Daily / $2,500 Trailing / +$2,500 Target)
+    if (this.propFirmRiskGuard) {
       const qty = trade.remaining_qty > 0 ? trade.remaining_qty : trade.quantity;
       const rawUnrealizedPnl =
         trade.side === 'BUY'
@@ -1952,7 +1951,6 @@ export class AutoPilotManager {
     if (
       this.propFirmRiskGuard &&
       trade &&
-      trade.broker_mode === 'BINANCE_DEMO' &&
       trade.status === 'CLOSED' &&
       !this.recordedClosedTradeIds.has(trade.id)
     ) {

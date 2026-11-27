@@ -740,8 +740,8 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
   app.post('/api/autopilot/config', (req: Request, res: Response) => {
     const rawBody = (req.body || {}) as any;
     const body = (rawBody.config && typeof rawBody.config === 'object') ? rawBody.config : rawBody;
-    if (body.marginAllocationPct !== undefined && body.marginAllocationPct > 10.0) {
-      return sendJson(res, 400, { error: 'Bad Request: Auto-Pilot margin allocation cannot exceed 10.0%' });
+    if (body.marginAllocationPct !== undefined && body.marginAllocationPct > 20.0) {
+      return sendJson(res, 400, { error: 'Bad Request: Auto-Pilot margin allocation cannot exceed 20.0%' });
     }
 
     if (ctx.autoPilotManager) {

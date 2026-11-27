@@ -363,13 +363,13 @@ describe('TradeOS v2 — Webhook Ingestion & Auto-Pilot API Routes', () => {
   // 4. POST /api/autopilot/config (Configuration Management)
   // --------------------------------------------------------------------------
   describe('POST /api/autopilot/config — Auto-Pilot Configuration', () => {
-    it('rejects margin allocation greater than 10.0% with 400', async () => {
+    it('rejects margin allocation greater than 20.0% with 400', async () => {
       const res = await invokeRoute('POST', '/api/autopilot/config', {
-        marginAllocationPct: 15.0, // Exceeds 10% hard cap!
+        marginAllocationPct: 25.0, // Exceeds 20% hard cap!
       });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('margin allocation cannot exceed 10.0%');
+      expect(res.body.error).toContain('margin allocation cannot exceed 20.0%');
     });
 
     it('updates config successfully within valid bounds', async () => {

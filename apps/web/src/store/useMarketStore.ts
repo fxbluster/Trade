@@ -245,8 +245,11 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
       const isSnapshotAccountEmpty = !snapshot.account || (snapshot.account.walletBalance === 0 && snapshot.account.equity === 0);
       const resolvedAccount = (isSnapshotAccountEmpty && hasValidPrevAccount) ? state.account : (snapshot.account || state.account);
 
-      // Preserve activePosition optimistically if snapshot activePosition is undefined
-      const resolvedPosition = snapshot.activePosition !== undefined ? snapshot.activePosition : state.activePosition;
+      // Preserve activePosition optimistically ONLY if it matches the active symbol
+      const targetSym = (snapshot.symbol || state.symbol).toUpperCase();
+      const rawPos = snapshot.activePosition !== undefined ? snapshot.activePosition : state.activePosition;
+      const resolvedPosition =
+        rawPos && rawPos.symbol && rawPos.symbol.toUpperCase() === targetSym ? rawPos : null;
 
       return {
         symbol: snapshot.symbol,
@@ -321,11 +324,29 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   },
 
   applyPositionEvent: (event: PositionEventData) => {
-    if (event.event === 'CLOSED') {
-      set({ activePosition: null });
-    } else {
-      set({ activePosition: event.data.trade });
-    }
+    const evTrade = event.data.trade;
+    const currentSym = get().symbol.toUpperCase();
+    const evSym = evTrade?.symbol?.toUpperCase();
+    set((state) => {
+      const nextPositions =
+        event.event === 'CLOSED'
+          ? state.activePositions.filter((p) => p.id !== evTrade.id && p.symbol.toUpperCase() !== evSym)
+          : [evTrade, ...state.activePositions.filter((p) => p.id !== evTrade.id && p.symbol.toUpperCase() !== evSym)];
+
+      const nextActivePosition =
+        evSym === currentSym
+          ? event.event === 'CLOSED'
+            ? null
+            : evTrade
+          : state.activePosition && state.activePosition.symbol.toUpperCase() === currentSym
+          ? state.activePosition
+          : null;
+
+      return {
+        activePosition: nextActivePosition,
+        activePositions: nextPositions,
+      };
+    });
   },
 
   setWsStatus: (status: WsStatus) => {

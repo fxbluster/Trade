@@ -128,7 +128,7 @@ export const ActivePositionPanel: React.FC = () => {
     );
   };
 
-  if (!activePosition || activePosition.status === 'CLOSED') {
+  if (!activePosition || activePosition.status === 'CLOSED' || activePosition.symbol.toUpperCase() !== symbol.toUpperCase()) {
     if (otherTrackedPositions.length > 0 || untrackedExchangePositions.length > 0) {
       return (
         <div className="flex flex-col space-y-2.5 p-3 bg-[#080c14] rounded-lg border border-[#151d2c] font-mono text-xs select-none overflow-y-auto custom-scrollbar">

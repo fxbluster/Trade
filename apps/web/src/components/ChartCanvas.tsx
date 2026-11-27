@@ -187,7 +187,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       autoscaleInfoProvider: (original) => {
         const res = original();
         const pos = activePosRef.current;
-        if (!res || !res.priceRange || !pos || pos.status === 'CLOSED') return res;
+        const curSym = useMarketStore.getState().symbol;
+        if (!res || !res.priceRange || !pos || pos.status === 'CLOSED' || pos.symbol.toUpperCase() !== curSym.toUpperCase()) return res;
         let { minValue, maxValue } = res.priceRange;
         if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) return res;
         if (pos.stop_loss && Number.isFinite(pos.stop_loss) && pos.stop_loss > 0) {
@@ -442,8 +443,8 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     });
     priceLinesRef.current = [];
 
-    // 1. Draw Active Position Price Lines
-    if (activePosition && activePosition.status !== 'CLOSED') {
+    // 1. Draw Active Position Price Lines (strictly for the currently selected symbol)
+    if (activePosition && activePosition.status !== 'CLOSED' && activePosition.symbol.toUpperCase() === symbol.toUpperCase()) {
       // Entry Line
       const entryLine = candleSeries.createPriceLine({
         price: activePosition.entry_price,

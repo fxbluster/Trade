@@ -805,32 +805,45 @@ export class TradeManager {
       const closedTrade = this.tradesRepo.getById(trade.id)!;
 
       // 5. Update risk_state (consecutive losses, cooldown triggers, session PnL)
-      try {
-        const account = await this.broker.getAccount();
-        const currentRisk = this.riskStateRepo.get(this.brokerMode) || {
-          broker_mode: this.brokerMode,
-          consecutive_losses: 0,
-          cooldown_until: 0,
-          cooldown_reason: null,
-          session_net_pnl: 0,
-          session_started_at: now,
-          updated_at: now,
-        };
+      // Only manual trades trigger the 15-minute Anti-Gambling Cooldown; AutoPilot exits do not.
+      const AUTOPILOT_EXIT_REASONS = new Set([
+        'OPPOSITE_CONFLUENCE_REVERSAL',
+        'TRAILING_GIVEBACK_HALF',
+        'WATCHDOG_STOP_LOSS',
+        'SL_PLACEMENT_FAILED_EMERGENCY_UNWIND',
+        'EVENT_BLACKOUT_UNWIND',
+        'PROPFIRM_TARGET_REACHED',
+        'UPCOMERS_DAILY_HALT',
+        'UPCOMERS_TRAILING_HALT',
+      ]);
+      if (!AUTOPILOT_EXIT_REASONS.has(reason)) {
+        try {
+          const account = await this.broker.getAccount();
+          const currentRisk = this.riskStateRepo.get(this.brokerMode) || {
+            broker_mode: this.brokerMode,
+            consecutive_losses: 0,
+            cooldown_until: 0,
+            cooldown_reason: null,
+            session_net_pnl: 0,
+            session_started_at: now,
+            updated_at: now,
+          };
 
-        const riskBenchmarkBalance =
-          this.propFirmRiskGuard && this.brokerMode === 'BINANCE_DEMO'
-            ? Math.max(account.walletBalance, this.propFirmRiskGuard.getConfig().accountSizeUsd)
-            : account.walletBalance;
+          const riskBenchmarkBalance =
+            this.propFirmRiskGuard && this.brokerMode === 'BINANCE_DEMO'
+              ? Math.max(account.walletBalance, this.propFirmRiskGuard.getConfig().accountSizeUsd)
+              : account.walletBalance;
 
-        const updatedRisk = updateRiskStateOnTradeClose(
-          closedTrade,
-          currentRisk,
-          riskBenchmarkBalance,
-          now
-        );
-        this.riskStateRepo.update(updatedRisk);
-      } catch {
-        // Tolerated if account fetch is degraded
+          const updatedRisk = updateRiskStateOnTradeClose(
+            closedTrade,
+            currentRisk,
+            riskBenchmarkBalance,
+            now
+          );
+          this.riskStateRepo.update(updatedRisk);
+        } catch {
+          // Tolerated if account fetch is degraded
+        }
       }
 
       this.broadcastPositionEvent('CLOSED', closedTrade, reason);

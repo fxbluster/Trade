@@ -256,16 +256,6 @@ export const TopBar: React.FC = () => {
           <span className="hidden sm:inline">Scanner</span>
         </button>
 
-        {/* Time Machine Trigger */}
-        <button
-          onClick={() => setIsTimeMachineModalOpen(true)}
-          className="flex items-center space-x-1 px-2 py-1 rounded bg-[#020305] border border-[#151d2c] text-[#7d8590] hover:text-[#e6edf3] hover:border-[#7d8590] transition-colors"
-          title="Monte Carlo Simulator"
-        >
-          <Cpu className="w-3.5 h-3.5 text-[#8b5cf6]" />
-          <span className="hidden sm:inline">10k Sim</span>
-        </button>
-
         {/* Pillar Matrix Trigger */}
         <button
           onClick={() => setIsPillarScorecardModalOpen(true)}

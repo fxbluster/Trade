@@ -67,7 +67,7 @@ export function validateOrderRisk(
       ? options.propFirmBenchmarkUsd
       : account.walletBalance;
 
-  const maxMarginPct = isAutoPilot ? 0.10 : isExplicitManualExpanded ? 0.50 : 0.10;
+  const maxMarginPct = isAutoPilot ? 0.20 : isExplicitManualExpanded ? 0.50 : 0.10;
   const maxMarginAllowed = Number((effectiveCapBalance * maxMarginPct).toFixed(2));
   if (req.marginUsd > maxMarginAllowed + 0.01) {
     return {

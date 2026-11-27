@@ -10,6 +10,7 @@ import {
 } from 'lightweight-charts';
 import type { KlineCandle, TradeRecord } from '@tradeos/shared';
 import { apiClient } from '../lib/apiClient';
+import { attachSmartChartInteraction, type SmartChartInteractionHandle } from '../lib/chartInteractions';
 import { formatUsd } from '../lib/formatters';
 import { X, CandlestickChart } from 'lucide-react';
 
@@ -62,6 +63,7 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
   const tp1ZoneRef = useRef<HTMLDivElement>(null);
   const tp2ZoneRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const chartInteractionRef = useRef<SmartChartInteractionHandle | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
 
   // Close on Escape
@@ -80,14 +82,29 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
       setIsLoading(true);
       setErrorMsg(null);
       try {
-        const stepMs = INTERVAL_SEC[interval] * 1000;
+        const stepSec = INTERVAL_SEC[interval];
+        const stepMs = stepSec * 1000;
         const openedAt = trade.opened_at || (trade.closed_at ? trade.closed_at - 30 * stepMs : Date.now() - 60 * stepMs);
         const closedAt = trade.closed_at || Date.now();
         const startMs = Math.max(1, openedAt - 45 * stepMs);
-        const endMs = closedAt + 120 * stepMs;
-        const data = await apiClient.getKlines(trade.symbol, interval, 500, endMs, startMs);
+        const endMs = closedAt + 720 * stepMs;
+        const firstBatch = await apiClient.getKlines(trade.symbol, interval, 1000, endMs, startMs);
+        const combined = Array.isArray(firstBatch) ? [...firstBatch] : [];
+
+        // If trade duration + post-exit window exceeded 1000 bars, fetch one follow-up page after the last bar
+        if (combined.length >= 999) {
+          const lastSec = Math.max(...combined.map((k) => k?.time ?? 0));
+          const nextStartMs = (lastSec + stepSec) * 1000;
+          if (Number.isFinite(nextStartMs) && nextStartMs < Math.min(endMs, Date.now()) - stepMs) {
+            const secondBatch = await apiClient.getKlines(trade.symbol, interval, 1000, endMs, nextStartMs);
+            if (Array.isArray(secondBatch) && secondBatch.length > 0) {
+              combined.push(...secondBatch);
+            }
+          }
+        }
+
         if (!cancelled) {
-          const sorted = (Array.isArray(data) ? data : [])
+          const sorted = combined
             .filter((k) => k && Number.isFinite(k.time) && Number.isFinite(k.close) && k.close > 0)
             .sort((a, b) => a.time - b.time);
           setCandles(sorted);
@@ -159,7 +176,8 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
         borderColor: '#151d2c',
         timeVisible: true,
         secondsVisible: false,
-        rightOffset: 6,
+        rightOffset: 8,
+        minBarSpacing: 0.5,
         tickMarkFormatter: (ts: number) => formatBakuTime(ts),
       },
     });
@@ -338,22 +356,15 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
     };
 
     requestAnimationFrame(() => {
-      chart.priceScale('right').applyOptions({ autoScale: false });
       updateZones();
     });
     chart.timeScale().subscribeVisibleLogicalRangeChange?.(updateZones);
 
-    const handleDblClick = () => {
-      if (!chartRef.current) return;
-      chartRef.current.timeScale().fitContent();
-      chartRef.current.priceScale('right').applyOptions({ autoScale: true });
-      requestAnimationFrame(() => {
-        chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
-        updateZones();
-      });
-    };
     const containerEl = containerRef.current;
-    containerEl?.addEventListener('dblclick', handleDblClick);
+    const interaction = containerEl
+      ? attachSmartChartInteraction(chart, containerEl, updateZones)
+      : null;
+    chartInteractionRef.current = interaction;
 
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
@@ -372,7 +383,8 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
 
     return () => {
       chart.timeScale().unsubscribeVisibleLogicalRangeChange?.(updateZones);
-      containerEl?.removeEventListener('dblclick', handleDblClick);
+      interaction?.cleanup();
+      chartInteractionRef.current = null;
       resizeObserver?.disconnect();
       chart.remove();
       chartRef.current = null;
@@ -421,12 +433,12 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
           <div className="flex items-center space-x-2">
             <button
               onClick={() => {
-                if (!chartRef.current) return;
-                chartRef.current.timeScale().fitContent();
-                chartRef.current.priceScale('right').applyOptions({ autoScale: true });
-                requestAnimationFrame(() => {
-                  chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
-                });
+                if (chartInteractionRef.current) {
+                  chartInteractionRef.current.fit();
+                } else if (chartRef.current) {
+                  chartRef.current.timeScale().fitContent();
+                  chartRef.current.priceScale('right').applyOptions({ autoScale: true });
+                }
               }}
               title="Qrafiki ekrana sığdır"
               className="px-2 py-0.5 text-[11px] rounded bg-[#151d2c] text-[#7d8590] hover:text-[#0ecb81] border border-[#151d2c] transition-colors"

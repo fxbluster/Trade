@@ -14,6 +14,7 @@ import {
 import { useMarketStore } from '../store/useMarketStore';
 import { useUiStore } from '../store/useUiStore';
 import { wsClient, type TickData } from '../lib/wsClient';
+import { attachSmartChartInteraction, type SmartChartInteractionHandle } from '../lib/chartInteractions';
 import { calculateLiquidationPrice } from '@tradeos/shared';
 import { Eye, EyeOff } from 'lucide-react';
 
@@ -57,6 +58,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const tp2ZoneRef = useRef<HTMLDivElement>(null);
   const updatePositionZonesRef = useRef<() => void>(() => {});
   const chartRef = useRef<IChartApi | null>(null);
+  const chartInteractionRef = useRef<SmartChartInteractionHandle | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
@@ -386,23 +388,19 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange?.(handleRangeChange);
 
-    // Double-click to reset / fit content (then keep free vertical drag enabled)
-    const handleDblClick = () => {
-      if (!chartRef.current) return;
-      chartRef.current.timeScale().fitContent();
-      chartRef.current.priceScale('right').applyOptions({ autoScale: true });
-      requestAnimationFrame(() => {
-        chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
-      });
-    };
+    // Smart auto-scale on wheel zoom + always-on free vertical pan + double-click reset
     const containerEl = containerRef.current;
-    containerEl?.addEventListener('dblclick', handleDblClick);
+    const interaction = containerEl
+      ? attachSmartChartInteraction(chart, containerEl, () => updatePositionZonesRef.current())
+      : null;
+    chartInteractionRef.current = interaction;
 
     return () => {
       chart.timeScale().unsubscribeVisibleLogicalRangeChange?.(handleRangeChange);
       unsubscribeTick();
       resizeObserver?.disconnect();
-      containerEl?.removeEventListener('dblclick', handleDblClick);
+      interaction?.cleanup();
+      chartInteractionRef.current = null;
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -450,7 +448,11 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       if (volumeSeriesRef.current) {
         volumeSeriesRef.current.setData([]);
       }
-      chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+      if (chartInteractionRef.current) {
+        chartInteractionRef.current.resetAutoScale();
+      } else {
+        chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+      }
       chartRef.current?.timeScale().resetTimeScale();
     }
   }, [symbol, candleInterval]);
@@ -541,7 +543,11 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           to: prevRange.to + addedCount,
         });
       } else if (lastRenderedKeyRef.current !== key) {
-        chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+        if (chartInteractionRef.current) {
+          chartInteractionRef.current.resetAutoScale();
+        } else {
+          chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+        }
         if (sortedKlines.length > 150 && typeof chartRef.current?.timeScale().setVisibleLogicalRange === 'function') {
           chartRef.current.timeScale().setVisibleLogicalRange({
             from: sortedKlines.length - 150,
@@ -550,9 +556,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         } else {
           chartRef.current?.timeScale().fitContent();
         }
-        requestAnimationFrame(() => {
-          chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
-        });
         lastFitSymbolRef.current = symbol;
       }
       lastRenderedKeyRef.current = key;
@@ -986,11 +989,12 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           {/* Fit / Reset Scale Button */}
           <button
             onClick={() => {
-              chartRef.current?.timeScale().fitContent();
-              chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
-              requestAnimationFrame(() => {
-                chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
-              });
+              if (chartInteractionRef.current) {
+                chartInteractionRef.current.fit();
+              } else {
+                chartRef.current?.timeScale().fitContent();
+                chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+              }
             }}
             title="Qrafiki ekrana tam sığdır (və ya qrafikə iki dəfə klikləyin)"
             className="px-2 py-1 text-xs font-mono rounded bg-[#151d2c] text-[#7d8590] hover:text-[#0ecb81] border border-[#151d2c] transition-colors"

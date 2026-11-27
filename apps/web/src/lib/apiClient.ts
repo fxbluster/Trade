@@ -277,12 +277,15 @@ export const apiClient = {
 
   async getKlines(
     symbol: string,
-    interval: '1m' | '5m' | '15m' | '1h' = '5m',
-    limit: number = 400
+    interval: '1m' | '5m' | '15m' | '1h' = '1m',
+    limit: number = 500,
+    endTimeMs?: number
   ): Promise<KlineCandle[]> {
-    const data = await request<any>(
-      `/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`
-    );
+    let url = `/api/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
+    if (typeof endTimeMs === 'number' && Number.isFinite(endTimeMs) && endTimeMs > 0) {
+      url += `&endTime=${Math.floor(endTimeMs)}`;
+    }
+    const data = await request<any>(url);
     if (Array.isArray(data)) return data;
     if (data && Array.isArray(data.klines)) return data.klines;
     return [];

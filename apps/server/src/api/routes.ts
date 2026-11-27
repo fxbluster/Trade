@@ -88,7 +88,7 @@ export interface AppContext {
   getMarkPrice?: (symbol: string) => number;
   setActiveSymbol?: (symbol: string) => void;
   getIndicators?: (symbol: string) => TechnicalSummary | null;
-  getKlines?: (symbol: string, interval: string, limit: number) => Promise<KlineCandle[]>;
+  getKlines?: (symbol: string, interval: string, limit: number, startTime?: number, endTime?: number) => Promise<KlineCandle[]>;
   getFunding?: (symbol: string) => { rate: number | null; nextTime: number | null };
   onBrokerModeChange?: (adapter: BrokerAdapter) => void;
 }
@@ -304,15 +304,21 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
       const query = (req.query || {}) as Record<string, string>;
       const symbol = (query.symbol || resolveActiveSymbol()).toUpperCase();
       const interval = query.interval || '1m';
-      const limit = Math.min(Number(query.limit) || 400, 1000);
+      const limit = Math.min(Number(query.limit) || 500, 1000);
+      const parsedStart = query.startTime !== undefined ? Number(query.startTime) : undefined;
+      const parsedEnd = query.endTime !== undefined ? Number(query.endTime) : undefined;
+      const startTime = typeof parsedStart === 'number' && Number.isFinite(parsedStart) && parsedStart > 0 ? Math.floor(parsedStart) : undefined;
+      const endTime = typeof parsedEnd === 'number' && Number.isFinite(parsedEnd) && parsedEnd > 0 ? Math.floor(parsedEnd) : undefined;
 
       if (ctx.getKlines) {
-        const klines = await ctx.getKlines(symbol, interval, limit);
+        const klines = await ctx.getKlines(symbol, interval, limit, startTime, endTime);
         return sendJson(res, 200, { symbol, interval, klines });
       }
 
       // Fallback: direct public Binance futures REST
-      const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
+      let url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
+      if (startTime !== undefined) url += `&startTime=${startTime}`;
+      if (endTime !== undefined) url += `&endTime=${endTime}`;
       const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
       if (!response.ok) {
         return sendJson(res, response.status, { error: 'Failed to fetch klines from exchange' });

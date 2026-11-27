@@ -31,6 +31,10 @@ const { mockSeries, mockChart } = vi.hoisted(() => {
     timeScale: vi.fn(() => ({
       fitContent: vi.fn(),
       resetTimeScale: vi.fn(),
+      subscribeVisibleLogicalRangeChange: vi.fn(),
+      unsubscribeVisibleLogicalRangeChange: vi.fn(),
+      getVisibleLogicalRange: vi.fn(() => null),
+      setVisibleLogicalRange: vi.fn(),
     })),
     remove: vi.fn(),
   };
@@ -356,5 +360,62 @@ describe('ChartCanvas & Price Line Logic', () => {
     expect(markerCall).toEqual([]);
     root.unmount();
     container.remove();
+  });
+
+  it('renders ETHUSDT candles on symbol switch even while markPrice is still stale from SOLUSDT', () => {
+    useMarketStore.setState({
+      symbol: 'ETHUSDT',
+      markPrice: 73.0,
+      klinesSymbol: 'ETHUSDT',
+      klinesInterval: '1m',
+      candleInterval: '1m',
+      klines: [
+        { time: 1795101000, open: 1720, high: 1725, low: 1718, close: 1722, volume: 120 },
+        { time: 1795101060, open: 1722, high: 1726, low: 1720, close: 1724, volume: 140 },
+      ],
+    });
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    flushSync(() => {
+      root.render(React.createElement(ChartCanvas));
+    });
+
+    const lastSetDataCall = mockSeries.setData.mock.calls.find(
+      (c: any) => Array.isArray(c[0]) && c[0].length === 2 && c[0][0].close === 1722
+    );
+    expect(lastSetDataCall).toBeDefined();
+    root.unmount();
+    container.remove();
+  });
+
+  it('loadOlderKlines prepends older historical bars and deduplicates by timestamp', async () => {
+    const { apiClient } = await import('../../lib/apiClient');
+    const getKlinesSpy = vi.spyOn(apiClient, 'getKlines').mockResolvedValueOnce([
+      { time: 1795100880, open: 1710, high: 1712, low: 1709, close: 1711, volume: 50 },
+      { time: 1795100940, open: 1711, high: 1715, low: 1710, close: 1714, volume: 60 },
+      { time: 1795101000, open: 1720, high: 1725, low: 1718, close: 1722, volume: 120 },
+    ]);
+
+    useMarketStore.setState({
+      symbol: 'ETHUSDT',
+      candleInterval: '1m',
+      klinesSymbol: 'ETHUSDT',
+      klinesInterval: '1m',
+      isLoadingOlderKlines: false,
+      hasMoreOlderKlines: true,
+      klines: [
+        { time: 1795101000, open: 1720, high: 1725, low: 1718, close: 1722, volume: 120 },
+        { time: 1795101060, open: 1722, high: 1726, low: 1720, close: 1724, volume: 140 },
+      ],
+    });
+
+    const added = await useMarketStore.getState().loadOlderKlines();
+    expect(added).toBe(2);
+    expect(getKlinesSpy).toHaveBeenCalledWith('ETHUSDT', '1m', 500, (1795101000 - 1) * 1000);
+    const updated = useMarketStore.getState().klines;
+    expect(updated.map((k) => k.time)).toEqual([1795100880, 1795100940, 1795101000, 1795101060]);
+    getKlinesSpy.mockRestore();
   });
 });

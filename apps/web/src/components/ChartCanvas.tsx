@@ -56,6 +56,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const lastFitSymbolRef = useRef<string | null>(null);
+  const lastRenderedKeyRef = useRef<string | null>(null);
+  const earliestBarTimeRef = useRef<number | null>(null);
+  const barCountRef = useRef<number>(0);
   const isInitializedRef = useRef<boolean>(false);
   const lastBarRef = useRef<{
     time: number;
@@ -71,6 +74,10 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
   const symbol = useMarketStore((s) => s.symbol);
   const klines = useMarketStore((s) => s.klines);
+  const klinesSymbol = useMarketStore((s) => s.klinesSymbol);
+  const klinesInterval = useMarketStore((s) => s.klinesInterval);
+  const isLoadingKlines = useMarketStore((s) => s.isLoadingKlines);
+  const isLoadingOlderKlines = useMarketStore((s) => s.isLoadingOlderKlines);
   const candleInterval = useMarketStore((s) => s.candleInterval);
   const setCandleInterval = useMarketStore((s) => s.setCandleInterval);
   const activePosition = useMarketStore((s) => s.activePosition);
@@ -315,6 +322,14 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       resizeObserver.observe(containerRef.current);
     }
 
+    // Lazy-load older historical candles when scrolling near the left edge
+    const handleRangeChange = (range: { from: number; to: number } | null) => {
+      if (range && range.from < 25 && isInitializedRef.current) {
+        void useMarketStore.getState().loadOlderKlines();
+      }
+    };
+    chart.timeScale().subscribeVisibleLogicalRangeChange?.(handleRangeChange);
+
     // Double-click to reset / fit content
     const handleDblClick = () => {
       if (!chartRef.current) return;
@@ -325,6 +340,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     containerEl?.addEventListener('dblclick', handleDblClick);
 
     return () => {
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange?.(handleRangeChange);
       unsubscribeTick();
       resizeObserver?.disconnect();
       containerEl?.removeEventListener('dblclick', handleDblClick);
@@ -335,27 +351,37 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       priceLinesRef.current = [];
       isInitializedRef.current = false;
       lastFitSymbolRef.current = null;
+      lastRenderedKeyRef.current = null;
+      earliestBarTimeRef.current = null;
+      barCountRef.current = 0;
       lastBarRef.current = null;
       lastSizeRef.current = { w: 0, h: 0 };
     };
   }, []);
 
-  // Purge series immediately on symbol switch to prevent cross-symbol candle pollution
+  // Purge series immediately on symbol or interval switch to prevent cross-symbol/interval candle pollution
   const prevSymbolRef = useRef<string>(symbol);
+  const prevIntervalRef = useRef<string>(candleInterval);
   useEffect(() => {
-    if (prevSymbolRef.current !== symbol) {
+    if (prevSymbolRef.current !== symbol || prevIntervalRef.current !== candleInterval) {
       prevSymbolRef.current = symbol;
+      prevIntervalRef.current = candleInterval;
       isInitializedRef.current = false;
       lastBarRef.current = null;
+      lastRenderedKeyRef.current = null;
+      earliestBarTimeRef.current = null;
+      barCountRef.current = 0;
+      setIsFreePan(false);
       if (candleSeriesRef.current) {
         candleSeriesRef.current.setData([]);
       }
       if (volumeSeriesRef.current) {
         volumeSeriesRef.current.setData([]);
       }
+      chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
       chartRef.current?.timeScale().resetTimeScale();
     }
-  }, [symbol]);
+  }, [symbol, candleInterval]);
 
   // Update candles when klines store updates
   useEffect(() => {
@@ -367,14 +393,26 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       return;
     }
 
-    // Sanity check: Ensure candles belong to current symbol
-    const currentPrice = useMarketStore.getState().markPrice;
+    if (klinesSymbol && klinesSymbol.toUpperCase() !== symbol.toUpperCase()) return;
+    if (klinesInterval && klinesInterval !== candleInterval) return;
+
     const validKlines = klines
       .filter((k) => {
-        if (!k || typeof k.time !== 'number' || isNaN(k.time) || typeof k.close !== 'number') return false;
-        if (currentPrice > 0) {
-          const ratio = k.close / currentPrice;
-          if (ratio > 4 || ratio < 0.25) return false;
+        if (
+          !k ||
+          typeof k.time !== 'number' ||
+          !Number.isFinite(k.time) ||
+          typeof k.open !== 'number' ||
+          !Number.isFinite(k.open) ||
+          typeof k.high !== 'number' ||
+          !Number.isFinite(k.high) ||
+          typeof k.low !== 'number' ||
+          !Number.isFinite(k.low) ||
+          typeof k.close !== 'number' ||
+          !Number.isFinite(k.close) ||
+          k.close <= 0
+        ) {
+          return false;
         }
         return true;
       })
@@ -405,6 +443,14 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       color: k.close >= k.open ? 'rgba(14, 203, 129, 0.35)' : 'rgba(246, 70, 93, 0.35)',
     }));
 
+    const key = `${symbol}:${candleInterval}`;
+    const isPrepend =
+      lastRenderedKeyRef.current === key &&
+      earliestBarTimeRef.current !== null &&
+      sortedKlines[0].time < earliestBarTimeRef.current;
+    const prevRange = isPrepend ? chartRef.current?.timeScale().getVisibleLogicalRange?.() : null;
+    const addedCount = isPrepend ? sortedKlines.length - barCountRef.current : 0;
+
     try {
       candleSeriesRef.current.setData(candleData);
       volumeSeriesRef.current.setData(volumeData);
@@ -417,16 +463,32 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         close: last.close,
         volume: last.volume || 0,
       };
-      if (lastFitSymbolRef.current !== symbol) {
-        chartRef.current?.timeScale().fitContent();
+      if (isPrepend && prevRange && addedCount > 0) {
+        chartRef.current?.timeScale().setVisibleLogicalRange?.({
+          from: prevRange.from + addedCount,
+          to: prevRange.to + addedCount,
+        });
+      } else if (lastRenderedKeyRef.current !== key) {
         chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+        setIsFreePan(false);
+        if (sortedKlines.length > 150 && typeof chartRef.current?.timeScale().setVisibleLogicalRange === 'function') {
+          chartRef.current.timeScale().setVisibleLogicalRange({
+            from: sortedKlines.length - 150,
+            to: sortedKlines.length + 8,
+          });
+        } else {
+          chartRef.current?.timeScale().fitContent();
+        }
         lastFitSymbolRef.current = symbol;
       }
+      lastRenderedKeyRef.current = key;
+      earliestBarTimeRef.current = sortedKlines[0].time;
+      barCountRef.current = sortedKlines.length;
       isInitializedRef.current = true;
     } catch (err) {
       console.warn('Lightweight charts setData suppressed error:', err);
     }
-  }, [klines, symbol]);
+  }, [klines, klinesSymbol, klinesInterval, symbol, candleInterval]);
 
   // Update active position and preview price lines
   useEffect(() => {
@@ -723,6 +785,18 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     <div className={`relative flex flex-col w-full h-full bg-[#080c14] border border-[#151d2c] rounded-lg overflow-hidden ${className}`}>
       {/* Floating Status Badges for Active Overlays */}
       <div className="absolute top-12 left-4 z-10 flex flex-col space-y-1.5 pointer-events-none">
+        {isLoadingKlines && klines.length === 0 && (
+          <div className="px-2.5 py-1 bg-[#080c14]/90 border border-[#151d2c] rounded text-[11px] font-mono text-[#e6edf3] flex items-center space-x-1.5 backdrop-blur-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#3b82f6] animate-pulse"></span>
+            <span>Qrafik yüklənir...</span>
+          </div>
+        )}
+        {isLoadingOlderKlines && (
+          <div className="px-2.5 py-1 bg-[#080c14]/90 border border-[#151d2c] rounded text-[11px] font-mono text-[#7d8590] flex items-center space-x-1.5 backdrop-blur-sm">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#0ecb81] animate-pulse"></span>
+            <span>Köhnə şamlar yüklənir...</span>
+          </div>
+        )}
         {showSmcOverlay && unmitigatedFvgsCount === 0 && activeObsCount === 0 && (
           <div className="px-2.5 py-1 bg-[#080c14]/90 border border-[#151d2c] rounded text-[11px] font-mono text-[#7d8590] flex items-center space-x-1.5 backdrop-blur-sm">
             <span className="w-1.5 h-1.5 rounded-full bg-[#0ecb81]/60 animate-pulse"></span>

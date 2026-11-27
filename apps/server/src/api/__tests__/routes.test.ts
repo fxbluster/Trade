@@ -142,7 +142,7 @@ describe('TradeOS v2 16 REST Routes', () => {
         }
       });
 
-      app.handler(req, res, { pathname: parsedUrl.pathname, query: Object.fromEntries(parsedUrl.searchParams) });
+      app.handler(req, res, { pathname: parsedUrl.pathname, search: parsedUrl.search, query: parsedUrl.searchParams.toString() });
 
       process.nextTick(() => {
         if (body !== undefined) {
@@ -174,11 +174,12 @@ describe('TradeOS v2 16 REST Routes', () => {
     expect(res.body.brokerMode).toBe('BINANCE_DEMO');
   });
 
-  it('4. GET /api/klines returns candles array', async () => {
-    const res = await invokeRoute('GET', '/api/klines?symbol=SOLUSDT&interval=1m&limit=10');
+  it('4. GET /api/klines returns candles array and forwards endTime/startTime', async () => {
+    const res = await invokeRoute('GET', '/api/klines?symbol=SOLUSDT&interval=1m&limit=10&endTime=1700000000000');
     expect(res.status).toBe(200);
     expect(res.body.symbol).toBe('SOLUSDT');
     expect(Array.isArray(res.body.klines)).toBe(true);
+    expect(ctx.getKlines).toHaveBeenCalledWith('SOLUSDT', '1m', 10, undefined, 1700000000000);
   });
 
   it('5. GET /api/scanner returns top market pairs', async () => {

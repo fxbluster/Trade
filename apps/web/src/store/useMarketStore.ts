@@ -67,8 +67,12 @@ export interface MarketStoreState {
   brokerMode: BrokerMode;
   wsStatus: WsStatus;
   klines: KlineCandle[];
+  klinesSymbol: string | null;
+  klinesInterval: '1m' | '5m' | '15m' | '1h' | null;
   candleInterval: '1m' | '5m' | '15m' | '1h';
   isLoadingKlines: boolean;
+  isLoadingOlderKlines: boolean;
+  hasMoreOlderKlines: boolean;
 
   // Confluence & Auto-Pilot & Pine Overlay Slices
   confluence: ConfluenceSnapshot | null;
@@ -100,6 +104,7 @@ export interface MarketStoreState {
   setWsStatus: (status: WsStatus) => void;
   setBrokerMode: (mode: BrokerMode) => Promise<void>;
   refreshKlines: () => Promise<void>;
+  loadOlderKlines: () => Promise<number>;
   refreshState: () => Promise<void>;
 
   // Confluence & AutoPilot actions
@@ -169,8 +174,12 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   brokerMode: 'BINANCE_DEMO',
   wsStatus: 'CONNECTING',
   klines: [],
+  klinesSymbol: null,
+  klinesInterval: null,
   candleInterval: '1m',
   isLoadingKlines: false,
+  isLoadingOlderKlines: false,
+  hasMoreOlderKlines: true,
 
   // New Confluence & Auto-Pilot state
   confluence: null,
@@ -205,7 +214,14 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     if (get().symbol === sym) return;
     set({
       symbol: sym,
+      markPrice: 0,
+      prevMarkPrice: 0,
+      activePosition: null,
       klines: [],
+      klinesSymbol: null,
+      klinesInterval: null,
+      hasMoreOlderKlines: true,
+      isLoadingOlderKlines: false,
       activeFvgs: [],
       activeOrderBlocks: [],
       latestSweep: null,
@@ -213,9 +229,11 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
     });
     try {
       await apiClient.setSymbol(sym);
-      await get().refreshKlines();
-      await get().refreshState();
-      await get().refreshConfluence();
+      await Promise.allSettled([
+        get().refreshKlines(),
+        get().refreshState(),
+        get().refreshConfluence(),
+      ]);
     } catch (err) {
       console.error('Failed to change symbol:', err);
     } finally {
@@ -224,7 +242,15 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
   },
 
   setCandleInterval: async (interval: '1m' | '5m' | '15m' | '1h') => {
-    set({ candleInterval: interval, isLoadingKlines: true });
+    set({
+      candleInterval: interval,
+      klines: [],
+      klinesSymbol: null,
+      klinesInterval: null,
+      hasMoreOlderKlines: true,
+      isLoadingOlderKlines: false,
+      isLoadingKlines: true,
+    });
     try {
       await get().refreshKlines();
     } finally {
@@ -370,18 +396,92 @@ export const useMarketStore = create<MarketStoreState>((set, get) => ({
 
   refreshKlines: async () => {
     const { symbol, candleInterval } = get();
+    const fetchOnce = async () => apiClient.getKlines(symbol, candleInterval, 1000);
     try {
-      const candles = await apiClient.getKlines(symbol, candleInterval, 500);
+      let candles = await fetchOnce();
+      if (
+        (!Array.isArray(candles) || candles.length === 0) &&
+        get().symbol === symbol &&
+        get().candleInterval === candleInterval
+      ) {
+        await new Promise((r) => setTimeout(r, 600));
+        if (get().symbol === symbol && get().candleInterval === candleInterval) {
+          candles = await fetchOnce();
+        }
+      }
       if (
         get().symbol === symbol &&
         get().candleInterval === candleInterval &&
         Array.isArray(candles) &&
         candles.length > 0
       ) {
-        set({ klines: candles });
+        set({
+          klines: candles,
+          klinesSymbol: symbol,
+          klinesInterval: candleInterval,
+          hasMoreOlderKlines: candles.length >= 2,
+        });
       }
     } catch (err) {
+      if (get().symbol === symbol && get().candleInterval === candleInterval) {
+        await new Promise((r) => setTimeout(r, 600));
+        if (get().symbol === symbol && get().candleInterval === candleInterval) {
+          try {
+            const retryCandles = await fetchOnce();
+            if (Array.isArray(retryCandles) && retryCandles.length > 0) {
+              set({
+                klines: retryCandles,
+                klinesSymbol: symbol,
+                klinesInterval: candleInterval,
+                hasMoreOlderKlines: retryCandles.length >= 2,
+              });
+              return;
+            }
+          } catch (retryErr) {
+            console.error('Failed to fetch klines on retry:', retryErr);
+          }
+        }
+      }
       console.error('Failed to fetch klines:', err);
+    }
+  },
+
+  loadOlderKlines: async () => {
+    const { symbol, candleInterval, klines, isLoadingOlderKlines, hasMoreOlderKlines } = get();
+    if (isLoadingOlderKlines || !hasMoreOlderKlines || !Array.isArray(klines) || klines.length === 0) {
+      return 0;
+    }
+    const earliestSec = klines[0].time;
+    if (!Number.isFinite(earliestSec) || earliestSec <= 0) return 0;
+
+    set({ isLoadingOlderKlines: true });
+    try {
+      const fetched = await apiClient.getKlines(symbol, candleInterval, 500, (earliestSec - 1) * 1000);
+      if (get().symbol !== symbol || get().candleInterval !== candleInterval) {
+        return 0;
+      }
+      const older = Array.isArray(fetched)
+        ? fetched.filter((c) => c && typeof c.time === 'number' && Number.isFinite(c.time) && c.time < earliestSec)
+        : [];
+      if (older.length === 0) {
+        set({ hasMoreOlderKlines: false });
+        return 0;
+      }
+      const mergedMap = new Map<number, KlineCandle>();
+      for (const c of older) mergedMap.set(c.time, c);
+      for (const c of get().klines) mergedMap.set(c.time, c);
+      const merged = Array.from(mergedMap.values()).sort((a, b) => a.time - b.time);
+      set({
+        klines: merged,
+        klinesSymbol: symbol,
+        klinesInterval: candleInterval,
+      });
+      return older.length;
+    } catch (err) {
+      console.error('Failed to load older klines:', err);
+      return 0;
+    } finally {
+      set({ isLoadingOlderKlines: false });
     }
   },
 

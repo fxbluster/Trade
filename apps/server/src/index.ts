@@ -970,10 +970,10 @@ export async function bootstrapServer(): Promise<{
       const candles = candleHistoryMap.get(sym) || [];
       return calculateIndicators(candles, 0.01);
     },
-    getKlines: async (sym, interval, limit) => {
+    getKlines: async (sym, interval, limit, startTime, endTime) => {
       try {
-        const raw = await client.getKlines(sym, interval, limit);
-        if (Array.isArray(raw) && raw.length > 50) {
+        const raw = await client.getKlines(sym, interval, limit, startTime, endTime);
+        if (Array.isArray(raw) && raw.length > 0) {
           return raw.map((k: any) => ({
             time: Math.floor(Number(k[0]) / 1000),
             open: Number(k[1]),
@@ -989,7 +989,9 @@ export async function bootstrapServer(): Promise<{
 
       // Fallback: public Binance futures REST
       try {
-        const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
+        let url = `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(sym)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
+        if (startTime !== undefined) url += `&startTime=${Math.floor(startTime)}`;
+        if (endTime !== undefined) url += `&endTime=${Math.floor(endTime)}`;
         const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
         if (response.ok) {
           const raw = (await response.json()) as (string | number)[][];

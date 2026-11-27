@@ -326,7 +326,7 @@ export const AutoPilotControls: React.FC = () => {
             <span>Daily Trade Cap:</span>
           </span>
           <div className="flex items-center space-x-1">
-            {[2, 3, 5, 10].map((cap) => (
+            {[2, 3, 5, 10, 20].map((cap) => (
               <button
                 key={cap}
                 onClick={() => handleUpdateConfig({ maxDailyTrades: cap })}

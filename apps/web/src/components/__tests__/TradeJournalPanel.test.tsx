@@ -116,4 +116,41 @@ describe('TradeJournalPanel', () => {
     expect(mddCard?.textContent).toContain('0.0%');
     expect(mddCard?.textContent).toContain('-$0.00');
   });
+
+  it('collapses consecutive strategy milestones into 1 expandable row and shows details on click', async () => {
+    const summary: JournalSummary = {
+      trades: [
+        makeTrade({ id: 't-new', opened_at: Date.parse('2026-11-27T12:00:00Z'), closed_at: Date.parse('2026-11-27T12:05:00Z') }),
+        makeTrade({ id: 't-old', opened_at: Date.parse('2026-11-26T20:00:00Z'), closed_at: Date.parse('2026-11-26T20:05:00Z') }),
+      ],
+      totalTrades: 2,
+      winRate: 0,
+      profitFactor: 0,
+      maxDrawdown: 0,
+      maxDrawdownUsd: 0,
+      kellyCriterion: 0,
+    };
+    vi.spyOn(apiClient, 'getJournal').mockResolvedValue(summary);
+
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(React.createElement(TradeJournalPanel));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const milestoneRows = container.querySelectorAll('[data-testid="strategy-milestone-row"]');
+    expect(milestoneRows.length).toBe(1);
+    expect(milestoneRows[0].textContent).toContain('v2.1–v2.6');
+    expect(milestoneRows[0].textContent).toContain('6 sistem dəyişikliyi');
+    expect(milestoneRows[0].textContent).not.toContain('Fee-aware Trailing Stop');
+
+    await act(async () => {
+      (milestoneRows[0] as HTMLElement).click();
+    });
+
+    expect(milestoneRows[0].textContent).toContain('Fee-aware Trailing Stop');
+    expect(milestoneRows[0].textContent).toContain('ARCH-10..12');
+  });
 });

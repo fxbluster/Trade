@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { apiClient } from '../lib/apiClient';
 import { formatUsd } from '../lib/formatters';
 import type { JournalSummary, TradeRecord } from '@tradeos/shared';
-import { BookOpen, RefreshCw, TrendingUp, TrendingDown, Award, PieChart, Shield } from 'lucide-react';
+import { BookOpen, RefreshCw, TrendingUp, TrendingDown, Award, PieChart, Shield, ChevronDown, ChevronUp } from 'lucide-react';
 
 interface StrategyMilestone {
   version: string;
@@ -54,6 +54,7 @@ export const TradeJournalPanel: React.FC = () => {
   const [journal, setJournal] = useState<JournalSummary | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [expandedMilestoneGroups, setExpandedMilestoneGroups] = useState<Record<string, boolean>>({});
 
   const fetchJournal = async () => {
     setIsLoading(true);
@@ -216,34 +217,72 @@ export const TradeJournalPanel: React.FC = () => {
                 const rows: React.ReactNode[] = [];
                 for (const t of trades) {
                   const tradeTs = t.opened_at || t.closed_at || 0;
+                  const group: StrategyMilestone[] = [];
                   while (
                     milestoneIdx < STRATEGY_MILESTONES.length &&
                     STRATEGY_MILESTONES[milestoneIdx].timestampMs >= tradeTs
                   ) {
-                    const m = STRATEGY_MILESTONES[milestoneIdx];
+                    group.push(STRATEGY_MILESTONES[milestoneIdx]);
+                    milestoneIdx++;
+                  }
+
+                  if (group.length > 0) {
+                    const groupKey = group.map((g) => g.version).join('-');
+                    const isExpanded = Boolean(expandedMilestoneGroups[groupKey]);
+                    const versionLabel =
+                      group.length === 1
+                        ? group[0].version
+                        : `${group[group.length - 1].version}–${group[0].version}`;
+                    const summaryLabel =
+                      group.length === 1
+                        ? `${group[0].timeLabel} · ${group[0].summary}`
+                        : `${group.length} sistem dəyişikliyi — ətraflı bax`;
+
                     rows.push(
                       <tr
-                        key={`milestone-${m.version}`}
+                        key={`milestone-${groupKey}`}
                         data-testid="strategy-milestone-row"
-                        className="bg-[#2962ff]/10 border-y border-[#2962ff]/30"
+                        onClick={() =>
+                          setExpandedMilestoneGroups((prev) => ({
+                            ...prev,
+                            [groupKey]: !prev[groupKey],
+                          }))
+                        }
+                        className="bg-[#2962ff]/10 border-y border-[#2962ff]/30 cursor-pointer hover:bg-[#2962ff]/15 transition-colors"
                       >
                         <td colSpan={10} className="py-1.5 px-2 text-[10px]">
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="flex items-center space-x-2">
                               <span className="px-1.5 py-0.5 rounded bg-[#2962ff]/25 text-[#60a5fa] font-bold border border-[#2962ff]/40">
-                                {m.version}
+                                {versionLabel}
                               </span>
-                              <span className="text-[#7d8590]">{m.timeLabel}</span>
-                              <span className="text-[#e6edf3] font-semibold">{m.summary}</span>
+                              <span className="text-[#e6edf3] font-semibold">{summaryLabel}</span>
                             </div>
-                            <span className="text-[#60a5fa] font-semibold">
-                              ▲ Yuxarıdakılar bu yeniləmədən sonradır
-                            </span>
+                            <div className="flex items-center space-x-2 text-[#60a5fa] font-semibold">
+                              <span>▲ Yuxarıdakılar sonradır</span>
+                              {isExpanded ? (
+                                <ChevronUp className="w-3.5 h-3.5" />
+                              ) : (
+                                <ChevronDown className="w-3.5 h-3.5" />
+                              )}
+                            </div>
                           </div>
+                          {isExpanded && (
+                            <div className="mt-2 pt-2 border-t border-[#2962ff]/20 space-y-1">
+                              {group.map((m) => (
+                                <div key={m.version} className="flex items-center space-x-2 text-[10px]">
+                                  <span className="px-1.5 py-0.5 rounded bg-[#2962ff]/20 text-[#60a5fa] font-bold">
+                                    {m.version}
+                                  </span>
+                                  <span className="text-[#7d8590]">{m.timeLabel}</span>
+                                  <span className="text-[#e6edf3]">{m.summary}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </td>
                       </tr>
                     );
-                    milestoneIdx++;
                   }
 
                   const isLong = t.side === 'BUY';

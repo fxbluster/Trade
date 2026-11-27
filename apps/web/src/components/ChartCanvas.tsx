@@ -870,9 +870,16 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
           el.style.display = 'none';
           return;
         }
+        const top = Math.max(0, Math.min(y1, y2));
+        const bottom = Math.max(0, Math.max(y1, y2));
+        const height = bottom - top;
+        if (height <= 0) {
+          el.style.display = 'none';
+          return;
+        }
         el.style.display = 'block';
-        el.style.top = `${Math.min(y1, y2)}px`;
-        el.style.height = `${Math.max(1, Math.abs(y2 - y1))}px`;
+        el.style.top = `${top}px`;
+        el.style.height = `${height}px`;
       };
 
       setBand(slZoneRef.current, activePosition?.entry_price, activePosition?.stop_loss);
@@ -1025,12 +1032,24 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
 
       {/* Lightweight Charts Canvas Root + SL/TP Zone Shading Overlay */}
       <div className="relative flex-1 w-full min-h-0">
-        <div className="pointer-events-none absolute inset-0 overflow-hidden z-[1]">
-          <div ref={slZoneRef} style={{ display: 'none' }} className="absolute left-0 right-0 bg-[#f6465d]/10" />
-          <div ref={tp1ZoneRef} style={{ display: 'none' }} className="absolute left-0 right-0 bg-[#0ecb81]/10" />
-          <div ref={tp2ZoneRef} style={{ display: 'none' }} className="absolute left-0 right-0 bg-[#0ecb81]/5" />
-        </div>
         <div ref={containerRef} className="w-full h-full" />
+        <div className="pointer-events-none absolute top-0 left-0 right-[64px] bottom-[26px] overflow-hidden z-10">
+          <div
+            ref={slZoneRef}
+            style={{ display: 'none', backgroundColor: 'rgba(246, 70, 93, 0.16)' }}
+            className="absolute left-0 right-0"
+          />
+          <div
+            ref={tp1ZoneRef}
+            style={{ display: 'none', backgroundColor: 'rgba(14, 203, 129, 0.15)' }}
+            className="absolute left-0 right-0"
+          />
+          <div
+            ref={tp2ZoneRef}
+            style={{ display: 'none', backgroundColor: 'rgba(14, 203, 129, 0.08)' }}
+            className="absolute left-0 right-0"
+          />
+        </div>
       </div>
     </div>
   );

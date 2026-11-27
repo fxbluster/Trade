@@ -853,6 +853,55 @@ export class TradeManager {
   }
 
   /**
+   * [DEF-07 / ARCH-16] Closes a fraction (default 50%) of an open position at market to lock in partial profit,
+   * updating remaining_qty, realized_pnl, fees_usd, and transitioning status to PARTIALLY_CLOSED.
+   */
+  public async takePartialProfit(symbol: string, fraction: number = 0.5): Promise<TradeRecord> {
+    return this.withSymbolMutex(symbol, async () => {
+      const trade = this.tradesRepo.getActivePosition(this.brokerMode, symbol);
+      if (!trade || trade.status !== 'OPEN' || trade.remaining_qty <= 0) {
+        throw new TradeManagerError(
+          `Partial TP skipped: no full OPEN position for ${symbol}`,
+          400,
+          'ERR_PARTIAL_TP_INVALID'
+        );
+      }
+      const closeQty = Number((trade.remaining_qty * fraction).toFixed(4));
+      const markPrice = this.getMarkPrice(symbol) || trade.entry_price;
+      if (closeQty <= 0 || closeQty * markPrice < 10 || (trade.remaining_qty - closeQty) * markPrice < 10) {
+        throw new TradeManagerError(
+          `Partial TP skipped: notional below $10 minimum on ${symbol}`,
+          400,
+          'ERR_PARTIAL_TP_MIN_NOTIONAL'
+        );
+      }
+      const closeRes = (await this.broker.closePosition(symbol, closeQty)) as any;
+      const actualClosed = closeRes && closeRes.executedQty > 0 ? Number(closeRes.executedQty) : closeQty;
+      const exitPrice = closeRes && closeRes.avgPrice > 0 ? Number(closeRes.avgPrice) : markPrice;
+      const isLong = trade.side === 'BUY';
+      const grossPnl = isLong
+        ? (exitPrice - trade.entry_price) * actualClosed
+        : (trade.entry_price - exitPrice) * actualClosed;
+      const feeUsd = Number((actualClosed * exitPrice * 0.0005).toFixed(4));
+      const newRemaining = Math.max(0, Number((trade.remaining_qty - actualClosed).toFixed(6)));
+      this.tradesRepo.update(trade.id, {
+        status: newRemaining > 0 ? trade.status : 'CLOSED',
+        remaining_qty: newRemaining,
+        realized_pnl: (trade.realized_pnl || 0) + grossPnl,
+        fees_usd: (trade.fees_usd || 0) + feeUsd,
+      });
+      const updated = this.tradesRepo.getById(trade.id) || {
+        ...trade,
+        remaining_qty: newRemaining,
+        realized_pnl: (trade.realized_pnl || 0) + grossPnl,
+        fees_usd: (trade.fees_usd || 0) + feeUsd,
+      };
+      this.broadcastPositionEvent('UPDATED', updated);
+      return updated;
+    });
+  }
+
+  /**
    * Migrates active position's Stop-Loss to Breakeven (+-0.15% fee buffer).
    * Enforces pre-flight buffer verification, atomic cancel-and-replace,
    * single <=500ms restoration retry, and fail-closed emergency market unwind on double failure.

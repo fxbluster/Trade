@@ -306,15 +306,21 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
         typeof ctx.broker.getAllPositions === 'function'
           ? await ctx.broker.getAllPositions().catch(() => [])
           : [];
-      const exchangePositions = rawExchangePositions.map((p) => ({
-        symbol: p.symbol,
-        positionAmt: p.positionAmt,
-        entryPrice: p.entryPrice,
-        markPrice: p.markPrice,
-        unRealizedProfit: p.unRealizedProfit,
-        leverage: p.leverage,
-        tracked: trackedSymbols.has(p.symbol.toUpperCase()),
-      }));
+      const exchangePositions = rawExchangePositions
+        .filter((p) => {
+          const isTracked = trackedSymbols.has(p.symbol.toUpperCase());
+          const notional = Math.abs(p.positionAmt * (p.markPrice || p.entryPrice || 0));
+          return isTracked || notional >= 5;
+        })
+        .map((p) => ({
+          symbol: p.symbol,
+          positionAmt: p.positionAmt,
+          entryPrice: p.entryPrice,
+          markPrice: p.markPrice,
+          unRealizedProfit: p.unRealizedProfit,
+          leverage: p.leverage,
+          tracked: trackedSymbols.has(p.symbol.toUpperCase()),
+        }));
       const openOrders = await ctx.broker.getOpenOrders(sym).catch(() => []);
       const indicators = ctx.getIndicators ? ctx.getIndicators(sym) : null;
       const cvd = ctx.getCvdSnapshot?.(sym) ?? ctx.cvdEngine?.getSnapshot() ?? null;

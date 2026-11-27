@@ -722,14 +722,31 @@ export class AutoPilotManager {
       return;
     }
 
-    // Re-entry lockout: global 180s when 0 positions open; per-symbol 180s when other symbols are open
+    // [DEF-08 / ARCH-17] Per-symbol & global re-entry lockout:
+    // - 300s per-symbol lockout after STOP_LOSS / WATCHDOG_STOP_LOSS (prevents 2.3s whipsaw flips)
+    // - 180s normal re-entry lockout (global when 0 open, per-symbol when other positions are open)
+    const nowMs = Date.now();
+    try {
+      const recentClosed = this.tradesRepo.listClosed(this.broker.mode, 1, 0, sym)[0];
+      if (
+        recentClosed &&
+        recentClosed.closed_at &&
+        (recentClosed.exit_reason === 'STOP_LOSS' ||
+          recentClosed.exit_reason === 'WATCHDOG_STOP_LOSS') &&
+        nowMs - recentClosed.closed_at < 300_000
+      ) {
+        return;
+      }
+    } catch {
+      // Tolerate if repo query unavailable in minimal mocks
+    }
     if (activeTrades.length === 0) {
-      if (Date.now() - this.lastExitTime < 180_000) {
+      if (nowMs - this.lastExitTime < 180_000) {
         return;
       }
     } else {
       const symLastExit = this.lastExitTimeBySymbol.get(sym) ?? 0;
-      if (Date.now() - symLastExit < 180_000) {
+      if (nowMs - symLastExit < 180_000) {
         return;
       }
     }
@@ -1747,9 +1764,23 @@ export class AutoPilotManager {
     }
 
     if (trade.is_breakeven === 0) {
-      const triggerThreshold = Math.max(1.5 * atr, trade.entry_price * 0.0025);
+      // [DEF-07 / ARCH-16] Raise BE migration threshold to max(2.0 * ATR, 0.45% profit)
+      // and take 50% partial profit before moving SL to BE on the remaining 50% runner.
+      const triggerThreshold = Math.max(2.0 * atr, trade.entry_price * 0.0045);
 
       if (profitPerUnit >= triggerThreshold) {
+        if (
+          trade.status === 'OPEN' &&
+          trade.remaining_qty > 0 &&
+          trade.remaining_qty >= trade.quantity * 0.95 &&
+          typeof (this.tradeManager as any).takePartialProfit === 'function'
+        ) {
+          try {
+            await (this.tradeManager as any).takePartialProfit(symbol, 0.5);
+          } catch {
+            // Proceed to breakeven migration even if partial TP skipped (e.g. min notional)
+          }
+        }
         try {
           await this.tradeManager.moveToBreakeven(symbol);
         } catch {

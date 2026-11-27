@@ -120,7 +120,7 @@ describe('TradeJournalPanel', () => {
   it('collapses consecutive strategy milestones into 1 expandable row and shows details on click', async () => {
     const summary: JournalSummary = {
       trades: [
-        makeTrade({ id: 't-new', opened_at: Date.parse('2026-11-27T14:00:00Z'), closed_at: Date.parse('2026-11-27T14:05:00Z') }),
+        makeTrade({ id: 't-new', opened_at: Date.parse('2026-11-27T15:00:00Z'), closed_at: Date.parse('2026-11-27T15:05:00Z') }),
         makeTrade({ id: 't-old', opened_at: Date.parse('2026-11-26T20:00:00Z'), closed_at: Date.parse('2026-11-26T20:05:00Z') }),
       ],
       totalTrades: 2,
@@ -142,8 +142,8 @@ describe('TradeJournalPanel', () => {
 
     const milestoneRows = container.querySelectorAll('[data-testid="strategy-milestone-row"]');
     expect(milestoneRows.length).toBe(1);
-    expect(milestoneRows[0].textContent).toContain('v2.1–v2.7');
-    expect(milestoneRows[0].textContent).toContain('7 sistem dəyişikliyi');
+    expect(milestoneRows[0].textContent).toContain('v2.1–v2.8');
+    expect(milestoneRows[0].textContent).toContain('8 sistem dəyişikliyi');
     expect(milestoneRows[0].textContent).not.toContain('Fee-aware Trailing Stop');
 
     await act(async () => {
@@ -153,5 +153,6 @@ describe('TradeJournalPanel', () => {
     expect(milestoneRows[0].textContent).toContain('Fee-aware Trailing Stop');
     expect(milestoneRows[0].textContent).toContain('ARCH-10..12');
     expect(milestoneRows[0].textContent).toContain('ARCH-13..15');
+    expect(milestoneRows[0].textContent).toContain('ARCH-16..18');
   });
 });

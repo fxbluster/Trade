@@ -836,11 +836,11 @@ export const PILLAR_CONFIGS: Array<{
   pKey: 'p1' | 'p2' | 'p3' | 'p4' | 'p5' | 'p6' | 'p7';
 }> = [
   { id: 'MACRO_REGIME', title: 'Macro Regime', baselineWeight: 25.0, pKey: 'p1' },
-  { id: 'NATIVE_SMC', title: 'Native SMC', baselineWeight: 25.0, pKey: 'p2' },
+  { id: 'NATIVE_SMC', title: 'Native SMC', baselineWeight: 17.5, pKey: 'p2' },
   { id: 'CVD_ABSORPTION', title: 'CVD Absorption', baselineWeight: 20.0, pKey: 'p3' },
   { id: 'ORDER_FLOW_L2', title: 'Order Flow L2', baselineWeight: 15.0, pKey: 'p4' },
-  { id: 'LIQ_CLUSTERS', title: 'Liquidity Clusters', baselineWeight: 7.5, pKey: 'p5' },
-  { id: 'MOMENTUM_RVOL', title: 'Momentum & rVol', baselineWeight: 5.0, pKey: 'p6' },
+  { id: 'LIQ_CLUSTERS', title: 'Liquidity Clusters', baselineWeight: 11.0, pKey: 'p5' },
+  { id: 'MOMENTUM_RVOL', title: 'Momentum & rVol', baselineWeight: 9.0, pKey: 'p6' },
   { id: 'SENTIMENT_MACRO', title: 'Macro Sentiment', baselineWeight: 2.5, pKey: 'p7' },
 ];
 

@@ -13,6 +13,12 @@ interface StrategyMilestone {
 
 const STRATEGY_MILESTONES: StrategyMilestone[] = [
   {
+    version: 'v2.8',
+    timestampMs: Date.parse('2026-11-27T14:40:00Z'),
+    timeLabel: '18:40',
+    summary: 'ARCH-16..18: 0.45% BE + 50% Partial TP, 5 dəq SL cooldown, dust filtr, pillar sinxronizasiyası',
+  },
+  {
     version: 'v2.7',
     timestampMs: Date.parse('2026-11-27T13:20:00Z'),
     timeLabel: '17:20',

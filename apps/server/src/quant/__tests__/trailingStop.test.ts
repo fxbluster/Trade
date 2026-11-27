@@ -228,7 +228,8 @@ describe('Giveback-Half Trailing Stop Engine [CUJ 1]', () => {
     expect(record.status).toBe('CLOSED');
     expect(record.exit_reason).toBe('TRAILING_GIVEBACK_HALF');
     expect(mockBroker.cancelAllOrdersCalls.length).toBeGreaterThan(0);
-    expect(mockBroker.closePositionCalls.length).toBe(1);
+    // 1st closePosition = 50% partial TP at Breakeven [ARCH-16], 2nd = remaining 50% runner on trailing giveback
+    expect(mockBroker.closePositionCalls.length).toBe(2);
     expect(autoPilot.getState()).toBe('IDLE');
   });
 

@@ -84,7 +84,7 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
         const openedAt = trade.opened_at || (trade.closed_at ? trade.closed_at - 30 * stepMs : Date.now() - 60 * stepMs);
         const closedAt = trade.closed_at || Date.now();
         const startMs = Math.max(1, openedAt - 45 * stepMs);
-        const endMs = closedAt + 25 * stepMs;
+        const endMs = closedAt + 120 * stepMs;
         const data = await apiClient.getKlines(trade.symbol, interval, 500, endMs, startMs);
         if (!cancelled) {
           const sorted = (Array.isArray(data) ? data : [])
@@ -136,6 +136,24 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
         borderColor: '#151d2c',
         autoScale: true,
         scaleMargins: { top: 0.1, bottom: 0.18 },
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: {
+          time: true,
+          price: true,
+        },
+        axisDoubleClickReset: {
+          time: true,
+          price: true,
+        },
+        mouseWheel: true,
+        pinch: true,
       },
       timeScale: {
         borderColor: '#151d2c',
@@ -319,8 +337,23 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
       setBand(tp2ZoneRef.current, trade.tp1 && trade.tp1 > 0 ? trade.tp1 : trade.entry_price, trade.tp2);
     };
 
-    requestAnimationFrame(updateZones);
+    requestAnimationFrame(() => {
+      chart.priceScale('right').applyOptions({ autoScale: false });
+      updateZones();
+    });
     chart.timeScale().subscribeVisibleLogicalRangeChange?.(updateZones);
+
+    const handleDblClick = () => {
+      if (!chartRef.current) return;
+      chartRef.current.timeScale().fitContent();
+      chartRef.current.priceScale('right').applyOptions({ autoScale: true });
+      requestAnimationFrame(() => {
+        chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
+        updateZones();
+      });
+    };
+    const containerEl = containerRef.current;
+    containerEl?.addEventListener('dblclick', handleDblClick);
 
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== 'undefined' && containerRef.current) {
@@ -339,6 +372,7 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
 
     return () => {
       chart.timeScale().unsubscribeVisibleLogicalRangeChange?.(updateZones);
+      containerEl?.removeEventListener('dblclick', handleDblClick);
       resizeObserver?.disconnect();
       chart.remove();
       chartRef.current = null;
@@ -385,6 +419,20 @@ export const TradeReplayModal: React.FC<TradeReplayModalProps> = ({ trade, onClo
           </div>
 
           <div className="flex items-center space-x-2">
+            <button
+              onClick={() => {
+                if (!chartRef.current) return;
+                chartRef.current.timeScale().fitContent();
+                chartRef.current.priceScale('right').applyOptions({ autoScale: true });
+                requestAnimationFrame(() => {
+                  chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
+                });
+              }}
+              title="Qrafiki ekrana sığdır"
+              className="px-2 py-0.5 text-[11px] rounded bg-[#151d2c] text-[#7d8590] hover:text-[#0ecb81] border border-[#151d2c] transition-colors"
+            >
+              Fit ⛶
+            </button>
             <div className="flex items-center space-x-1 bg-[#020305] p-0.5 rounded border border-[#151d2c]">
               {(['1m', '5m', '15m'] as const).map((int) => (
                 <button

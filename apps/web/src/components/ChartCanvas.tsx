@@ -75,8 +75,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
   } | null>(null);
   const lastSizeRef = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
 
-  const [isFreePan, setIsFreePan] = React.useState(false);
-
   const symbol = useMarketStore((s) => s.symbol);
   const klines = useMarketStore((s) => s.klines);
   const klinesSymbol = useMarketStore((s) => s.klinesSymbol);
@@ -388,11 +386,14 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
     };
     chart.timeScale().subscribeVisibleLogicalRangeChange?.(handleRangeChange);
 
-    // Double-click to reset / fit content
+    // Double-click to reset / fit content (then keep free vertical drag enabled)
     const handleDblClick = () => {
       if (!chartRef.current) return;
       chartRef.current.timeScale().fitContent();
       chartRef.current.priceScale('right').applyOptions({ autoScale: true });
+      requestAnimationFrame(() => {
+        chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
+      });
     };
     const containerEl = containerRef.current;
     containerEl?.addEventListener('dblclick', handleDblClick);
@@ -443,7 +444,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       lastRenderedKeyRef.current = null;
       earliestBarTimeRef.current = null;
       barCountRef.current = 0;
-      setIsFreePan(false);
       if (candleSeriesRef.current) {
         candleSeriesRef.current.setData([]);
       }
@@ -542,7 +542,6 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         });
       } else if (lastRenderedKeyRef.current !== key) {
         chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
-        setIsFreePan(false);
         if (sortedKlines.length > 150 && typeof chartRef.current?.timeScale().setVisibleLogicalRange === 'function') {
           chartRef.current.timeScale().setVisibleLogicalRange({
             from: sortedKlines.length - 150,
@@ -551,6 +550,9 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
         } else {
           chartRef.current?.timeScale().fitContent();
         }
+        requestAnimationFrame(() => {
+          chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
+        });
         lastFitSymbolRef.current = symbol;
       }
       lastRenderedKeyRef.current = key;
@@ -981,29 +983,14 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
             </span>
           </button>
 
-          {/* Free Vertical Pan Toggle */}
-          <button
-            onClick={() => {
-              const next = !isFreePan;
-              setIsFreePan(next);
-              chartRef.current?.priceScale('right').applyOptions({ autoScale: !next });
-            }}
-            title="Sıçanla yuxarı-aşağı sərbəst sürüşdürmə (Auto-Scale söndür/yandır)"
-            className={`px-2 py-1 text-xs font-mono rounded border transition-colors ${
-              isFreePan
-                ? 'bg-[#0ecb81]/20 text-[#0ecb81] border-[#0ecb81]/50 font-bold'
-                : 'bg-[#151d2c] text-[#7d8590] hover:text-[#e6edf3] border-[#151d2c]'
-            }`}
-          >
-            Free ↕
-          </button>
-
           {/* Fit / Reset Scale Button */}
           <button
             onClick={() => {
-              setIsFreePan(false);
               chartRef.current?.timeScale().fitContent();
               chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+              requestAnimationFrame(() => {
+                chartRef.current?.priceScale('right').applyOptions({ autoScale: false });
+              });
             }}
             title="Qrafiki ekrana tam sığdır (və ya qrafikə iki dəfə klikləyin)"
             className="px-2 py-1 text-xs font-mono rounded bg-[#151d2c] text-[#7d8590] hover:text-[#0ecb81] border border-[#151d2c] transition-colors"

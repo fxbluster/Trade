@@ -86,6 +86,77 @@ export class LocalPaperAdapter implements BrokerAdapter {
     this.settingsRepo = new SettingsRepo(options.db);
     this.defaultBalance = options.initialBalance ?? 5000.0;
     this.ensureInitialized();
+    this.rehydrateFromDb(options.db);
+  }
+
+  /**
+   * Restores any open/partially-closed LOCAL_PAPER trades and their SL/TP algo orders
+   * from SQLite after a server restart so live PnL, availableBalance, and SL/TP triggers stay intact.
+   */
+  private rehydrateFromDb(db: DatabaseSync): void {
+    try {
+      const rows = db
+        .prepare(
+          `SELECT * FROM trades WHERE broker_mode = 'LOCAL_PAPER' AND status IN ('OPEN', 'PARTIALLY_CLOSED')`
+        )
+        .all() as Array<any>;
+      for (const t of rows) {
+        const sym = String(t.symbol).toUpperCase();
+        const remQty = Number(t.remaining_qty || t.quantity || 0);
+        if (remQty <= 0) continue;
+        this.positions.set(sym, {
+          symbol: sym,
+          side: t.side === 'SELL' ? 'SELL' : 'BUY',
+          entryPrice: Number(t.entry_price),
+          quantity: remQty,
+          leverage: Number(t.leverage || 10),
+          marginUsd: Number(t.margin_usd || 0),
+          openedAt: Number(t.opened_at || Date.now()),
+        });
+        const oppSide: 'BUY' | 'SELL' = t.side === 'BUY' ? 'SELL' : 'BUY';
+        if (t.sl_algo_id && t.stop_loss > 0) {
+          this.openOrders.set(String(t.sl_algo_id), {
+            orderId: String(t.sl_algo_id),
+            clientOrderId: t.client_sl_id || undefined,
+            symbol: sym,
+            side: oppSide,
+            type: 'STOP_MARKET',
+            triggerPrice: Number(t.stop_loss),
+            quantity: remQty,
+            isAlgo: true,
+            reduceOnly: true,
+          });
+        }
+        if (t.tp1_algo_id && t.tp1 > 0 && t.status === 'OPEN') {
+          this.openOrders.set(String(t.tp1_algo_id), {
+            orderId: String(t.tp1_algo_id),
+            clientOrderId: t.client_tp1_id || undefined,
+            symbol: sym,
+            side: oppSide,
+            type: 'TAKE_PROFIT_MARKET',
+            triggerPrice: Number(t.tp1),
+            quantity: Number((remQty * 0.5).toFixed(4)),
+            isAlgo: true,
+            reduceOnly: true,
+          });
+        }
+        if (t.tp2_algo_id && t.tp2 > 0) {
+          this.openOrders.set(String(t.tp2_algo_id), {
+            orderId: String(t.tp2_algo_id),
+            clientOrderId: t.client_tp2_id || undefined,
+            symbol: sym,
+            side: oppSide,
+            type: 'TAKE_PROFIT_MARKET',
+            triggerPrice: Number(t.tp2),
+            quantity: t.status === 'OPEN' ? Number((remQty * 0.5).toFixed(4)) : remQty,
+            isAlgo: true,
+            reduceOnly: true,
+          });
+        }
+      }
+    } catch {
+      // Tolerate minimal test DBs without trades table
+    }
   }
 
   public setOnAlgoTrigger(

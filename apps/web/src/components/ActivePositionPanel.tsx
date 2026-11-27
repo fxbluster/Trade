@@ -90,6 +90,11 @@ export const ActivePositionPanel: React.FC = () => {
                     }`}
                   >
                     {livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}
+                    {pos.margin_usd > 0 && (
+                      <span className="ml-1 opacity-85">
+                        ({livePnl >= 0 ? '+' : ''}{((livePnl / pos.margin_usd) * 100).toFixed(2)}%)
+                      </span>
+                    )}
                   </span>
                 )}
                 <span className="text-[#8b949e]">

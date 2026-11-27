@@ -974,6 +974,71 @@ export function registerRoutes(app: PolkaInstance, ctx: AppContext): PolkaInstan
     }
   });
 
+  // 27. POST /api/admin/clean-slate — Wipe historical trades, logs, cooldowns, and propfirm cycles
+  app.post('/api/admin/clean-slate', async (_req: Request, res: Response) => {
+    const tradesRepo = new TradesRepo(ctx.db);
+    const active = tradesRepo.getActivePosition(ctx.broker.mode);
+    if (active) {
+      return sendJson(res, 409, {
+        error: `Active position exists on ${active.symbol}. Close all positions before clean-slate reset.`,
+        code: 'OPEN_POSITION_EXISTS',
+      });
+    }
+
+    try {
+      const tables = [
+        'trades',
+        'fills',
+        'decision_logs',
+        'execution_chase_logs',
+        'pillar_telemetry',
+        'propfirm_cycles',
+      ];
+      for (const tbl of tables) {
+        try {
+          ctx.db.prepare(`DELETE FROM ${tbl}`).run();
+        } catch {
+          // Table may not exist in older schemas
+        }
+      }
+
+      try {
+        ctx.db
+          .prepare(
+            'UPDATE risk_state SET consecutive_losses = 0, cooldown_until = 0, cooldown_reason = NULL, session_net_pnl = 0, session_started_at = ?, updated_at = ?'
+          )
+          .run(Date.now(), Date.now());
+      } catch {
+        // Ignore if risk_state absent
+      }
+
+      try {
+        ctx.db.prepare("DELETE FROM settings WHERE key = 'autopilot_cooldown_until'").run();
+      } catch {
+        // Ignore
+      }
+
+      tradesRepo.invalidateActiveCache();
+      ctx.autoPilotManager?.resetCooldown();
+      ctx.autoPilotManager?.clearPropFirmBlock();
+
+      let propFirmStatus = null;
+      if (ctx.propFirmRiskGuard) {
+        const walletBalance = await resolvePropFirmWalletBalance(ctx);
+        propFirmStatus = ctx.propFirmRiskGuard.resetCleanSlate(walletBalance);
+      }
+
+      sendJson(res, 200, {
+        ok: true,
+        message: 'Clean slate completed',
+        propFirmStatus,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: `Clean slate failed: ${msg}` });
+    }
+  });
+
   return app;
 }
 

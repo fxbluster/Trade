@@ -212,6 +212,17 @@ export class PropFirmRiskGuard {
     return { ...this.config };
   }
 
+  public resetCleanSlate(liveWalletBalanceUsd?: number, nowMs: number = Date.now()): PropFirmStatusResponse {
+    this.realizedCyclePnlByCycleId.clear();
+    this.recordedTradeIds.clear();
+    this.notifiedTargetCycleIds.clear();
+    const fresh = this.createFreshCycle(nowMs);
+    this.realizedCyclePnlByCycleId.set(fresh.id, 0);
+    const status = this.getStatus(liveWalletBalanceUsd, nowMs);
+    this.onStatusUpdate?.(status);
+    return status;
+  }
+
   public getCurrentRealizedCyclePnl(): number {
     const cycle = this.getOrInitCycle(Date.now());
     return this.getRealizedCyclePnl(cycle);

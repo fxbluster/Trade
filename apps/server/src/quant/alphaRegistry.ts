@@ -49,6 +49,7 @@ export interface CompositeFactorEvaluation {
 export const MGS_WINDOW = 60;
 export const MGS_EPSILON = 1e-7;
 export const MGS_COLLINEAR_THRESHOLD = 1e-6;
+export const MIN_IR_STD = 1e-4;
 export const DIRICHLET_ALPHA = 1.0; // Dirichlet prior concentration
 export const MIN_CALIBRATED_WEIGHT = 0.05;
 
@@ -182,10 +183,30 @@ export class AlphaRegistry {
       };
     }
 
-    // 1. Compute raw outputs
-    const outputs: FactorOutput[] = this.factors.map((f) =>
-      f.computeFactor(context)
-    );
+    // 1. Compute raw outputs and align sign with authoritative confirmed pillars when provided
+    const contextPillars = (context as FactorEvaluationContext & {
+      pillars?: Array<{ id: string; bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL'; confirmed: boolean }>;
+    }).pillars;
+
+    const outputs: FactorOutput[] = this.factors.map((f) => {
+      const out = f.computeFactor(context);
+      if (contextPillars && contextPillars.length > 0) {
+        const matchedPillar = contextPillars.find((p) => p.id === out.factorId);
+        if (matchedPillar && matchedPillar.confirmed && matchedPillar.bias !== 'NEUTRAL') {
+          const expectedSign = matchedPillar.bias === 'BULLISH' ? 1 : -1;
+          const mag = Math.abs(out.rawAlpha);
+          if (out.rawAlpha * expectedSign < 0) {
+            const alignedAlpha = expectedSign * mag;
+            return {
+              ...out,
+              rawAlpha: alignedAlpha,
+              bias: mag > 0.1 ? matchedPillar.bias : out.bias,
+            };
+          }
+        }
+      }
+      return out;
+    });
 
     // 2. Update sliding-window history
     for (let i = 0; i < this.factors.length; i++) {
@@ -212,6 +233,11 @@ export class AlphaRegistry {
     let orthogonalAlphas: number[];
     let isCollinear: boolean[];
 
+    const isDeadOutput = (output: FactorOutput): boolean =>
+      Math.abs(output.rawAlpha) <= 1e-6 ||
+      output.confidence <= 0 ||
+      output.metadata?.deadFactor === true;
+
     // Only run MGS across factors when history dimension >= number of factors (and >= 2)
     // to avoid rank-deficiency artificially zeroing active factors on early ticks.
     if (maxHistLen >= Math.max(2, factorEntries.length)) {
@@ -222,7 +248,9 @@ export class AlphaRegistry {
       const varyingVectors: number[][] = [];
 
       for (let k = 0; k < factorEntries.length; k++) {
-        const h = factorEntries[k]!.history;
+        const entry = factorEntries[k]!;
+        if (isDeadOutput(entry.output)) continue;
+        const h = entry.history;
         const padded =
           h.length < maxHistLen
             ? [...new Array(maxHistLen - h.length).fill(h[0] ?? 0), ...h]
@@ -233,9 +261,9 @@ export class AlphaRegistry {
         }
       }
 
-      isCollinear = factorEntries.map((e) => Math.abs(e.output.rawAlpha) <= 1e-6);
+      isCollinear = factorEntries.map((e) => isDeadOutput(e.output));
       orthogonalAlphas = factorEntries.map((e) =>
-        Math.abs(e.output.rawAlpha) <= 1e-6 ? 0 : e.output.rawAlpha
+        isDeadOutput(e.output) ? 0 : e.output.rawAlpha
       );
 
       if (varyingVectors.length >= 2) {
@@ -254,9 +282,9 @@ export class AlphaRegistry {
       }
     } else {
       // Early ticks before history dimension >= factor count: factors are independent
-      isCollinear = factorEntries.map((e) => Math.abs(e.output.rawAlpha) <= 1e-6);
+      isCollinear = factorEntries.map((e) => isDeadOutput(e.output));
       orthogonalAlphas = factorEntries.map((e) =>
-        Math.abs(e.output.rawAlpha) <= 1e-6 ? 0 : e.output.rawAlpha
+        isDeadOutput(e.output) ? 0 : e.output.rawAlpha
       );
     }
 
@@ -343,16 +371,20 @@ function isConstantSeries(history: number[], stdThreshold: number = 1e-4): boole
  * Compute Information Ratio of a time series over sliding window:
  * IR = Mean(alpha) / (Std(alpha) + eps)
  */
-export function computeInformationRatio(history: number[], epsilon: number = MGS_EPSILON): number {
+export function computeInformationRatio(
+  history: number[],
+  epsilon: number = MGS_EPSILON,
+  minStd: number = MIN_IR_STD
+): number {
   if (!history || history.length === 0) return 0;
   const n = history.length;
   const mean = history.reduce((s, v) => s + v, 0) / n;
-  if (n === 1) return mean / (Math.abs(mean) * 0.1 + epsilon);
+  if (n === 1) return mean / Math.max(Math.abs(mean) * 0.1 + epsilon, minStd);
 
   const variance =
     history.reduce((s, v) => s + (v - mean) ** 2, 0) / (n - 1);
   const std = Math.sqrt(variance);
-  return mean / (std + epsilon);
+  return mean / Math.max(std + epsilon, minStd);
 }
 
 /** Vector dot product: <a, b> */

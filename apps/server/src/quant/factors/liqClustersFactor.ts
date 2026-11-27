@@ -49,7 +49,11 @@ export class LiqClustersFactor implements IAlphaFactor {
 
   computeFactor(context: FactorEvaluationContext): FactorOutput {
     const currentPrice = context.currentPrice;
-    const atr14 = context.indicators?.atr14 ?? (currentPrice * 0.01); // Fallback 1% ATR
+    const rawAtr = context.indicators?.atr14;
+    const atr14 =
+      rawAtr !== undefined && rawAtr !== null && Number.isFinite(rawAtr) && rawAtr > 0
+        ? rawAtr
+        : currentPrice * 0.01; // Fallback 1% ATR when missing or truncated to 0
     const openInterestUsd = context.cvd?.openInterestUsd ?? null;
 
     if (currentPrice <= 0 || atr14 <= 0) {
@@ -66,24 +70,27 @@ export class LiqClustersFactor implements IAlphaFactor {
       return neutral(context.timestamp);
     }
 
+    // Percentage / bps normalization for scale-invariant proximity
+    const atrPct = atr14 / currentPrice;
+    const proximityThresholdPct = PROXIMITY_ATR_MULTIPLIER * atrPct;
     const proximityThreshold = PROXIMITY_ATR_MULTIPLIER * atr14;
 
-    let nearestShortDist = Infinity;
+    let nearestShortDistPct = Infinity;
     let nearestShortCluster: LiquidationCluster | null = null;
-    let nearestLongDist = Infinity;
+    let nearestLongDistPct = Infinity;
     let nearestLongCluster: LiquidationCluster | null = null;
 
     for (const cluster of clusters) {
       if (cluster.side === 'SHORT_LIQ' && cluster.price >= currentPrice) {
-        const dist = cluster.price - currentPrice;
-        if (dist < nearestShortDist) {
-          nearestShortDist = dist;
+        const distPct = (cluster.price - currentPrice) / currentPrice;
+        if (distPct < nearestShortDistPct) {
+          nearestShortDistPct = distPct;
           nearestShortCluster = cluster;
         }
       } else if (cluster.side === 'LONG_LIQ' && cluster.price <= currentPrice) {
-        const dist = currentPrice - cluster.price;
-        if (dist < nearestLongDist) {
-          nearestLongDist = dist;
+        const distPct = (currentPrice - cluster.price) / currentPrice;
+        if (distPct < nearestLongDistPct) {
+          nearestLongDistPct = distPct;
           nearestLongCluster = cluster;
         }
       }
@@ -92,35 +99,40 @@ export class LiqClustersFactor implements IAlphaFactor {
     let rawAlpha = 0;
     let confidence = 0;
 
-    const shortTriggered = nearestShortCluster && nearestShortDist <= proximityThreshold;
-    const longTriggered = nearestLongCluster && nearestLongDist <= proximityThreshold;
+    const shortTriggered = nearestShortCluster && nearestShortDistPct <= proximityThresholdPct;
+    const longTriggered = nearestLongCluster && nearestLongDistPct <= proximityThresholdPct;
 
     if (shortTriggered && !longTriggered) {
       // Short liquidation pool is within 0.45x ATR above price -> Bullish magnet draw
-      const proximityRatio = Math.max(0, 1 - nearestShortDist / proximityThreshold);
+      const proximityRatio = Math.max(0, 1 - nearestShortDistPct / proximityThresholdPct);
       rawAlpha = 0.5 + proximityRatio * 0.5;
       confidence = Math.min(1.0, 0.6 + proximityRatio * 0.4);
     } else if (longTriggered && !shortTriggered) {
       // Long liquidation pool is within 0.45x ATR below price -> Bearish magnet draw
-      const proximityRatio = Math.max(0, 1 - nearestLongDist / proximityThreshold);
+      const proximityRatio = Math.max(0, 1 - nearestLongDistPct / proximityThresholdPct);
       rawAlpha = -(0.5 + proximityRatio * 0.5);
       confidence = Math.min(1.0, 0.6 + proximityRatio * 0.4);
     } else if (shortTriggered && longTriggered) {
       // Price is flanked by both clusters within 0.45x ATR: compare volumes and proximity
-      const shortRatio = 1 - nearestShortDist / proximityThreshold;
-      const longRatio = 1 - nearestLongDist / proximityThreshold;
+      const shortRatio = 1 - nearestShortDistPct / proximityThresholdPct;
+      const longRatio = 1 - nearestLongDistPct / proximityThresholdPct;
       const netRatio = shortRatio - longRatio;
       rawAlpha = Math.max(-0.8, Math.min(0.8, netRatio));
       confidence = 0.5;
     } else {
       // Not within 0.45x ATR threshold: mild directional pull toward the closer cluster
-      if (nearestShortDist < nearestLongDist) {
-        rawAlpha = Math.min(0.3, (proximityThreshold / nearestShortDist) * 0.3);
-      } else if (nearestLongDist < nearestShortDist) {
-        rawAlpha = -Math.min(0.3, (proximityThreshold / nearestLongDist) * 0.3);
+      if (nearestShortDistPct < nearestLongDistPct) {
+        rawAlpha = Math.min(0.3, (proximityThresholdPct / nearestShortDistPct) * 0.3);
+      } else if (nearestLongDistPct < nearestShortDistPct) {
+        rawAlpha = -Math.min(0.3, (proximityThresholdPct / nearestLongDistPct) * 0.3);
       }
       confidence = 0.2;
     }
+
+    const nearestShortDist =
+      nearestShortDistPct === Infinity ? Infinity : nearestShortDistPct * currentPrice;
+    const nearestLongDist =
+      nearestLongDistPct === Infinity ? Infinity : nearestLongDistPct * currentPrice;
 
     rawAlpha = Math.max(-1.0, Math.min(1.0, rawAlpha));
     const bias = rawAlpha > 0.1 ? 'BULLISH' : rawAlpha < -0.1 ? 'BEARISH' : 'NEUTRAL';

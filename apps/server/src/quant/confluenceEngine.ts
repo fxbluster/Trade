@@ -199,9 +199,21 @@ export class ConfluenceEngine {
     const p4OrderFlow = this.orderFlowEngine.evaluateL2(currentPrice, now);
 
     // 5. Pillar: LIQ_CLUSTERS (8% Bayesian weight: Leverage pools 10x-100x from Open Interest)
+    const candles15mForNoise = this.mtfManager.getCandles(symbol, '15m');
+    const atr14ForNoiseBand =
+      this.compute15mAtr14(candles15mForNoise) ?? indicators?.atr14 ?? undefined;
+    const rawIndAtr = indicators?.atr14;
+    const effectiveLiqAtr14 =
+      rawIndAtr !== undefined && rawIndAtr !== null && rawIndAtr > 0
+        ? rawIndAtr
+        : atr14ForNoiseBand && atr14ForNoiseBand > 0
+          ? atr14ForNoiseBand
+          : currentPrice > 0
+            ? currentPrice * 0.005
+            : null;
     const p5Liq = this.liquidationEngine.evaluate({
       currentPrice,
-      atr14: indicators?.atr14 ?? null,
+      atr14: effectiveLiqAtr14,
       recentHigh,
       recentLow,
       openInterestUsd: cvd?.openInterestUsd ?? null,
@@ -252,9 +264,6 @@ export class ConfluenceEngine {
 
     // Pre-consensus gates: Economic Event Blackout & Noise Band Filter
     // Use 15m ATR(14) from mtfManager when available so 1m ATR never falsely triggers 15m breakout bypass.
-    const candles15mForNoise = this.mtfManager.getCandles(symbol, '15m');
-    const atr14ForNoiseBand =
-      this.compute15mAtr14(candles15mForNoise) ?? indicators?.atr14 ?? undefined;
     const gateCheck = this.checkPreTradeGates(
       symbol,
       currentPrice,
@@ -295,13 +304,21 @@ export class ConfluenceEngine {
     let alphaEval: CompositeFactorEvaluation | null = null;
     if (!eventBlackoutActive && this.alphaRegistry) {
       const candles = this.resolveFactorCandles(symbol, data.candles);
+      const candles1h = this.mtfManager.getCandles(symbol, '1h');
       const depth = data.depth || this.orderFlowEngine.getDepth();
-      const context: FactorEvaluationContext & { fundingRate?: number; spotPrice?: number } = {
+      const context: FactorEvaluationContext & {
+        fundingRate?: number;
+        spotPrice?: number;
+        candles1h?: KlineCandle[];
+        pillars?: PillarEvaluation[];
+      } = {
         symbol,
         currentPrice,
         depth,
         cvd: cvd ?? undefined,
         candles,
+        candles1h,
+        pillars,
         indicators: indicators ?? undefined,
         timestamp: now,
         ...(data.fundingRate !== undefined ? { fundingRate: data.fundingRate } : {}),

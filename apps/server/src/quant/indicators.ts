@@ -85,7 +85,11 @@ export function calculateATR(candles: KlineCandle[], period: number = 14, tickSi
     atr = (atr * (period - 1) + trs[i]!) / period;
   }
 
-  return tickSize && tickSize > 0 ? formatByTickSize(atr, tickSize) : Number(atr.toFixed(4));
+  if (tickSize && tickSize > 0) {
+    const formatted = formatByTickSize(atr, tickSize);
+    if (formatted > 0) return formatted;
+  }
+  return atr < 0.01 ? Number(atr.toFixed(6)) : Number(atr.toFixed(4));
 }
 
 /**
@@ -424,17 +428,25 @@ export function calculateIndicators(candles: KlineCandle[], tickSize: number = 0
   }
 
   const closes = candles.map((c) => c.close);
+  const latestClose = closes[closes.length - 1] ?? 0;
+  // Preserve sub-cent precision for low-price assets (<$10 / <$1) when callers pass default 0.01 tickSize
+  const effectiveTickSize =
+    latestClose > 0 && latestClose < 1 && tickSize >= 0.01
+      ? 0.0001
+      : latestClose > 0 && latestClose < 10 && tickSize >= 0.01
+        ? 0.001
+        : tickSize;
 
-  const ema9 = calculateEMA(closes, 9, tickSize);
-  const ema21 = calculateEMA(closes, 21, tickSize);
-  const ema50 = calculateEMA(closes, 50, tickSize);
-  const ema200 = calculateEMA(closes, 200, tickSize);
+  const ema9 = calculateEMA(closes, 9, effectiveTickSize);
+  const ema21 = calculateEMA(closes, 21, effectiveTickSize);
+  const ema50 = calculateEMA(closes, 50, effectiveTickSize);
+  const ema200 = calculateEMA(closes, 200, effectiveTickSize);
   const rsi14 = calculateRSI(closes, 14);
-  const atr14 = calculateATR(candles, 14, tickSize);
+  const atr14 = calculateATR(candles, 14, effectiveTickSize);
   const macd = calculateMACD(closes, 12, 26, 9);
-  const bollingerBands = calculateBollingerBands(closes, 20, 2, tickSize);
+  const bollingerBands = calculateBollingerBands(closes, 20, 2, effectiveTickSize);
   const adx14 = calculateADX(candles, 14);
-  const { support, resistance } = findSupportResistance(candles, 30, tickSize);
+  const { support, resistance } = findSupportResistance(candles, 30, effectiveTickSize);
   const volumeSma20 = calculateVolumeSMA(candles, 20);
 
   return {

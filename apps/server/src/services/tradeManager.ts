@@ -12,6 +12,7 @@ import type {
   AccountInfo,
   OpenOrderInfo,
 } from '@tradeos/shared';
+import { computeBreakevenPrice } from '@tradeos/shared';
 import {
   TradesRepo,
   FillsRepo,
@@ -423,7 +424,41 @@ export class TradeManager {
           }
         }
 
-        // Gate 1: Check existing active position on symbol in this broker mode
+        // Gate 1: Global 1-position limit across DB open positions and exchangePositions
+        const globalDbActive = this.tradesRepo.getActivePosition(this.brokerMode);
+        if (globalDbActive) {
+          throw new TradeManagerError(
+            `Global 1-position limit: active position already exists on ${globalDbActive.symbol} (status: ${globalDbActive.status})`,
+            409,
+            'ERR_POSITION_EXISTS'
+          );
+        }
+
+        const exchangePositions =
+          typeof this.broker.getAllPositions === 'function'
+            ? await this.broker.getAllPositions()
+            : null;
+        if (exchangePositions !== null) {
+          const openExPos = exchangePositions.find((p) => Math.abs(p.positionAmt) > 1e-8);
+          if (openExPos) {
+            throw new TradeManagerError(
+              `Global 1-position limit: open exchange position exists on ${openExPos.symbol}`,
+              409,
+              'ERR_POSITION_EXISTS'
+            );
+          }
+        } else {
+          const symExPos = await this.broker.getPosition(req.symbol);
+          if (symExPos && Math.abs(symExPos.positionAmt) > 1e-8) {
+            throw new TradeManagerError(
+              `Global 1-position limit: open exchange position exists on ${symExPos.symbol}`,
+              409,
+              'ERR_POSITION_EXISTS'
+            );
+          }
+        }
+
+        // Gate 1b: Check existing active position on symbol in this broker mode
         const activePosition = this.tradesRepo.getActivePosition(this.brokerMode, req.symbol);
         if (activePosition) {
           throw new TradeManagerError(
@@ -588,10 +623,8 @@ export class TradeManager {
         const fillPrice =
           entryResult.avgPrice > 0 ? entryResult.avgPrice : effectiveEntryPrice;
 
-        // Calculate Breakeven price (+-0.15% fee buffer)
-        const bePrice = Number(
-          (req.side === 'BUY' ? fillPrice * 1.0015 : fillPrice * 0.9985).toFixed(4)
-        );
+        // Calculate Breakeven price (round-trip fee + slippage buffer)
+        const bePrice = computeBreakevenPrice(fillPrice, req.side);
 
         // 6. Bracket Compensation — Place Stop-Loss Algo Order
         const oppositeSide: TradeSide = req.side === 'BUY' ? 'SELL' : 'BUY';
@@ -738,10 +771,7 @@ export class TradeManager {
         return tradeRecord;
       });
 
-    if (this.propFirmRiskGuard) {
-      return this.withGlobalPreTradeMutex(runOpen);
-    }
-    return runOpen();
+    return this.withGlobalPreTradeMutex(runOpen);
   }
 
   /**
@@ -920,13 +950,8 @@ export class TradeManager {
         return trade; // Already moved to breakeven
       }
 
-      // Calculate breakeven price with 0.15% fee buffer
-      const bePrice = Number(
-        (trade.side === 'BUY'
-          ? trade.entry_price * 1.0015
-          : trade.entry_price * 0.9985
-        ).toFixed(4)
-      );
+      // Calculate breakeven price with round-trip fee + slippage buffer
+      const bePrice = computeBreakevenPrice(trade.entry_price, trade.side);
 
       // Pre-flight buffer check: verify current markPrice is safe distance from breakeven
       const markPrice = this.getMarkPrice(symbol);

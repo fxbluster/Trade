@@ -733,4 +733,52 @@ describe('TradeManager — Atomic Orchestration & Fail-Closed Execution', () => 
       })
     ).rejects.toMatchObject({ statusCode: 403, code: 'UPCOMERS_DAILY_HALT' });
   });
+
+  // --------------------------------------------------------------------------
+  // Test 11: [DEF-02 / DEF-03] Global 1-position limit & fee+slippage BE buffer
+  // --------------------------------------------------------------------------
+  it('enforces global 1-position limit across DB and exchangePositions without PropFirm guard, and includes 0.25% BE buffer', async () => {
+    markPriceMap.set('XRPUSDT', 0.5);
+    markPriceMap.set('BTCUSDT', 60000);
+    (mockBroker as any).getAllPositions = async () =>
+      mockBroker.position ? [mockBroker.position] : [];
+
+    const t1 = await tradeManager.openPosition({
+      symbol: 'XRPUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      limitPrice: 0.5,
+      marginUsd: 50,
+      leverage: 5,
+      stopLoss: 0.48,
+    });
+    expect(t1.be_price).toBeCloseTo(0.5 * 1.0025, 4);
+
+    // Second symbol blocked by global 1-position guard
+    await expect(
+      tradeManager.openPosition({
+        symbol: 'BTCUSDT',
+        side: 'SELL',
+        orderType: 'MARKET',
+        marginUsd: 50,
+        leverage: 5,
+        stopLoss: 61000,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: 'ERR_POSITION_EXISTS' });
+
+    // Even if DB record is closed, open exchangePosition still blocks new entry
+    const tradesRepo = new TradesRepo(db);
+    tradesRepo.update(t1.id, { status: 'CLOSED', closed_at: Date.now() });
+
+    await expect(
+      tradeManager.openPosition({
+        symbol: 'BTCUSDT',
+        side: 'SELL',
+        orderType: 'MARKET',
+        marginUsd: 50,
+        leverage: 5,
+        stopLoss: 61000,
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: 'ERR_POSITION_EXISTS' });
+  });
 });

@@ -41,7 +41,13 @@ export class MacroRegimeFactor implements IAlphaFactor {
   }
 
   computeFactor(context: FactorEvaluationContext): FactorOutput {
-    const candles = context.candles.length > 0 ? context.candles : this.candles;
+    const candles1h = (context as FactorEvaluationContext & { candles1h?: KlineCandle[] }).candles1h;
+    const use1hCandles = Array.isArray(candles1h) && candles1h.length >= 5;
+    const candles = use1hCandles
+      ? candles1h
+      : context.candles.length > 0
+        ? context.candles
+        : this.candles;
     const currentPrice = context.currentPrice;
 
     if (candles.length < 5 && !context.indicators?.ema200) {
@@ -54,30 +60,35 @@ export class MacroRegimeFactor implements IAlphaFactor {
       closePrices.push(currentPrice);
     }
 
-    // 1. Trend Filter: EMA200 & EMA50
+    // 1. Trend Filter: EMA200 & EMA50 (prefer 1h candles over 1m indicators to avoid timeframe inversion)
     const longFallbackPeriod = Math.min(closePrices.length, 50);
     const shortFallbackPeriod = Math.max(5, Math.min(20, Math.floor(longFallbackPeriod / 2)));
-    const ema200 =
-      context.indicators?.ema200 ??
-      (closePrices.length > 0
-        ? (calculateEMA(closePrices, EMA_LONG_PERIOD) ??
-           calculateEMA(closePrices, longFallbackPeriod))
-        : null);
-    const ema50 =
-      context.indicators?.ema50 ??
-      (closePrices.length > 0
-        ? (calculateEMA(closePrices, EMA_SHORT_PERIOD) ??
-           calculateEMA(closePrices, shortFallbackPeriod))
-        : null);
+    const ema200 = use1hCandles
+      ? (calculateEMA(closePrices, EMA_LONG_PERIOD) ??
+         calculateEMA(closePrices, longFallbackPeriod))
+      : (context.indicators?.ema200 ??
+         (closePrices.length > 0
+           ? (calculateEMA(closePrices, EMA_LONG_PERIOD) ??
+              calculateEMA(closePrices, longFallbackPeriod))
+           : null));
+    const ema50 = use1hCandles
+      ? (calculateEMA(closePrices, EMA_SHORT_PERIOD) ??
+         calculateEMA(closePrices, shortFallbackPeriod))
+      : (context.indicators?.ema50 ??
+         (closePrices.length > 0
+           ? (calculateEMA(closePrices, EMA_SHORT_PERIOD) ??
+              calculateEMA(closePrices, shortFallbackPeriod))
+           : null));
 
     // 2. Yang-Zhang Volatility Estimator
     const yzVol = computeYangZhangVolatility(candles.slice(-MIN_CANDLES_FOR_YZ * 3));
 
-    // 3. ADX Modulation (if indicators provided or computable from candles)
+    // 3. ADX Modulation (prefer 1h ADX when 1h candles are provided)
     let adxMultiplier = 1.0;
-    const adx =
-      context.indicators?.adx14?.adx ??
-      (candles.length >= 28 ? calculateADX(candles, 14)?.adx : undefined);
+    const adx = use1hCandles
+      ? (candles.length >= 28 ? calculateADX(candles, 14)?.adx : undefined)
+      : (context.indicators?.adx14?.adx ??
+         (candles.length >= 28 ? calculateADX(candles, 14)?.adx : undefined));
     if (adx !== undefined && adx !== null) {
       if (adx >= 25) {
         adxMultiplier = 1.2; // Strong trending market expands signal

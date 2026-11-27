@@ -23,13 +23,12 @@ function createMockBroker(modifyOrderImpl?: (symbol: string, orderId: string | n
 describe('ChasingExecutionEngine', () => {
   describe('Penny-Jumping Arithmetic', () => {
     const broker = createMockBroker();
-    const engine = new ChasingExecutionEngine(broker, { tickSize: 0.01 });
+    const engine = new ChasingExecutionEngine(broker, { tickSize: 0.01, passiveOffsetTicks: 0 });
 
     it('BUY: penny-jumps inside wide spread', () => {
-      // spread = 100.10 - 100.00 = 0.10 > 0.01
-      // min(100.00 + 0.01, 100.10 - 0.01) = 100.01
+      // With passiveOffsetTicks: 0, joins bestBid = 100.00 (no aggressive cross-spread jump)
       const price = engine.computeTargetBuy(100.00, 100.10);
-      expect(price).toBeCloseTo(100.01, 4);
+      expect(price).toBeCloseTo(100.00, 4);
     });
 
     it('BUY: falls back to bestBid when spread <= 1 tick', () => {
@@ -39,10 +38,9 @@ describe('ChasingExecutionEngine', () => {
     });
 
     it('SELL: penny-jumps inside wide spread', () => {
-      // spread = 100.10 - 100.00 = 0.10 > 0.01
-      // max(100.10 - 0.01, 100.00 + 0.01) = 100.09
+      // With passiveOffsetTicks: 0, joins bestAsk = 100.10 (no aggressive cross-spread jump)
       const price = engine.computeTargetSell(100.00, 100.10);
-      expect(price).toBeCloseTo(100.09, 4);
+      expect(price).toBeCloseTo(100.10, 4);
     });
 
     it('SELL: falls back to bestAsk when spread <= 1 tick', () => {
@@ -132,6 +130,7 @@ describe('ChasingExecutionEngine', () => {
         debouncMs: 20,
         timeoutMs: 2000,
         tickSize: 1,
+        passiveOffsetTicks: 0,
       });
 
       let iteration = 0;
@@ -237,6 +236,7 @@ describe('ChasingExecutionEngine', () => {
         debouncMs: 20,
         timeoutMs: 2000,
         tickSize: 1,
+        passiveOffsetTicks: 0,
       });
 
       const placedPrices: number[] = [];
@@ -256,8 +256,8 @@ describe('ChasingExecutionEngine', () => {
         },
       });
 
-      // initial SELL target = 50000 - 1 = 49999; backedOff = 49999 + 1 = 50000 -> Math.max(50000, 49999) = 50000
-      expect(placedPrices).toEqual([49999, 50000]);
+      // initial SELL target = 50000; backedOff (+2 ticks) = 50002
+      expect(placedPrices).toEqual([50000, 50002]);
       expect(result.status).toBe('FILLED');
     });
 
@@ -278,6 +278,7 @@ describe('ChasingExecutionEngine', () => {
         debouncMs: 20,
         timeoutMs: 2000,
         tickSize: 1,
+        passiveOffsetTicks: 0,
       });
 
       let depthCall = 0;
@@ -302,8 +303,8 @@ describe('ChasingExecutionEngine', () => {
       });
 
       expect(result.status).toBe('FILLED');
-      expect(amendCalls[0]).toEqual({ price: 49997, side: 'SELL' });
-      expect(amendCalls[1]).toEqual({ price: 50000, side: 'SELL' });
+      expect(amendCalls[0]).toEqual({ price: 49998, side: 'SELL' });
+      expect(amendCalls[1]).toEqual({ price: 50002, side: 'SELL' });
     });
 
     it('supports setBroker() hot-swap and unique TwapExecutionSlicer clientOrderIds', async () => {

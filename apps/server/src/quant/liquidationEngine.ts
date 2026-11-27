@@ -48,13 +48,14 @@ export class LiquidationEngine {
 
     const oi = openInterestUsd && openInterestUsd > 0 ? openInterestUsd : 0;
     const clusters: LiquidationCluster[] = [];
+    const priceDecimals = currentPrice < 0.1 ? 6 : currentPrice < 10 ? 4 : 2;
 
     for (const tier of this.LEVERAGE_TIERS) {
       const tierVol = oi * tier.weight;
       const sideVol = tierVol * 0.5;
 
       // Short liquidation pool (above current price)
-      const shortLiqPrice = Number((currentPrice * (1 + tier.deltaPct)).toFixed(4));
+      const shortLiqPrice = Number((currentPrice * (1 + tier.deltaPct)).toFixed(priceDecimals));
       clusters.push({
         price: shortLiqPrice,
         estimatedVolumeUsd: sideVol,
@@ -63,7 +64,7 @@ export class LiquidationEngine {
       });
 
       // Long liquidation pool (below current price)
-      const longLiqPrice = Number((currentPrice * (1 - tier.deltaPct)).toFixed(4));
+      const longLiqPrice = Number((currentPrice * (1 - tier.deltaPct)).toFixed(priceDecimals));
       clusters.push({
         price: longLiqPrice,
         estimatedVolumeUsd: sideVol,
@@ -144,10 +145,17 @@ export class LiquidationEngine {
     const distAbove = poolAbove !== null ? poolAbove - currentPrice : Infinity;
     const distBelow = poolBelow !== null ? currentPrice - poolBelow : Infinity;
 
-    const atrRatioAbove = distAbove / atr14;
-    const atrRatioBelow = distBelow / atr14;
+    // Percentage / bps normalization so <$1 assets scale identically to >$100 assets
+    const atrPct = atr14 / currentPrice;
+    const distAbovePct = distAbove / currentPrice;
+    const distBelowPct = distBelow / currentPrice;
+
+    const atrRatioAbove = distAbovePct / atrPct;
+    const atrRatioBelow = distBelowPct / atrPct;
 
     const threshold = input.triggerAtrMultiplier ?? (openInterestUsd ? 1.2 : 1.0);
+    const fmtPrice = (p: number): string =>
+      p < 1 ? p.toFixed(4) : p < 10 ? p.toFixed(3) : p.toFixed(2);
 
     const formatVol = (v: number): string => {
       if (v >= 1e6) return `$${(v / 1e6).toFixed(1)}M`;
@@ -165,7 +173,7 @@ export class LiquidationEngine {
         title: 'Liquidation Heat Clusters',
         score,
         bias: 'BULLISH',
-        valueText: `Short Liq Magnet: $${poolAbove!.toFixed(2)} (${atrRatioAbove.toFixed(1)}x ATR)${volInfo}`,
+        valueText: `Short Liq Magnet: $${fmtPrice(poolAbove!)} (${atrRatioAbove.toFixed(1)}x ATR)${volInfo}`,
         subText: 'Price attracted upward toward short stop cluster',
         confirmed: true,
         updatedAt: now,
@@ -181,7 +189,7 @@ export class LiquidationEngine {
         title: 'Liquidation Heat Clusters',
         score,
         bias: 'BEARISH',
-        valueText: `Long Liq Magnet: $${poolBelow!.toFixed(2)} (${atrRatioBelow.toFixed(1)}x ATR)${volInfo}`,
+        valueText: `Long Liq Magnet: $${fmtPrice(poolBelow!)} (${atrRatioBelow.toFixed(1)}x ATR)${volInfo}`,
         subText: 'Price attracted downward toward long stop cluster',
         confirmed: true,
         updatedAt: now,

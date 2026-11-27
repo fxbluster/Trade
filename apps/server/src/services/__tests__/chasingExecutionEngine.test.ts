@@ -50,7 +50,7 @@ describe('ChasingExecutionEngine symbol tickSize & precision [DEF-01 / ARCH-13]'
     });
 
     expect(result.status).toBe('FILLED');
-    expect(placedPrices).toEqual([61578.9]);
+    expect(placedPrices).toEqual([61578.6]);
   });
 
   it('snaps SOLUSDT modifyOrder price and quantity to symbol rules during amendment', async () => {
@@ -88,7 +88,7 @@ describe('ChasingExecutionEngine symbol tickSize & precision [DEF-01 / ARCH-13]'
     });
 
     expect(result.status).toBe('FILLED');
-    expect(modifyCalls[0]).toEqual({ price: 142.33, qty: 1.23 });
+    expect(modifyCalls[0]).toEqual({ price: 142.3, qty: 1.23 });
   });
 
   it('handles -5022 backoff on BTCUSDT using 0.1 tickSize cleanly', async () => {
@@ -114,7 +114,23 @@ describe('ChasingExecutionEngine symbol tickSize & precision [DEF-01 / ARCH-13]'
       },
     });
 
-    expect(placedPrices).toEqual([61578.9, 61578.8]);
+    expect(placedPrices).toEqual([61578.6, 61578.4]);
     expect(result.status).toBe('FILLED');
+  });
+
+  it('applies 1-2 tick passive offset on GTX Post-Only orders so BUY/SELL never cross BBO', () => {
+    const engine1 = new ChasingExecutionEngine(createMockBroker(), {
+      tickSize: 0.01,
+      passiveOffsetTicks: 1,
+    });
+    expect(engine1.computeTargetBuy(100.0, 100.01, 0.01)).toBe(99.99);
+    expect(engine1.computeTargetSell(100.0, 100.01, 0.01)).toBe(100.02);
+
+    const engine2 = new ChasingExecutionEngine(createMockBroker(), {
+      tickSize: 0.0001,
+      passiveOffsetTicks: 2,
+    });
+    expect(engine2.computeTargetBuy(0.5, 0.5002, 0.0001)).toBe(0.4998);
+    expect(engine2.computeTargetSell(0.5, 0.5002, 0.0001)).toBe(0.5004);
   });
 });

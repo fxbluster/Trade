@@ -197,8 +197,8 @@ describe('TradeOS v2 — Math Engine (@tradeos/shared/math)', () => {
       // Liquidation = 100 * 0.9 / 0.995 = 90.45
       expect(preview.estimatedLiquidation).toBe(90.45);
 
-      // Breakeven price: 100 * (1 + 0.0015) = 100.15
-      expect(preview.breakevenPrice).toBe(100.15);
+      // Breakeven price: 100 * (1 + 0.0025) = 100.25
+      expect(preview.breakevenPrice).toBe(100.25);
 
       // Max loss: (100 - 95) * 5 = 25.00
       expect(preview.maxLossUsd).toBe(25);
@@ -229,8 +229,8 @@ describe('TradeOS v2 — Math Engine (@tradeos/shared/math)', () => {
       // Short liquidation = 100 * 1.1 / 1.005 = 109.45
       expect(preview.estimatedLiquidation).toBe(109.45);
 
-      // Breakeven price: 100 * (1 - 0.0015) = 99.85
-      expect(preview.breakevenPrice).toBe(99.85);
+      // Breakeven price: 100 * (1 - 0.0025) = 99.75
+      expect(preview.breakevenPrice).toBe(99.75);
 
       // Max loss: (105 - 100) * 5 = 25.00
       expect(preview.maxLossUsd).toBe(25);
@@ -348,8 +348,8 @@ describe('TradeOS v2 — Math Engine (@tradeos/shared/math)', () => {
         expect(preview.quantity).toBe(0.011);
         expect(preview.notionalUsd).toBe(990);
 
-        // Breakeven: 90000 * 1.0015 = 90135
-        expect(preview.breakevenPrice).toBe(90135);
+        // Breakeven: 90000 * 1.0025 = 90225
+        expect(preview.breakevenPrice).toBe(90225);
 
         // R:R: (96000 - 90000) / (90000 - 88000) = 6000 / 2000 = 3.0
         expect(preview.rrRatio).toBe(3);

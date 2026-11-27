@@ -6,12 +6,19 @@ import type {
   BrokerMode,
   TradeSide,
 } from '@tradeos/shared';
-import type { BinanceClient } from '../exchange/binanceClient.js';
+import {
+  type BinanceClient,
+  ExchangeBannedError,
+  ExchangeDegradedError,
+} from '../exchange/binanceClient.js';
 import type { TradesRepo } from '../db/sqlite.js';
 
 export class PnlService {
   private incomeCache: { timestamp: number; data: any[] } | null = null;
-  private readonly CACHE_TTL_MS = 10000; // 10s cache to preserve rate limits
+  private incomeInFlight: Promise<any[]> | null = null;
+  private degradedBackoffUntil: number = 0;
+  private readonly CACHE_TTL_MS = 90_000; // 90s cache to preserve Binance API weight
+  private readonly DEGRADED_BACKOFF_MS = 60_000; // 60s backoff when rate-limited/degraded
 
   constructor(
     private db: DatabaseSync,
@@ -22,7 +29,8 @@ export class PnlService {
   ) {}
 
   /**
-   * Fetches Binance income records for the last 7 days with in-memory caching.
+   * Fetches Binance income records for the last 7 days with TTL caching,
+   * in-flight promise deduplication, and rate-limit degradation backoff.
    */
   private async getBinanceIncome(): Promise<any[]> {
     const now = Date.now();
@@ -30,24 +38,62 @@ export class PnlService {
       return this.incomeCache.data;
     }
 
-    try {
-      const sevenDaysAgo = now - 7 * 24 * 3600 * 1000;
-      const data = await this.client.request<any[]>('/fapi/v1/income', {
-        method: 'GET',
-        signed: true,
-        priority: 'P2',
-        params: { startTime: sevenDaysAgo, limit: 1000 },
-      });
-
-      if (Array.isArray(data)) {
-        this.incomeCache = { timestamp: now, data };
-        return data;
-      }
-    } catch (err) {
-      console.warn('PnlService: Binance /fapi/v1/income fetch error, falling back to local DB:', err);
+    if (this.incomeInFlight) {
+      return this.incomeInFlight;
     }
 
-    return this.incomeCache?.data || [];
+    // Respect active rate-limit degradation / ban backoff
+    if (now < this.degradedBackoffUntil) {
+      return this.incomeCache?.data || [];
+    }
+
+    if (this.client.isBanned?.()) {
+      const retryAfterSec = this.client.getRemainingBanSeconds?.() || 60;
+      this.degradedBackoffUntil = now + Math.max(this.DEGRADED_BACKOFF_MS, retryAfterSec * 1000);
+      return this.incomeCache?.data || [];
+    }
+
+    if ((this.client.getRateLimits?.()?.usedWeight1m ?? 0) >= 1000) {
+      this.degradedBackoffUntil = now + this.DEGRADED_BACKOFF_MS;
+      return this.incomeCache?.data || [];
+    }
+
+    this.incomeInFlight = (async () => {
+      try {
+        const fetchNow = Date.now();
+        const sevenDaysAgo = fetchNow - 7 * 24 * 3600 * 1000;
+        const data = await this.client.request<any[]>('/fapi/v1/income', {
+          method: 'GET',
+          signed: true,
+          priority: 'P2',
+          params: { startTime: sevenDaysAgo, limit: 1000 },
+        });
+
+        if (Array.isArray(data)) {
+          this.incomeCache = { timestamp: Date.now(), data };
+          this.degradedBackoffUntil = 0;
+          return data;
+        }
+      } catch (err) {
+        if (err instanceof ExchangeBannedError) {
+          this.degradedBackoffUntil =
+            Date.now() + Math.max(this.DEGRADED_BACKOFF_MS, err.retryAfterSec * 1000);
+        } else if (
+          err instanceof ExchangeDegradedError ||
+          (err instanceof Error &&
+            (err.name === 'ExchangeDegradedError' || err.name === 'ExchangeBannedError'))
+        ) {
+          this.degradedBackoffUntil = Date.now() + this.DEGRADED_BACKOFF_MS;
+        }
+        console.warn('PnlService: Binance /fapi/v1/income fetch error, falling back to local DB:', err);
+      } finally {
+        this.incomeInFlight = null;
+      }
+
+      return this.incomeCache?.data || [];
+    })();
+
+    return this.incomeInFlight;
   }
 
   /**

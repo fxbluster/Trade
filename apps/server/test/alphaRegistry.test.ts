@@ -23,6 +23,7 @@ import {
   dirichletPosterior,
   MGS_EPSILON,
   MGS_COLLINEAR_THRESHOLD,
+  MIN_IR_STD,
   type IAlphaFactor,
 } from '../src/quant/alphaRegistry.js';
 import type {
@@ -604,6 +605,94 @@ describe('AlphaRegistry', () => {
       const collinearDetail = lastRes!.details.find((d) => d.isCollinear)!;
       expect(collinearDetail.posteriorWeight).toBe(0);
       expect(collinearDetail.orthogonalAlpha).toBe(0);
+    });
+  });
+
+  describe('DEF-04 & ARCH-04: IR Floor, Pillar Sign Alignment, and Dead Factor Guards', () => {
+    it('enforces MIN_IR_STD (1e-4) in computeInformationRatio to prevent IR explosion on constant series', () => {
+      const constantPos = Array(30).fill(0.125);
+      const irPos = computeInformationRatio(constantPos);
+      expect(irPos).toBeCloseTo(0.125 / MIN_IR_STD, 2);
+      expect(Math.abs(irPos)).toBeLessThanOrEqual(10_000);
+
+      const constantNeg = Array(30).fill(-0.55625);
+      const irNeg = computeInformationRatio(constantNeg);
+      expect(irNeg).toBeCloseTo(-0.55625 / MIN_IR_STD, 2);
+      expect(Math.abs(irNeg)).toBeLessThanOrEqual(10_000);
+
+      const singleIr = computeInformationRatio([0.125]);
+      expect(Math.abs(singleIr)).toBeLessThanOrEqual(10_000);
+    });
+
+    it('aligns factor rawAlpha sign and bias with confirmed pillars in context', () => {
+      const registry = new AlphaRegistry();
+      registry.registerFactor(
+        createMockFactor('MACRO_REGIME', 'Macro Regime', 0.5, {
+          rawAlpha: 0.315,
+          bias: 'BULLISH',
+          confidence: 0.7,
+        })
+      );
+      registry.registerFactor(
+        createMockFactor('ORDER_FLOW_L2', 'Order Flow L2', 0.5, {
+          rawAlpha: -0.274,
+          bias: 'BEARISH',
+          confidence: 0.7,
+        })
+      );
+
+      const ctx = {
+        symbol: 'SOLUSDT',
+        currentPrice: 150,
+        candles: [],
+        timestamp: Date.now(),
+        pillars: [
+          { id: 'MACRO_REGIME', bias: 'BEARISH' as const, confirmed: true },
+          { id: 'ORDER_FLOW_L2', bias: 'BULLISH' as const, confirmed: true },
+        ],
+      };
+
+      const res = registry.evaluate(ctx);
+      const macro = res.details.find((d) => d.factorId === 'MACRO_REGIME')!;
+      const flow = res.details.find((d) => d.factorId === 'ORDER_FLOW_L2')!;
+
+      expect(macro.rawAlpha).toBeCloseTo(-0.315, 6);
+      expect(macro.bias).toBe('BEARISH');
+      expect(flow.rawAlpha).toBeCloseTo(0.274, 6);
+      expect(flow.bias).toBe('BULLISH');
+    });
+
+    it('guards dead factors (confidence=0 or deadFactor=true) as collinear with zero posterior weight', () => {
+      const registry = new AlphaRegistry();
+      registry.registerFactor(
+        createMockFactor('ORDER_FLOW_L2', 'Order Flow L2', 0.5, {
+          rawAlpha: 0.6,
+          bias: 'BULLISH',
+          confidence: 0.8,
+        })
+      );
+      registry.registerFactor(
+        createMockFactor('FUNDING_ARBITRAGE', 'Funding Arbitrage', 0.5, {
+          rawAlpha: 0,
+          bias: 'NEUTRAL',
+          confidence: 0,
+          metadata: { deadFactor: true },
+        })
+      );
+
+      const res = registry.evaluate({
+        symbol: 'SOLUSDT',
+        currentPrice: 150,
+        candles: [],
+        timestamp: Date.now(),
+      });
+
+      const dead = res.details.find((d) => d.factorId === 'FUNDING_ARBITRAGE')!;
+      const active = res.details.find((d) => d.factorId === 'ORDER_FLOW_L2')!;
+      expect(dead.isCollinear).toBe(true);
+      expect(dead.posteriorWeight).toBe(0);
+      expect(active.isCollinear).toBe(false);
+      expect(active.posteriorWeight).toBeCloseTo(1.0, 6);
     });
   });
 });

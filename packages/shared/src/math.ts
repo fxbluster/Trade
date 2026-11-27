@@ -69,6 +69,27 @@ export function formatByTickSize(price: number, tickSize: number): number {
   return Number(formatted.toFixed(precision));
 }
 
+export const DEFAULT_BE_BUFFER_PCT = 0.0025; // 10 bps round-trip taker fee + 15 bps SL slippage buffer
+
+/**
+ * Computes breakeven stop-loss price including round-trip fee and slippage buffer.
+ * Long: entryPrice * (1 + feeBufferPct)
+ * Short: entryPrice * (1 - feeBufferPct)
+ */
+export function computeBreakevenPrice(
+  entryPrice: number,
+  side: TradeSide | 'BUY' | 'SELL',
+  feeBufferPct: number = DEFAULT_BE_BUFFER_PCT,
+  decimals: number = 4
+): number {
+  if (!Number.isFinite(entryPrice) || entryPrice <= 0) return 0;
+  const raw =
+    side === 'BUY'
+      ? entryPrice * (1 + feeBufferPct)
+      : entryPrice * (1 - feeBufferPct);
+  return Number(raw.toFixed(decimals));
+}
+
 /**
  * Calculate isolated liquidation price for Long or Short positions.
  *
@@ -162,10 +183,10 @@ export function computeOrderPreview(
     }
   }
 
-  // Breakeven price calculation (+- 0.15% fee & slippage buffer)
-  // Long needs higher price to cover fees: entry * (1 + 0.0015)
-  // Short needs lower price to cover fees: entry * (1 - 0.0015)
-  const beBuffer = 0.0015;
+  // Breakeven price calculation (+- 0.25% round-trip fee & slippage buffer)
+  // Long needs higher price to cover fees + slippage: entry * (1 + 0.0025)
+  // Short needs lower price to cover fees + slippage: entry * (1 - 0.0025)
+  const beBuffer = DEFAULT_BE_BUFFER_PCT;
   const rawBe = req.side === 'BUY'
     ? entryPrice * (1 + beBuffer)
     : entryPrice * (1 - beBuffer);

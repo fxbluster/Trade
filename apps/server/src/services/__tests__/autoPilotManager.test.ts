@@ -252,10 +252,9 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     // Stop loss at 1.5x ATR (1.5 * 1.5 = 2.25) -> 100 - 2.25 = 97.75
     expect(orderReq.stopLoss).toBe(97.75);
 
-    // Dynamic TP1 pins to nearest liquidation cluster (25x short liq at 104.00, R:R >= 1.5)
-    expect(orderReq.tp1).toBe(104.00);
-    // Dynamic TP2 runner scales with TP1 ratio: 100 + (4.00 * 2) = 108.00
-    expect(orderReq.tp2).toBe(108.00);
+    // [DEF-03 / ARCH-02] TP1 calibrated to 1.0x ATR14 (100 + 1.5 = 101.50), TP2 = 2.5x ATR14 (103.75)
+    expect(orderReq.tp1).toBe(101.5);
+    expect(orderReq.tp2).toBe(103.75);
 
     expect(autoPilot.getState()).toBe('POSITION_OPEN');
   });
@@ -290,7 +289,7 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
 
     const updated = tradesRepo.getById(tradeId)!;
     expect(updated.is_breakeven).toBe(1);
-    expect(updated.be_price).toBeCloseTo(trade.entry_price * 1.0015, 2);
+    expect(updated.be_price).toBeCloseTo(trade.entry_price * 1.0025, 2);
   });
 
   // --------------------------------------------------------------------------
@@ -408,6 +407,7 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     const trade1Id = autoPilot.getOpenTradeId()!;
     const tradesRepo = new TradesRepo(db);
     tradesRepo.update(trade1Id, { status: 'CLOSED', realized_pnl: -15.0 });
+    mockBroker.position = null;
     await autoPilot.onTick('SOLUSDT', 98); // processes close
 
     // Simulate bypassing 180s lockout for testing second trade
@@ -417,6 +417,7 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     await autoPilot.onTick('SOLUSDT', 100);
     const trade2Id = autoPilot.getOpenTradeId()!;
     tradesRepo.update(trade2Id, { status: 'CLOSED', realized_pnl: -20.0 });
+    mockBroker.position = null;
     await autoPilot.onTick('SOLUSDT', 97); // processes close
 
     // AutoPilot must now be in COOLDOWN_ACTIVE state!
@@ -849,101 +850,95 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
   });
 
   // --------------------------------------------------------------------------
-  // Test 11: [ARCH-09] Tiered 3-Slot Concurrency with Strict Risk Guards
+  // Test 11: [DEF-02] Global 1-position limit across DB & exchangePositions
   // --------------------------------------------------------------------------
-  it('enforces tiered 3-slot concurrency: Slot 2 >= 72 @ 0.5x/0.75x, Slot 3 >= 80 + protected @ 0.35x, Slot 4 blocked', async () => {
-    const makeSnap = (symbol: string, score: number): ConfluenceSnapshot => ({
+  it('enforces atomic global 1-position limit across DB open positions and exchangePositions', async () => {
+    const makeSnap = (symbol: string, side: 'BUY' | 'SELL', score: number): ConfluenceSnapshot => ({
       symbol,
       pillars: [],
-      bullishCount: 5,
-      bearishCount: 0,
+      bullishCount: side === 'BUY' ? 5 : 0,
+      bearishCount: side === 'SELL' ? 5 : 0,
       neutralCount: 2,
-      consensusBias: 'BULLISH',
+      consensusBias: side === 'BUY' ? 'BULLISH' : 'BEARISH',
       consensusMet: true,
       threshold: 4,
       compositeScore: score,
-      recommendedAction: 'BUY',
+      recommendedAction: side,
       macroVetoActive: false,
-      macroRegime: 'MACRO_BULLISH',
+      macroRegime: side === 'BUY' ? 'MACRO_BULLISH' : 'MACRO_BEARISH',
       activeFvgs: [],
       activeOrderBlocks: [],
       latestSweep: null,
     });
 
-    const scores: Record<string, number> = {
-      SOLUSDT: 65,
-      ETHUSDT: 68,
-      BTCUSDT: 82,
-      XRPUSDT: 85,
-    };
-
-    const makeCtx = (sym: string) => {
-      const eng = new ConfluenceEngine();
-      eng.getSnapshot = () => makeSnap(sym, scores[sym] ?? 50);
-      return { symbol: sym, confluenceEngine: eng };
-    };
+    const xrpEng = new ConfluenceEngine();
+    const xrpSnap = makeSnap('XRPUSDT', 'BUY', 80);
+    xrpEng.getSnapshot = () => xrpSnap;
+    xrpEng.getLatestSnapshot = () => xrpSnap;
+    xrpEng.evaluate = () => xrpSnap;
+    const btcEng = new ConfluenceEngine();
+    const btcSnap = makeSnap('BTCUSDT', 'SELL', 88);
+    btcEng.getSnapshot = () => btcSnap;
+    btcEng.getLatestSnapshot = () => btcSnap;
+    btcEng.evaluate = () => btcSnap;
 
     const contexts = new Map([
-      ['SOLUSDT', makeCtx('SOLUSDT')],
-      ['ETHUSDT', makeCtx('ETHUSDT')],
-      ['BTCUSDT', makeCtx('BTCUSDT')],
-      ['XRPUSDT', makeCtx('XRPUSDT')],
+      ['XRPUSDT', { symbol: 'XRPUSDT', confluenceEngine: xrpEng }],
+      ['BTCUSDT', { symbol: 'BTCUSDT', confluenceEngine: btcEng }],
     ]);
 
-    const tieredAutoPilot = new AutoPilotManager({
+    const dispatched: any[] = [];
+    (mockBroker as any).getAllPositions = async () =>
+      mockBroker.position ? [mockBroker.position] : [];
+
+    const guardedTradeManager = new TradeManager({
       db,
-      tradeManager,
       broker: mockBroker,
-      confluenceEngine: contexts.get('SOLUSDT')!.confluenceEngine,
-      getMarkPrice: (sym: string) =>
-        sym === 'ETHUSDT' ? 3000 : sym === 'BTCUSDT' ? 60000 : sym === 'XRPUSDT' ? 1 : 100,
-      getAtr: (sym: string) => (sym === 'ETHUSDT' ? 30 : sym === 'BTCUSDT' ? 600 : 1.5),
+      brokerMode: 'BINANCE_DEMO',
+      getMarkPrice: (sym: string) => (sym === 'BTCUSDT' ? 60000 : 0.5),
+      broadcastWs: (m) => wsMessages.push(m),
+    });
+
+    const guardedAutoPilot = new AutoPilotManager({
+      db,
+      tradeManager: guardedTradeManager,
+      broker: mockBroker,
+      confluenceEngine: xrpEng,
+      getMarkPrice: (sym: string) => (sym === 'BTCUSDT' ? 60000 : 0.5),
+      getAtr: (sym: string) => (sym === 'BTCUSDT' ? 600 : 0.005),
       getSymbolQuantContext: (sym: string) => contexts.get(sym.toUpperCase()),
       forEachQuantContext: (cb) => contexts.forEach(cb),
-      watchlistSymbols: ['SOLUSDT', 'ETHUSDT', 'BTCUSDT', 'XRPUSDT'],
+      watchlistSymbols: ['XRPUSDT', 'BTCUSDT'],
+      onOrderDispatched: (ev) => dispatched.push(ev),
       config: {
         enabled: true,
-        consensusThreshold: 60,
+        consensusThreshold: 4,
         marginAllocationPct: 10,
         leverage: 10,
         maxDailyTrades: 20,
       },
     });
 
-    // Slot 1: SOLUSDT opens at score 65 (>= 60) with 1.0x margin ($100 on $1000 wallet)
-    await tieredAutoPilot.onTick('SOLUSDT', 100);
+    // 1. XRPUSDT BUY opens
+    await guardedAutoPilot.onTick('XRPUSDT', 0.5);
     expect(mockBroker.openOrderCalls).toHaveLength(1);
-    expect(mockBroker.openOrderCalls[0].symbol).toBe('SOLUSDT');
-    expect(mockBroker.openOrderCalls[0].marginUsd).toBe(100);
+    expect(mockBroker.openOrderCalls[0].symbol).toBe('XRPUSDT');
 
-    // Slot 2: ETHUSDT at score 68 (< 72) is blocked
-    await tieredAutoPilot.onTick('ETHUSDT', 3000);
+    // 2. BTCUSDT SELL is blocked by DB 1-position limit
+    await guardedAutoPilot.onTick('BTCUSDT', 60000);
     expect(mockBroker.openOrderCalls).toHaveLength(1);
 
-    // Slot 2: ETHUSDT raised to 74 (>= 72), SOLUSDT unprotected -> opens at 0.50x margin ($50)
-    scores.ETHUSDT = 74;
-    await tieredAutoPilot.onTick('ETHUSDT', 3000);
-    expect(mockBroker.openOrderCalls).toHaveLength(2);
-    expect(mockBroker.openOrderCalls[1].symbol).toBe('ETHUSDT');
-    expect(mockBroker.openOrderCalls[1].marginUsd).toBe(50);
-
-    // Slot 3: BTCUSDT at score 82 (>= 80) is STILL blocked while neither open trade is protected
-    await tieredAutoPilot.onTick('BTCUSDT', 60000);
-    expect(mockBroker.openOrderCalls).toHaveLength(2);
-
-    // Protect SOLUSDT (is_breakeven = 1) -> Slot 3 now allowed at 0.35x margin ($35)
+    // 3. Even if DB is cleared, an open exchangePosition on XRPUSDT must block BTCUSDT
     const tradesRepo = new TradesRepo(db);
-    const solTrade = tradesRepo.getActivePosition('BINANCE_DEMO', 'SOLUSDT')!;
-    tradesRepo.update(solTrade.id, { is_breakeven: 1 });
-    await tieredAutoPilot.onTick('BTCUSDT', 60000);
-    expect(mockBroker.openOrderCalls).toHaveLength(3);
-    expect(mockBroker.openOrderCalls[2].symbol).toBe('BTCUSDT');
-    expect(mockBroker.openOrderCalls[2].marginUsd).toBe(35);
+    const active = tradesRepo.getActivePosition('BINANCE_DEMO', 'XRPUSDT')!;
+    tradesRepo.update(active.id, { status: 'CLOSED', closed_at: Date.now() });
+    (guardedAutoPilot as any).lastExitTime = 0;
 
-    // Slot 4: XRPUSDT at score 85 is strictly blocked (maxConcurrentPositions = 3)
-    await tieredAutoPilot.onTick('XRPUSDT', 1);
-    expect(mockBroker.openOrderCalls).toHaveLength(3);
-    expect(tieredAutoPilot.getState()).toBe('POSITION_OPEN');
+    await guardedAutoPilot.onTick('BTCUSDT', 60000);
+    expect(mockBroker.openOrderCalls).toHaveLength(1);
+    const blockedEv = dispatched.find((e) => e.action === 'FAILED' && e.symbol === 'BTCUSDT');
+    expect(blockedEv).toBeDefined();
+    expect(blockedEv.errorMessage).toContain('ERR_MAX_CONCURRENT_POSITIONS');
   });
 
   it('enforces PropFirmRiskGuard pre-entry gate in LOCAL_PAPER mode', async () => {
@@ -991,5 +986,65 @@ describe('AutoPilotManager — Autonomous Algorithmic State Machine', () => {
     await paperAutoPilot.onTick('SOLUSDT', 100);
     expect(paperBroker.openOrderCalls).toHaveLength(0);
     expect(paperAutoPilot.getStatusPayload().blockReason).toBe('UPCOMERS_DAILY_HALT');
+  });
+
+  // --------------------------------------------------------------------------
+  // Test 13: [DEF-01 / ARCH-01] Controlled IOC fallback on TIMEOUT when score >= 75
+  // --------------------------------------------------------------------------
+  it('executes controlled IOC fallback on chasing TIMEOUT when compositeScore >= 75, and skips when < 75', async () => {
+    const dispatched: any[] = [];
+    const mockChaser = {
+      setOnStateUpdate: () => {},
+      setBroker: () => {},
+      getTickSize: () => 0.01,
+      chase: async () => ({
+        orderId: 'gtx_timeout_1',
+        status: 'TIMEOUT' as const,
+        amendCount: 3,
+      }),
+    };
+
+    const chaseAutoPilot = new AutoPilotManager({
+      db,
+      tradeManager,
+      broker: mockBroker,
+      confluenceEngine,
+      chasingExecutionEngine: mockChaser as any,
+      getMarkPrice: () => 100,
+      getAtr: () => 1.5,
+      onOrderDispatched: (ev) => dispatched.push(ev),
+      config: {
+        enabled: true,
+        consensusThreshold: 4,
+        marginAllocationPct: 10,
+        leverage: 10,
+      },
+    });
+
+    // 1. compositeScore = 70 (< 75) -> no IOC fallback
+    setConfluenceSnapshot({
+      symbol: 'SOLUSDT',
+      bullishCount: 4,
+      consensusMet: true,
+      compositeScore: 70,
+      recommendedAction: 'BUY',
+    });
+    await chaseAutoPilot.onTick('SOLUSDT', 100);
+    expect(mockBroker.openOrderCalls).toHaveLength(0);
+    expect(dispatched[0]?.action).toBe('FAILED');
+
+    // 2. compositeScore = 80 (>= 75) -> controlled IOC fallback places LIMIT IOC order
+    setConfluenceSnapshot({
+      symbol: 'SOLUSDT',
+      bullishCount: 5,
+      consensusMet: true,
+      compositeScore: 80,
+      recommendedAction: 'BUY',
+    });
+    await chaseAutoPilot.onTick('SOLUSDT', 100);
+    expect(mockBroker.openOrderCalls).toHaveLength(1);
+    expect(mockBroker.openOrderCalls[0].orderType).toBe('LIMIT');
+    expect(mockBroker.openOrderCalls[0].timeInForce).toBe('IOC');
+    expect(chaseAutoPilot.getState()).toBe('POSITION_OPEN');
   });
 });

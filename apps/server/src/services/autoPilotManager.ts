@@ -18,14 +18,20 @@ import type {
   SizingTelemetrySnapshot,
   MacroRegime,
 } from '@tradeos/shared';
-import { calculateLiquidationPrice } from '@tradeos/shared';
+import {
+  calculateLiquidationPrice,
+  computeBreakevenPrice,
+  DEFAULT_BE_BUFFER_PCT,
+} from '@tradeos/shared';
 import { TradesRepo, SettingsRepo, ExecutionChaseLogsRepo } from '../db/sqlite.js';
 import { TradeManager } from './tradeManager.js';
 import {
   ExchangeDegradedError,
   type BrokerAdapter,
   type OrderExecutionResult,
+  type PositionInfo,
 } from '../exchange/broker.js';
+import { snapPriceToTick } from '../exchange/binanceClient.js';
 import type { ConfluenceEngine } from '../quant/confluenceEngine.js';
 import type { AdaptiveSizingEngine } from '../quant/adaptiveSizingEngine.js';
 import type { PropFirmRiskGuard } from '../quant/propFirmRiskGuard.js';
@@ -150,7 +156,7 @@ export class AutoPilotManager {
     dailyDrawdownLimitPct: 2.0, // Default 2.0%
   };
 
-  private readonly maxConcurrentPositions = 3;
+  private readonly maxConcurrentPositions = 1;
   private openTradeId: string | null = null;
   private openTradeIds: Map<string, string> = new Map();
   private activeSymbol: string = 'SOLUSDT';
@@ -903,10 +909,22 @@ export class AutoPilotManager {
     let marginAllocationPct = this.config.marginAllocationPct;
 
     try {
-      // Per-symbol duplicate guard + global maxConcurrentPositions (3) guard
+      // [DEF-02] Atomic global 1-position guard: check BOTH DB open positions and exchangePositions
       const sameSymbolActive = this.tradesRepo.getActivePosition(this.broker.mode, symbol);
       const currentActive = this.syncOpenTradesFromDb();
-      if (sameSymbolActive || currentActive.length >= this.maxConcurrentPositions) {
+
+      let openExchangePositions: PositionInfo[] = [];
+      try {
+        if (typeof this.broker.getAllPositions === 'function') {
+          const allExPos = await this.broker.getAllPositions();
+          openExchangePositions = allExPos.filter((p) => Math.abs(p.positionAmt) > 1e-8);
+        } else if (typeof this.broker.getPosition === 'function') {
+          const symExPos = await this.broker.getPosition(symbol);
+          if (symExPos && Math.abs(symExPos.positionAmt) > 1e-8) {
+            openExchangePositions = [symExPos];
+          }
+        }
+      } catch (posCheckErr: any) {
         this.state = currentActive.length > 0 ? 'POSITION_OPEN' : 'IDLE';
         this.broadcastStatus();
         this.onOrderDispatched?.({
@@ -917,9 +935,34 @@ export class AutoPilotManager {
           marginUsd: 0,
           leverage,
           atr,
+          errorMessage: `ERR_EXCHANGE_POSITION_CHECK_FAILED: ${posCheckErr?.message || posCheckErr}`,
+        });
+        return;
+      }
+
+      if (
+        sameSymbolActive ||
+        currentActive.length >= this.maxConcurrentPositions ||
+        openExchangePositions.length >= this.maxConcurrentPositions
+      ) {
+        this.state = 'POSITION_OPEN';
+        this.broadcastStatus();
+        const existingSym =
+          sameSymbolActive?.symbol ??
+          currentActive[0]?.symbol ??
+          openExchangePositions[0]?.symbol ??
+          symbol;
+        this.onOrderDispatched?.({
+          symbol,
+          side,
+          action: 'FAILED',
+          price: markPrice,
+          marginUsd: 0,
+          leverage,
+          atr,
           errorMessage: sameSymbolActive
             ? `ERR_POSITION_EXISTS: Active position already open on ${sameSymbolActive.symbol}`
-            : `ERR_MAX_CONCURRENT_POSITIONS: Already at ${currentActive.length}/${this.maxConcurrentPositions} slots`,
+            : `ERR_MAX_CONCURRENT_POSITIONS: Global 1-position limit active (existing: ${existingSym})`,
         });
         return;
       }
@@ -1229,6 +1272,8 @@ export class AutoPilotManager {
           return res.orderId;
         };
 
+        let filledViaIocFallback = false;
+
         if (notionalUsd >= 5000 && this.twapExecutionSlicer) {
           const twapResult = await this.twapExecutionSlicer.execute({
             symbol,
@@ -1266,7 +1311,54 @@ export class AutoPilotManager {
           entryOrderId = chaseResult.orderId || lastPlacedOrderId;
         }
 
-        const feeSavedUsd = Number((notionalUsd * 0.0003).toFixed(4));
+        // [DEF-01 / ARCH-01] Controlled IOC/Taker fallback if chasing times out and compositeScore >= 75
+        if (finalStatus === 'TIMEOUT' && executedQty <= 0 && score >= 75) {
+          try {
+            const freshDepth = await getDepth().catch(() => ({
+              bestBid: markPrice,
+              bestAsk: markPrice,
+            }));
+            const symTickSize = this.chasingExecutionEngine.getTickSize?.(symbol) ?? 0.01;
+            const refBbo =
+              side === 'BUY'
+                ? Math.max(freshDepth.bestAsk, markPrice)
+                : Math.min(freshDepth.bestBid, markPrice);
+            const iocLimitPrice = snapPriceToTick(
+              side === 'BUY' ? refBbo * 1.0010 : refBbo * 0.9990,
+              symTickSize
+            );
+            const slippageFromAnchor =
+              markPrice > 0 ? Math.abs(iocLimitPrice - markPrice) / markPrice : 0;
+
+            if (slippageFromAnchor <= 0.0025 && iocLimitPrice > 0) {
+              const iocRes = await this.broker.openOrder({
+                symbol,
+                side,
+                orderType: 'LIMIT',
+                timeInForce: 'IOC',
+                limitPrice: iocLimitPrice,
+                marginUsd: (targetQty * iocLimitPrice) / leverage,
+                leverage,
+                quantity: targetQty,
+                clientOrderId: `tos_${tradeId}_ioc`,
+              });
+              if (iocRes.executedQty > 0) {
+                executedQty = iocRes.executedQty;
+                effectivePrice = iocRes.avgPrice > 0 ? iocRes.avgPrice : iocLimitPrice;
+                entryOrderId = iocRes.orderId || entryOrderId;
+                finalStatus = 'FILLED';
+                filledViaIocFallback = true;
+              }
+            }
+          } catch (iocErr) {
+            console.warn(`[AutoPilot] IOC fallback failed on ${symbol}:`, iocErr);
+          }
+        }
+
+        const actualNotionalUsd = executedQty > 0 ? executedQty * effectivePrice : notionalUsd;
+        const feeSavedUsd = filledViaIocFallback
+          ? 0
+          : Number((actualNotionalUsd * 0.0003).toFixed(4));
         const chaseDurationMs = Date.now() - startTime;
 
         this.executionChaseLogsRepo.insert({
@@ -1281,12 +1373,13 @@ export class AutoPilotManager {
           created_at: Date.now(),
         });
 
-        const tickSize = this.chasingExecutionEngine.getTickSize?.() ?? 0.01;
+        const tickSize = this.chasingExecutionEngine.getTickSize?.(symbol) ?? 0.01;
         const spreadPennyJumps =
           tickSize > 0
             ? Math.max(0, Math.round(Math.abs(effectivePrice - markPrice) / tickSize))
             : 0;
-        const realizedFeeUsd = Number((notionalUsd * 0.0002).toFixed(4));
+        const entryFeeRate = filledViaIocFallback ? 0.0005 : 0.0002;
+        const realizedFeeUsd = Number((actualNotionalUsd * entryFeeRate).toFixed(4));
         const finalChasingTelemetry: ChasingTelemetrySnapshot = {
           orderId: entryOrderId ?? this.latestChasingState?.orderId ?? tradeId,
           status:
@@ -1334,9 +1427,7 @@ export class AutoPilotManager {
         }
 
         const oppositeSide: TradeSide = side === 'BUY' ? 'SELL' : 'BUY';
-        const bePrice = Number(
-          (side === 'BUY' ? effectivePrice * 1.0015 : effectivePrice * 0.9985).toFixed(4)
-        );
+        const bePrice = computeBreakevenPrice(effectivePrice, side);
 
         const actualMarginUsd =
           executedQty > 0 && effectivePrice > 0
@@ -1419,7 +1510,7 @@ export class AutoPilotManager {
           tp1_algo_id: null,
           tp2_algo_id: null,
           realized_pnl: 0,
-          fees_usd: Number((notionalUsd * 0.0002).toFixed(4)),
+          fees_usd: realizedFeeUsd,
           exit_reason: null,
           opened_at: Date.now(),
           closed_at: null,
@@ -1741,7 +1832,7 @@ export class AutoPilotManager {
         entryPrice: trade.entry_price,
         markPrice,
         side: trade.side,
-        feeBufferPct: 0.0015,
+        feeBufferPct: DEFAULT_BE_BUFFER_PCT,
       });
 
       if (decision === 'MOVE_TO_BREAKEVEN' && trade.is_breakeven === 0) {
@@ -2048,9 +2139,11 @@ export class AutoPilotManager {
       (side === 'BUY' ? Math.max(rawSl, estLiq * 1.005) : Math.min(rawSl, estLiq * 0.995)).toFixed(priceDecimals)
     );
 
-    // Dynamic TP1: pin to nearest liquidation cluster if R:R >= 1.5 and dist >= 0.5%, else fallback to ATR
-    const risk = Math.abs(anchorPrice - stopLoss);
+    // [DEF-03 / ARCH-02] Calibrate TP1 distance to ATR14 (0.8x-1.2x ATR) so partial profit taking triggers realistically.
+    // Pin to a liquidation cluster only if it lies within [0.8x, 1.2x] ATR and clears round-trip fees (>= 0.30%).
     const clusters = this.getConfluenceForSymbol(symbol).liquidationEngine.projectClusters(anchorPrice, 100_000_000);
+    const minTp1Dist = Math.max(0.8 * atr, anchorPrice * 0.003);
+    const maxTp1Dist = Math.max(1.2 * atr, anchorPrice * 0.003);
 
     let clusterTp1: number | null = null;
     if (snapshot?.macroRegime) {
@@ -2061,9 +2154,7 @@ export class AutoPilotManager {
 
         for (const sc of shortClusters) {
           const reward = sc.price - anchorPrice;
-          const distPct = reward / anchorPrice;
-          const rr = risk > 0 ? reward / risk : 0;
-          if (distPct >= 0.005 && rr >= 1.5) {
+          if (reward >= minTp1Dist && reward <= maxTp1Dist) {
             clusterTp1 = sc.price;
             break;
           }
@@ -2075,9 +2166,7 @@ export class AutoPilotManager {
 
         for (const lc of longClusters) {
           const reward = anchorPrice - lc.price;
-          const distPct = reward / anchorPrice;
-          const rr = risk > 0 ? reward / risk : 0;
-          if (distPct >= 0.005 && rr >= 1.5) {
+          if (reward >= minTp1Dist && reward <= maxTp1Dist) {
             clusterTp1 = lc.price;
             break;
           }
@@ -2089,18 +2178,14 @@ export class AutoPilotManager {
     if (clusterTp1 !== null) {
       tp1 = Number(clusterTp1.toFixed(priceDecimals));
     } else {
-      const fallbackReward = snapshot?.macroRegime
-        ? Math.max(2.0 * atr, risk * 1.5)
-        : anchorPrice * 0.025;
+      const atrTp1Reward = Math.max(1.0 * atr, anchorPrice * 0.003);
       tp1 = Number(
-        (side === 'BUY' ? anchorPrice + fallbackReward : anchorPrice - fallbackReward).toFixed(priceDecimals)
+        (side === 'BUY' ? anchorPrice + atrTp1Reward : anchorPrice - atrTp1Reward).toFixed(priceDecimals)
       );
     }
 
-    // Dynamic TP2: +4.0x ATR or +5.0% baseline
-    const tp2Reward = snapshot?.macroRegime
-      ? Math.max(4.0 * atr, Math.abs(tp1 - anchorPrice) * 2)
-      : anchorPrice * 0.050;
+    // Dynamic TP2: +2.5x ATR or 2x TP1 distance
+    const tp2Reward = Math.max(2.5 * atr, Math.abs(tp1 - anchorPrice) * 2);
     const tp2 = Number(
       (side === 'BUY' ? anchorPrice + tp2Reward : anchorPrice - tp2Reward).toFixed(priceDecimals)
     );

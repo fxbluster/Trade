@@ -53,10 +53,27 @@ export class FundingArbitrageFactor implements IAlphaFactor {
 
   computeFactor(context: FactorEvaluationContext): FactorOutput {
     const currentPrice = context.currentPrice;
-    const fundingRate =
-      (context as any).fundingRate ??
-      this.latestFundingRate ??
-      0; // Neutral fallback
+    const rawFunding = (context as any).fundingRate ?? this.latestFundingRate;
+    const spot = (context as any).spotPrice ?? this.spotPrice;
+    const hasFundingFeed = typeof rawFunding === 'number' && Number.isFinite(rawFunding);
+    const hasSpotFeed = typeof spot === 'number' && Number.isFinite(spot) && spot > 0;
+
+    if (!hasFundingFeed && !hasSpotFeed) {
+      return {
+        factorId: FACTOR_ID,
+        bias: 'NEUTRAL',
+        rawAlpha: 0,
+        confidence: 0,
+        uncertainty: 1,
+        halfLifeMs: 4 * 60 * 60_000,
+        metadata: {
+          reason: 'NO_FUNDING_DATA',
+          deadFactor: true,
+        },
+      };
+    }
+
+    const fundingRate = hasFundingFeed ? rawFunding : 0;
 
     // 1. Evaluate Funding Rate Crowding
     let fundingSignal = 0;
@@ -79,8 +96,7 @@ export class FundingArbitrageFactor implements IAlphaFactor {
 
     // 2. Evaluate Spot-Perp Basis Spread (if spot price available)
     let basisSignal = 0;
-    const spot = (context as any).spotPrice ?? this.spotPrice;
-    if (spot && spot > 0) {
+    if (hasSpotFeed) {
       const basisSpread = (currentPrice - spot) / spot;
       // If Perp is at a wide premium to spot while funding is positive, basis compression is imminent
       if (basisSpread > 0.002) {
@@ -97,7 +113,8 @@ export class FundingArbitrageFactor implements IAlphaFactor {
     }
     rawAlpha = Math.max(-1.0, Math.min(1.0, rawAlpha));
 
-    const confidence = Math.min(1.0, Math.abs(rawAlpha) * 0.9 + 0.1);
+    const isDead = Math.abs(rawAlpha) <= 1e-6;
+    const confidence = isDead ? 0 : Math.min(1.0, Math.abs(rawAlpha) * 0.9 + 0.1);
     const bias = rawAlpha > 0.1 ? 'BULLISH' : rawAlpha < -0.1 ? 'BEARISH' : 'NEUTRAL';
 
     return {
@@ -109,10 +126,11 @@ export class FundingArbitrageFactor implements IAlphaFactor {
       halfLifeMs: 4 * 60 * 60_000, // 4 hours for funding regimes
       metadata: {
         fundingRate,
-        spotPrice: spot ?? null,
-        basisSpread: spot && spot > 0 ? (currentPrice - spot) / spot : null,
+        spotPrice: hasSpotFeed ? spot : null,
+        basisSpread: hasSpotFeed ? (currentPrice - spot) / spot : null,
         fundingSignal,
         basisSignal,
+        deadFactor: isDead,
       },
     };
   }

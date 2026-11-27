@@ -7,17 +7,35 @@
 
 import type { KlineCandle, NoiseBandSnapshot } from '@tradeos/shared';
 
-export const DEFAULT_NOISE_BAND_MULTIPLIER = 0.5;
+const parsedEnvMult = Number(process.env.NOISE_BAND_MULTIPLIER);
+export const DEFAULT_NOISE_BAND_MULTIPLIER =
+  Number.isFinite(parsedEnvMult) && parsedEnvMult > 0 && parsedEnvMult <= 2.0
+    ? parsedEnvMult
+    : 0.65;
 
 export class NoiseBandEngine {
   private hourlyMtr: Map<number, number> = new Map();
   private defaultThreshold: number = 0;
-  private readonly multiplier: number;
+  private multiplier: number;
 
   constructor(candles?: KlineCandle[], multiplier: number = DEFAULT_NOISE_BAND_MULTIPLIER) {
-    this.multiplier = multiplier;
+    this.multiplier =
+      Number.isFinite(multiplier) && multiplier > 0 ? multiplier : DEFAULT_NOISE_BAND_MULTIPLIER;
     if (candles && candles.length > 0) {
       this.loadKlines(candles);
+    }
+  }
+
+  public getMultiplier(): number {
+    return this.multiplier;
+  }
+
+  public setMultiplier(multiplier: number): void {
+    if (!Number.isFinite(multiplier) || multiplier <= 0 || multiplier > 2.0) return;
+    const prev = this.multiplier;
+    this.multiplier = multiplier;
+    if (prev > 0 && this.defaultThreshold > 0) {
+      this.defaultThreshold = (this.defaultThreshold / prev) * multiplier;
     }
   }
 
@@ -72,10 +90,10 @@ export class NoiseBandEngine {
   public getMeanTrueRange(hourOfDay: number): number {
     const mtr = this.hourlyMtr.get(hourOfDay);
     if (mtr !== undefined && mtr > 0) {
-      return Number(mtr.toFixed(4));
+      return Number(mtr.toFixed(mtr < 1 ? 6 : 4));
     }
     const fallback = this.multiplier > 0 ? this.defaultThreshold / this.multiplier : 0;
-    return Number(fallback.toFixed(4));
+    return Number(fallback.toFixed(fallback < 1 ? 6 : 4));
   }
 
   /**
@@ -85,9 +103,10 @@ export class NoiseBandEngine {
   public getThreshold(hourOfDay: number): number {
     const mtr = this.hourlyMtr.get(hourOfDay);
     if (mtr !== undefined && mtr > 0) {
-      return Number((mtr * this.multiplier).toFixed(4));
+      const thresh = mtr * this.multiplier;
+      return Number(thresh.toFixed(thresh < 1 ? 6 : 4));
     }
-    return Number(this.defaultThreshold.toFixed(4));
+    return Number(this.defaultThreshold.toFixed(this.defaultThreshold < 1 ? 6 : 4));
   }
 
   /**

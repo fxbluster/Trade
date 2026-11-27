@@ -29,7 +29,7 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
   it('calculates hourly Mean True Range (MTR) and sets threshold to MTR * 0.5', () => {
     // Generate 1,920 candles (20 days * 96 candles/day) with constant range = 2.0
     const candles = generateMockCandles(1920, 100, 2.0);
-    const engine = new NoiseBandEngine(candles);
+    const engine = new NoiseBandEngine(candles, 0.5);
 
     // Each candle has TR = high - low = 2.0
     // Expected threshold = 2.0 * 0.5 = 1.00
@@ -132,7 +132,7 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
 
   it('produces a comprehensive NoiseBandSnapshot telemetry payload', () => {
     const candles = generateMockCandles(96, 100, 2.0);
-    const engine = new NoiseBandEngine(candles);
+    const engine = new NoiseBandEngine(candles, 0.5);
 
     const candle: KlineCandle = {
       time: 1795132800, // 00:00 UTC
@@ -234,7 +234,7 @@ describe('NoiseBandEngine — 20-Day 15m Volatility Noise Band Filter', () => {
   it('[DEF-02 / ARCH-14] never bypasses NoiseBand in dead chop when effectiveRange < threshold even with small atr14', () => {
     // SOL-like MTR = 0.3934 -> threshold = 0.1967
     const candles = generateMockCandles(96, 100, 0.3934);
-    const engine = new NoiseBandEngine(candles);
+    const engine = new NoiseBandEngine(candles, 0.5);
 
     // Dead chop 15m candle: range = 0.15 (< 0.1967)
     const chopCandle: KlineCandle = {

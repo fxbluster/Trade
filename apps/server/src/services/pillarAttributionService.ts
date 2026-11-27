@@ -181,11 +181,20 @@ export class PillarAttributionService {
 
     const activeVotesCount = buyCount + sellCount;
 
-    // Check candle volatility expansion
+    // Guard ATR for low-price assets so percentage/bps scaling never collapses to 0
+    const effectiveAtr =
+      Number.isFinite(atr) && atr > 0
+        ? atr
+        : markPrice > 0
+          ? markPrice * 0.0015
+          : 0;
+
+    // Check candle volatility expansion using percentage / bps normalization
     let volatilityTrigger = false;
-    if (currentCandle && atr > 0) {
-      const range = currentCandle.high - currentCandle.low;
-      if (range >= 1.5 * atr) {
+    if (currentCandle && effectiveAtr > 0 && markPrice > 0) {
+      const rangePct = (currentCandle.high - currentCandle.low) / markPrice;
+      const atrPct = effectiveAtr / markPrice;
+      if (rangePct >= 1.5 * atrPct) {
         const lastCandleTime = this.lastVolatilityCandleTime.get(sym);
         if (lastCandleTime !== currentCandle.time) {
           volatilityTrigger = true;
@@ -283,7 +292,7 @@ export class PillarAttributionService {
       symbol: sym,
       trigger_type: triggerType,
       mark_price: markPrice,
-      atr_14: atr,
+      atr_14: effectiveAtr,
       composite_score: confluenceSnapshot.compositeScore,
       consensus_side: consensusSide,
       active_pillars_count: activeVotesCount,
@@ -362,12 +371,16 @@ export class PillarAttributionService {
       if (!traj) {
         const existingEvals = this.repo.getEvaluationsForEvent(event.id);
         const settledSet = new Set<TrajectoryHorizon>(existingEvals.map((e) => e.horizon));
-        const atrPct = event.mark_price > 0 ? (event.atr_14 / event.mark_price) * 100 : 0;
+        const rawAtrPct =
+          event.mark_price > 0 && event.atr_14 > 0
+            ? (event.atr_14 / event.mark_price) * 100
+            : 0;
+        const atrPct = rawAtrPct > 0 ? rawAtrPct : 0.15; // 15 bps fallback if historical atr_14 was 0
         traj = {
           eventId: event.id,
           symbol: sym,
           entryPrice: event.mark_price,
-          atr14: event.atr_14,
+          atr14: event.atr_14 > 0 ? event.atr_14 : event.mark_price * 0.0015,
           atrPct,
           timestamp: event.timestamp,
           side: event.consensus_side,
@@ -452,7 +465,8 @@ export class PillarAttributionService {
     candle: KlineCandle,
     settleTimestamp: number
   ): void {
-    const priceChangeAbs = Number(Math.abs(candle.close - traj.entryPrice).toFixed(4));
+    const rawAbsDiff = Math.abs(candle.close - traj.entryPrice);
+    const priceChangeAbs = Number(rawAbsDiff.toFixed(rawAbsDiff < 0.01 ? 6 : 4));
     const priceChangePct = Number(
       (((candle.close - traj.entryPrice) / traj.entryPrice) * 100).toFixed(4)
     );

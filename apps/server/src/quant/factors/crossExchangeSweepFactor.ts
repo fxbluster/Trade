@@ -117,7 +117,10 @@ export class CrossExchangeSweepFactor implements IAlphaFactor {
     }
     rawAlpha = Math.max(-1.0, Math.min(1.0, rawAlpha));
 
-    const confidence = Math.min(1.0, Math.abs(rawAlpha) * 0.85 + (validVenueCount > 0 ? 0.15 : 0.05));
+    const isDead = validVenueCount === 0 && Math.abs(rawAlpha) <= 1e-6;
+    const confidence = isDead
+      ? 0
+      : Math.min(1.0, Math.abs(rawAlpha) * 0.85 + (validVenueCount > 0 ? 0.15 : 0.05));
     const bias = rawAlpha > 0.1 ? 'BULLISH' : rawAlpha < -0.1 ? 'BEARISH' : 'NEUTRAL';
 
     return {
@@ -131,6 +134,7 @@ export class CrossExchangeSweepFactor implements IAlphaFactor {
         validVenueCount,
         venueDislocationSignal,
         exhaustionSignal,
+        deadFactor: isDead,
       },
     };
   }

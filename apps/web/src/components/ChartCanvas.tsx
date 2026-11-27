@@ -196,7 +196,7 @@ export const ChartCanvas: React.FC<ChartCanvasProps> = ({ className = '' }) => {
       borderDownColor: '#f6465d',
       wickUpColor: '#0ecb81',
       wickDownColor: '#f6465d',
-      autoscaleInfoProvider: (original) => {
+      autoscaleInfoProvider: (original: () => { priceRange?: { minValue: number; maxValue: number } } | null) => {
         const res = original();
         const pos = activePosRef.current;
         const curSym = useMarketStore.getState().symbol;

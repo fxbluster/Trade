@@ -20,6 +20,8 @@ export interface ChasingEngineOptions {
   maxAmendPerSec?: number;
   /** Tick size for penny-jumping (default 0.01) */
   tickSize?: number;
+  /** Passive offset in ticks behind BBO on GTX Post-Only orders to avoid crossing spread (default 2) */
+  passiveOffsetTicks?: number;
 }
 
 export interface DepthSnapshot {
@@ -84,6 +86,7 @@ export class ChasingExecutionEngine {
   private readonly maxDeviationPct: number;
   private readonly tickSize: number;
   private readonly hasExplicitTickSize: boolean;
+  private readonly passiveOffsetTicks: number;
   private readonly bucket: TokenBucket;
 
   private state: ChasingOrderState | null = null;
@@ -99,6 +102,7 @@ export class ChasingExecutionEngine {
     this.maxDeviationPct = options.maxDeviationPct ?? 0.002;
     this.hasExplicitTickSize = options.tickSize !== undefined;
     this.tickSize = options.tickSize ?? 0.01;
+    this.passiveOffsetTicks = Math.max(0, Math.round(options.passiveOffsetTicks ?? 2));
     const ratePerSec = options.maxAmendPerSec ?? 5;
     this.bucket = new TokenBucket(ratePerSec, ratePerSec);
   }
@@ -159,28 +163,22 @@ export class ChasingExecutionEngine {
   }
 
   /**
-   * Compute penny-jump target price for a BUY order, snapped cleanly to tickSize.
-   * BUY: if (bestAsk - bestBid > tick) min(bestBid + tick, bestAsk - tick); else bestBid.
+   * Compute passive GTX Post-Only target price for a BUY order, snapped cleanly to tickSize.
+   * Places a 1-2 tick passive offset behind bestBid so orders don't immediately cross the BBO.
    */
   computeTargetBuy(bestBid: number, bestAsk: number, tickSize: number = this.tickSize): number {
-    const spread = bestAsk - bestBid;
-    const raw =
-      spread > tickSize
-        ? Math.min(bestBid + tickSize, bestAsk - tickSize)
-        : bestBid;
+    const offset = this.passiveOffsetTicks * tickSize;
+    const raw = Math.max(tickSize, Math.min(bestBid - offset, bestAsk - offset));
     return snapPriceToTick(raw, tickSize);
   }
 
   /**
-   * Compute penny-jump target price for a SELL order, snapped cleanly to tickSize.
-   * SELL: if (bestAsk - bestBid > tick) max(bestAsk - tick, bestBid + tick); else bestAsk.
+   * Compute passive GTX Post-Only target price for a SELL order, snapped cleanly to tickSize.
+   * Places a 1-2 tick passive offset behind bestAsk so orders don't immediately cross the BBO.
    */
   computeTargetSell(bestBid: number, bestAsk: number, tickSize: number = this.tickSize): number {
-    const spread = bestAsk - bestBid;
-    const raw =
-      spread > tickSize
-        ? Math.max(bestAsk - tickSize, bestBid + tickSize)
-        : bestAsk;
+    const offset = this.passiveOffsetTicks * tickSize;
+    const raw = Math.max(bestAsk + offset, bestBid + offset);
     return snapPriceToTick(raw, tickSize);
   }
 
@@ -245,8 +243,9 @@ export class ChasingExecutionEngine {
       orderId = await params.placeOrder(initialPrice);
     } catch (err: any) {
       if (err instanceof BinanceApiError && err.code === -5022) {
+        const backoff = Math.max(2, this.passiveOffsetTicks) * tickSize;
         const backedOffPrice = snapPriceToTick(
-          side === 'BUY' ? initialPrice - tickSize : initialPrice + tickSize,
+          side === 'BUY' ? Math.max(tickSize, initialPrice - backoff) : initialPrice + backoff,
           tickSize
         );
         await sleep(250);
@@ -384,10 +383,11 @@ export class ChasingExecutionEngine {
         // After amendment, re-emit as CHASING
         this.setState({ status: 'CHASING' });
       } catch (err: any) {
-        // -5022: Post-Only would trigger as taker → back off 1 tick
+        // -5022: Post-Only would trigger as taker → back off 2+ ticks
         if (err instanceof BinanceApiError && err.code === -5022) {
+          const backoff = Math.max(2, this.passiveOffsetTicks) * tickSize;
           const backedOffPrice = snapPriceToTick(
-            side === 'BUY' ? currentPrice - tickSize : currentPrice + tickSize,
+            side === 'BUY' ? Math.max(tickSize, currentPrice - backoff) : currentPrice + backoff,
             tickSize
           );
 
